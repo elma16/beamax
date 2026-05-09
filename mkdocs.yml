@@ -1,0 +1,110 @@
+site_name: beamax
+site_description: Multiscale Gaussian Beams in JAX — API documentation.
+site_author: Elliott Macneil
+
+repo_url: https://github.com/elma16/beamax
+repo_name: elma16/beamax
+
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.annotation
+    - content.code.copy
+  language: en
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/toggle-switch-off-outline
+        name: Switch to dark mode
+      primary: teal
+      accent: purple
+    - scheme: slate
+      toggle:
+        icon: material/toggle-switch
+        name: Switch to light mode
+      primary: teal
+      accent: lime
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: [!relative $config_dir]
+      check_paths: true
+  - admonition
+  - pymdownx.arithmatex:
+      generic: true
+  - footnotes
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.mark
+  - attr_list
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: numpy
+            show_root_heading: true
+            show_object_full_path: false
+            show_signature_annotations: true
+            merge_init_into_class: true
+            show_source: false
+            members_order: source
+            inherited_members: true
+            filters:
+              - "!^_"          # hide private
+              - "^__all__$"    # allow explicit exports
+            heading_level: 4
+
+nav:
+  - index.md
+  - Guides:
+      - getting-started.md
+      - troubleshooting.md
+  - Examples:
+      - examples/index.md
+      - Frequency decomposition: examples/decomp.md
+      - Forward propagation: examples/forward.md
+      - Time reversal: examples/time-reversal.md
+      - Adjoint reconstruction: examples/adjoint.md
+      - Inverse comparisons: examples/comparison.md
+      - Benchmarks: examples/benchmarks.md
+  - Basic API:
+      - decomposition: api/decomposition.md
+      - geometry: api/geometry.md
+      - transforms: api/transforms.md
+      - plotter: api/plotter.md
+      - utils: api/utils.md
+      - gb:
+          - api/gb/core.md
+          - api/gb/gb_utils.md
+          - api/gb/gb_solvers.md
+      - solvers:
+          - api/solvers/solverbase.md
+          - api/solvers/hybrid_solver.md
+          - api/solvers/hybrid_solver_utils.md
+          - api/solvers/kwave_solver.md
+          - api/solvers/fno_neurops.md
+          - api/solvers/fno_pdequinox.md
+          - msgb_solver:
+            - api/solvers/msgb_solvers/forward_solver_utils.md
+            - api/solvers/msgb_solvers/msgb_solver.md
+            - api/solvers/msgb_solvers/tr_solver_utils.md
+
+watch:
+  - src/beamax

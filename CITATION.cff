@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Beamax: Multiscale Gaussian Beams in JAX"
+type: software
+license: MIT
+url: "https://github.com/elma16/beamax"
+repository-code: "https://github.com/elma16/beamax"
+abstract: "JAX implementation of fast multiscale Gaussian wavepacket transforms and multiscale Gaussian beams for acoustic forward and reconstruction workflows."
+keywords:
+  - gaussian beams
+  - wave equation
+  - wave-packet transform
+  - photoacoustic tomography
+  - jax
+authors:
+  - family-names: Macneil
+    given-names: Elliott
+    affiliation: University College London
+    email: ucabem1@ucl.ac.uk
+  - family-names: Cox
+    given-names: Ben
+    affiliation: University College London
+  - family-names: Betcke
+    given-names: Marta
+    affiliation: University College London
+references:
+  - type: article
+    title: "Fast Multiscale Gaussian Wavepacket Transforms and Multiscale Gaussian Beams for the Wave Equation"
+    authors:
+      - family-names: Qian
+        given-names: Jianliang
+      - family-names: Ying
+        given-names: Lexing
+    year: 2010
+    doi: "10.1137/100787313"
+    url: "https://doi.org/10.1137/100787313"

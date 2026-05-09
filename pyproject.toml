@@ -1,0 +1,103 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beamax"
+description = "Multiscale Gaussian Beams in JAX"
+version = "0.1.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+authors = [
+  { name = "Elliott Macneil", email = "ucabem1@ucl.ac.uk" },
+  { name = "Ben Cox" },
+  { name = "Marta Betcke" }
+]
+keywords = [
+  "gaussian-beams",
+  "wave-equation",
+  "photoacoustic-tomography",
+  "jax",
+  "differentiable-programming",
+  "multiscale",
+  "wave-packet-transform",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Mathematics",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+dependencies = [
+  "jax>=0.9,<1.0",
+  "numpy>=1.26",
+  "equinox>=0.13",
+  "diffrax>=0.7",
+  "einops>=0.8",
+  "optimistix>=0.0.9",
+  "scipy>=1.11",
+  "h5py>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+  "pre-commit",
+  "mkdocs",
+  "mkdocs-material",
+  "mkdocstrings-python",
+]
+
+viz-mpl = ["matplotlib>=3.7"]
+viz = [
+  "matplotlib>=3.7",
+  "pyvista",
+]
+
+kwave = ["k-wave-python>=0.6.1"]
+
+fno = ["neuraloperator", "torch", "pdequinox"]
+
+all = ["beamax[dev,viz,kwave,fno]"]
+
+[project.urls]
+Homepage = "https://github.com/elma16/beamax"
+Documentation = "https://elma16.github.io/beamax/"
+Issues = "https://github.com/elma16/beamax/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+beamax = ["_assets/*.mplstyle", "py.typed"]
+
+[tool.ruff]
+extend-include = ["*.ipynb"]
+extend-exclude = ["examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E402"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+filterwarnings = "ignore"
+
+[tool.coverage.run]
+source = ["src/beamax"]
+branch = true
+
+[tool.coverage.report]
+omit = [
+  "src/beamax/solvers/solverbase.py",
+]

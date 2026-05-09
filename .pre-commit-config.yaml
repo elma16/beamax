@@ -1,0 +1,56 @@
+default_install_hook_types:
+  - pre-commit
+  - pre-push
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.2.0
+    hooks:
+      - id: ruff
+        name: ruff (autofix changed files)
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi, jupyter]
+        stages: [pre-commit]
+      - id: ruff-format
+        stages: [pre-commit]
+        types_or: [python, pyi, jupyter]
+      - id: ruff
+        name: ruff check (full src/tests)
+        args: [src, tests]
+        pass_filenames: false
+        stages: [pre-push]
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.6.1
+    hooks:
+      - id: nbstripout
+        stages: [pre-commit]
+
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest (fast subset)
+        entry: >-
+          pytest -q
+          tests/test_decomposition.py
+          tests/test_frames.py
+          tests/test_ms_filters.py
+          tests/test_geometry.py
+          tests/test_utils.py
+          tests/test_transforms.py
+          tests/solvers/test_fwd_solver.py::TestMSGBSolverFrameEquivalence::test_frame_reconstruction_matches_gb_solver
+          tests/solvers/test_fwd_solver.py::test_hybrid_downsample
+          tests/solvers/test_tr_solver.py::test_msgb_forward_then_time_reversal_1d
+          tests/solvers/test_kwave_solver.py::test_kwave_matches_matlab_reference
+          tests/solvers/test_kwave_solver.py::test_kwave_adjoint_dot_product
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: pytest-full
+        name: pytest (full)
+        entry: pytest -q
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

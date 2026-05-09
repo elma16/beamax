@@ -1,0 +1,45 @@
+# AI assistant local settings
+.claude/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.iml
+*.DS_Store
+
+# Build and cache directories
+build/
+dist/
+site/
+*.egg-info/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+coverage.json
+*.coverage
+
+# Local output directories
+plots/
+plots_focusing/
+outputs/
+profiler/
+data/
+wandb/
+traces/
+trace/
+cache/
+checkpoints/
+
+# Thesis-figure local caches (MNIST + symlinks to FNO checkpoints)
+examples/thesis/5fwd/_data/
+examples/thesis/5fwd/_fno_cache/
+examples/thesis/**/_fno_smoketest.py
+
+# Python runtime
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/

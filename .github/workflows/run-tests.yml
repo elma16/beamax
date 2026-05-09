@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  run-tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+        exclude:
+          - os: macos-latest
+            python-version: "3.11"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,kwave,viz]" pytest-cov
+
+      - name: Lint with ruff
+        run: ruff check src tests
+
+      - name: Test with pytest
+        run: pytest --cov=src/beamax --cov-report=xml --cov-report=term -q
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Run example smoke tests
+        env:
+          MPLBACKEND: Agg
+          MPLCONFIGDIR: /tmp/mplconfig
+        run: |
+          mkdir -p "$MPLCONFIGDIR"
+          python examples/forward/forward-1d-v0.py
+          python examples/decomp/lp_hp_filter.py
+          python examples/reconstruction/time-reversal/TR-1d.py
+
+  fno-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install with fno extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,fno]"
+      - name: Run FNO smoke tests
+        run: pytest -q tests/solvers/test_fno_solver.py

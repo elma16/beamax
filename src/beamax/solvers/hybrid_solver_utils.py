@@ -1,0 +1,548 @@
+import logging
+import math
+from jax import vmap
+import jax.numpy as jnp
+from jax.lax import fori_loop
+from typing import Tuple, Optional
+from scipy.ndimage import zoom
+from einops import rearrange
+import warnings
+
+from beamax import utils
+from beamax.decomposition import DyadicDecomposition
+from beamax.transforms import single_filter_idx, MSWPT
+from beamax.geometry import Domain
+
+logger = logging.getLogger(__name__)
+
+
+def gh_lowpass_filter(
+    p0: jnp.ndarray,
+    input_type: str,
+    wpt: MSWPT,
+    boxes_include: jnp.ndarray,
+    windowing: str = "rectangular",
+    gh: Optional[jnp.ndarray] = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Split into LF/HF via `g,h` frame filters in Fourier domain.
+
+    Parameters
+    ----------
+    p0 : jnp.ndarray
+    input_type : {"spatial","fourier"}
+    wpt : MSWPT
+    boxes_include : jnp.ndarray
+        Indices of low-frequency boxes to include.
+    windowing : str
+    gh : jnp.ndarray, optional
+        Precomputed LF-projection filter from :func:`compute_gh_filter`.
+        Pass this when the same ``(wpt, boxes_include, windowing)`` is
+        reused across many inputs to skip the (data-independent) filter
+        computation.
+
+    Returns
+    -------
+    (p0_HF_ft, p0_LF_ft) : Tuple[jnp.ndarray, jnp.ndarray]
+        Fourier-domain HF and LF components.
+    """
+    # Work in Fourier domain
+    p0_ft = utils.convert_space(p0, input_type, "fourier")
+
+    if gh is None:
+        gh = compute_gh_filter(wpt, boxes_include, windowing)
+
+    # Low- and high-frequency parts in Fourier domain
+    p0_LF_ft = p0_ft * gh
+    p0_HF_ft = p0_ft - p0_LF_ft
+
+    return p0_HF_ft, p0_LF_ft
+
+
+def compute_gh_filter(
+    wpt: MSWPT,
+    boxes_include: jnp.ndarray,
+    windowing: str = "rectangular",
+) -> jnp.ndarray:
+    """
+    Compute the LF-projection filter ``gh = (Σ_{b∈LF} g_b^2) / Σ_b g_b^2``.
+
+    This is the data-independent piece of :func:`gh_lowpass_filter` and is
+    therefore cacheable across calls that share ``(wpt, boxes_include,
+    windowing)``.
+
+    Implementation
+    --------------
+    Uses ``lax.fori_loop`` so that only one ``(*N,)``-shape filter is
+    materialised at a time, mirroring the pattern used by
+    :meth:`MSWPT.sum_gsquare`. Avoids both the per-iter eager-trace overhead
+    of a Python ``for`` loop and the ``(num_boxes, *N)`` peak memory of a
+    pure ``vmap``.
+
+    Parameters
+    ----------
+    wpt : MSWPT
+    boxes_include : jnp.ndarray of int32
+        LF box indices.
+    windowing : str
+
+    Returns
+    -------
+    jnp.ndarray, shape (*N,), real dtype
+    """
+    boxes_include = jnp.asarray(boxes_include, dtype=jnp.int32)
+    sum_gsq = wpt.sum_gsquare
+
+    def body(i, gh):
+        idx = boxes_include[i]
+        g_b = single_filter_idx(
+            idx,
+            wpt.dyadic_decomp.fourier_meshgrid,
+            wpt.dyadic_decomp,
+            wpt.redundancy,
+            windowing,
+        )
+        return gh + (g_b * g_b) / sum_gsq
+
+    gh0 = jnp.zeros_like(sum_gsq)
+    return fori_loop(0, boxes_include.shape[0], body, gh0)
+
+
+def get_indices_between_two_opposing_corners(
+    centers: jnp.ndarray, corner1_idx: int, corner2_idx: int
+) -> jnp.ndarray:
+    """
+    Get the indices in the box defined by the two corners.
+
+    Args:
+        centers: The centers of the boxes.
+        corner1_idx: The index of the first corner.
+        corner2_idx: The index of the second corner.
+
+    Returns:
+        The indices in the box.
+    """
+    corner1 = centers[corner1_idx]
+    corner2 = centers[corner2_idx]
+
+    if jnp.all(corner1 == corner2):
+        raise ValueError("corner1 and corner2 must differ to define a box.")
+
+    mins = jnp.minimum(corner1, corner2)
+    maxs = jnp.maximum(corner1, corner2)
+
+    mask = jnp.all((centers >= mins) & (centers <= maxs), axis=1)
+
+    indices_in_box = jnp.where(mask)[0]
+
+    return indices_in_box
+
+
+def get_indices_with_norm_less_than(
+    centers: jnp.ndarray, norm: float, inclusive: bool = True
+) -> jnp.ndarray:
+    """
+    Get the indices of the boxes with a norm less than (or equal to) the given value.
+
+    Args:
+        centers: The centers of the boxes.
+        norm: The norm to compare against.
+        inclusive: If True, use <= (matches box_corners behavior).
+                   If False, use < (original behavior).
+
+    Returns:
+        The indices of the boxes with a norm less than the given value.
+    """
+    norms = jnp.linalg.norm(centers, axis=1, ord=jnp.inf)
+    if inclusive:
+        indices = jnp.where(norms <= norm)[0]
+    else:
+        indices = jnp.where(norms < norm)[0]
+    return indices
+
+
+def find_bounding_corner_indices(
+    centers: jnp.ndarray, idx_box: jnp.ndarray
+) -> Tuple[int, int]:
+    """
+    Find actual corner indices from a set of selected frequency indices.
+
+    Given a set of selected center indices, finds two opposing corners
+    that exist in the centers array (rather than computing component-wise
+    min/max which may not correspond to actual centers).
+
+    Args:
+        centers: All center coordinates, shape (num_centers, ndim).
+        idx_box: Indices of selected centers.
+
+    Returns:
+        (corner1_idx, corner2_idx): Indices into the centers array
+        representing two opposing corners of the bounding box.
+    """
+    if idx_box.size == 0:
+        raise ValueError("Cannot find corners from empty index set")
+
+    if idx_box.size == 1:
+        # Single point - return same index for both corners
+        # (caller should handle this edge case)
+        return int(idx_box[0]), int(idx_box[0])
+
+    selected_centers = centers[idx_box]
+
+    # Compute component-wise min and max of selected centers
+    comp_min = jnp.min(selected_centers, axis=0)
+    comp_max = jnp.max(selected_centers, axis=0)
+
+    # Find the selected center closest to comp_min (L2 distance)
+    dist_to_min = jnp.linalg.norm(selected_centers - comp_min, axis=1)
+    corner1_local = jnp.argmin(dist_to_min)
+    corner1_idx = idx_box[corner1_local]
+
+    # Find the selected center closest to comp_max (L2 distance)
+    dist_to_max = jnp.linalg.norm(selected_centers - comp_max, axis=1)
+    corner2_local = jnp.argmin(dist_to_max)
+    corner2_idx = idx_box[corner2_local]
+
+    # If both corners ended up the same (e.g., 1D case), pick the furthest point
+    if corner1_idx == corner2_idx:
+        # Find the point furthest from corner1
+        dist_from_corner1 = jnp.linalg.norm(
+            selected_centers - centers[corner1_idx], axis=1
+        )
+        corner2_local = jnp.argmax(dist_from_corner1)
+        corner2_idx = idx_box[corner2_local]
+
+    return int(corner1_idx), int(corner2_idx)
+
+
+def are_opposing(corner1: int, corner2: int) -> bool:
+    """
+    Check two corners are opposing.
+
+    Args:
+        corner1: The first corner.
+        corner2: The second corner.
+
+    Returns:
+        Whether the corners are opposing.
+    """
+    return jnp.any(corner1 != corner2)
+
+
+def get_bounds(
+    dyadic_decomp: DyadicDecomposition, domain: Domain, corner1: int, corner2: int
+) -> jnp.ndarray:
+    """
+    Get the bounds of the filter banks required, using the opposite corners of the box.
+
+    Args:
+        dyadic_decomp: The dyadic decomposition.
+        domain: The domain.
+        corner1: The first corner.
+        corner2: The second corner.
+
+    Returns:
+        The bounds of the filter banks.
+    """
+    box_corners = jnp.array([corner1, corner2])
+
+    def box_bounds(box_idx):
+        level = utils.find_level(dyadic_decomp, box_idx)
+        box_length = dyadic_decomp.box_lengths[level]
+        center = dyadic_decomp.centres_ndim[box_idx]
+        bounds_min = center - box_length
+        bounds_max = center + box_length - 1
+        return bounds_min, bounds_max
+
+    bounds_min, bounds_max = vmap(box_bounds)(box_corners)
+
+    global_bounds_min = jnp.min(bounds_min, axis=0)
+    global_bounds_max = jnp.max(bounds_max, axis=0)
+    bounds_per_dim = jnp.stack((global_bounds_min, global_bounds_max + 1), axis=-1)  # ?
+
+    nn = jnp.array(domain.N)
+    nn = rearrange(nn, "d -> d 1")
+    bounds_coords = bounds_per_dim + nn // 2
+    return bounds_coords
+
+
+def closest_power_of_two(size: int, max_size: int) -> int:
+    """
+    Returns the closest power of two to the given size.
+
+    Args:
+        size: The size.
+        max_size: The maximum size.
+
+    Returns:
+        The closest power of two.
+    """
+
+    power_of_two = 2 ** jnp.ceil(jnp.log2(size)).astype(jnp.int32)
+    return jnp.minimum(power_of_two, max_size)
+
+
+def downsample_p0(
+    p0_LF: jnp.ndarray, bd: jnp.ndarray, use_power_of_two: bool = False
+) -> jnp.ndarray:
+    """
+    Downsample p0 after applying the low pass filter to it.
+
+    Args:
+        p0_LF: The low pass filtered p0.
+        bd: The bounds of the box.
+        use_power_of_two: Whether to use the closest power of two.
+
+    Returns:
+        The downsampled p0.
+    """
+    nonzero_size = jnp.min(jnp.array([int(stop - start) for start, stop in bd]))
+
+    if use_power_of_two:
+        slice_size = closest_power_of_two(nonzero_size, jnp.min(jnp.array(p0_LF.shape)))
+    else:
+        slice_size = nonzero_size
+
+    starts = jnp.maximum(0, (jnp.array(p0_LF.shape) - slice_size) // 2)
+    stops = starts + slice_size
+
+    slices = tuple(slice(int(start), int(stop)) for start, stop in zip(starts, stops))
+
+    return p0_LF[slices]
+
+
+def downsample_domain(domain: Domain, p0_LF_downsampled: jnp.ndarray) -> Domain:
+    """
+    Downsample the domain after downsampling the p0.
+
+    Args:
+        domain: The domain.
+        p0_LF_downsampled: The downsampled p0.
+
+    Returns:
+        The downsampled domain.
+
+    N.B: The domain is downsampled to match the downsampled p0.
+    """
+    N_resized = p0_LF_downsampled.shape
+    resize_factor = tuple([domain.N[i] / N_resized[i] for i in range(len(N_resized))])
+    #    dx_resized = resize_factor * domain.dx
+    dx_resized = tuple([resize_factor[i] * domain.dx[i] for i in range(len(N_resized))])
+
+    # assert jnp.allclose(dx_resized * (N_resized), domain.dx * (domain.N))
+
+    domain_downsampled = Domain(
+        N=N_resized, dx=dx_resized, c=domain.c, periodic=domain.periodic, cfl=domain.cfl
+    )
+
+    return domain_downsampled
+
+
+def split_frequency_components(
+    p0: jnp.ndarray,
+    sensors_mask: jnp.ndarray,
+    input_type: str,
+    output_type: str,
+    wpt: MSWPT,
+    box_corners: Optional[jnp.ndarray],
+    windowing: str,
+    domain: Domain,
+    cutoff_freq: Optional[float] = None,
+    downsample: bool = False,
+    use_pow2: bool = False,
+    gh: Optional[jnp.ndarray] = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Domain]:
+    """
+    Split the input into high- and low-frequency components, optionally
+    downsampling the low-frequency part and returning a correspondingly
+    reduced domain.
+
+    Returns
+    -------
+    p0_HF : jnp.ndarray
+        High-frequency component in `output_type` space.
+    p0_LF : jnp.ndarray
+        Low-frequency component in `output_type` space.
+    sensors_mask_ds : jnp.ndarray
+        Possibly-downsampled sensors mask (same shape as p0_LF/p0_HF).
+    dom_downsample : Domain
+        Possibly-downsampled domain matching p0_LF.
+
+    Notes
+    -----
+    If the low-frequency index set is empty (no bins fall inside the requested
+    box / cutoff), we:
+      - return p0_LF = 0 (in `output_type`),
+      - return p0_HF = p0 (in `output_type`),
+      - leave sensors_mask and domain unchanged,
+      - skip downsampling entirely.
+
+    This avoids shape, interpolation, and domain-consistency errors.
+    """
+    centers = wpt.dyadic_decomp.centres_ndim
+
+    # Determine the low-frequency index set (idx_box) and box_corners
+    if cutoff_freq is not None and box_corners is None:
+        # Use L-infinity norm with inclusive boundary to match box_corners behavior
+        idx_box = get_indices_with_norm_less_than(centers, cutoff_freq, inclusive=True)
+
+        # Find actual corner indices from the selected set
+        if idx_box.size > 0:
+            corner1_idx, corner2_idx = find_bounding_corner_indices(centers, idx_box)
+            box_corners = jnp.array([corner1_idx, corner2_idx])
+
+    elif box_corners is not None and cutoff_freq is None:
+        # Use provided box_corners directly
+        idx_box = get_indices_between_two_opposing_corners(
+            centers, box_corners[0], box_corners[1]
+        )
+    else:
+        raise ValueError("Exactly one of cutoff_freq or box_corners must be provided.")
+
+    # If idx_box is empty, short-circuit safely.
+    if idx_box.size == 0:
+        warnings.warn(
+            "split_frequency_components: low-frequency selection is empty; "
+            "returning p0_HF = p0 and p0_LF = 0 with unchanged domain.",
+            RuntimeWarning,
+        )
+        # Convert p0 to the requested output space.
+        p0_out = utils.convert_space(p0, input_type, output_type)
+        # Create a zero LF of the same shape and dtype.
+        p0_LF = jnp.zeros_like(p0_out)
+        p0_HF = p0_out
+        # No downsampling possible/needed.
+        return p0_HF, p0_LF, sensors_mask, domain
+
+    # Normal path: compute LF/HF in Fourier domain via g/h filters.
+    p0_HF_ft, p0_LF_ft = gh_lowpass_filter(
+        p0, input_type, wpt, idx_box, windowing, gh=gh
+    )
+
+    # If desired, downsample the LF path and align sensors.
+    sensors_mask_ds = sensors_mask
+    dom_downsample = domain
+
+    if downsample:
+        # Compute target bounds in spatial grid for LF.
+        bounds = get_bounds(wpt.dyadic_decomp, domain, box_corners[0], box_corners[1])
+
+        # Downsample LF Fourier data (implementation defines axis/layout).
+        p0_LF_ft = downsample_p0(p0_LF_ft, bounds, use_pow2)
+
+        # Interpolate sensors mask to the new spatial shape that corresponds to p0_LF_ft.
+        sensors_mask_ds = utils.interpolate_nearest(sensors_mask_ds, p0_LF_ft.shape)
+        sensors_mask_ds = sensors_mask_ds.astype(jnp.float32)
+
+        # Build a consistent downsampled domain for LF.
+        dom_downsample = downsample_domain(domain, p0_LF_ft)
+
+    # Convert both components to the requested output space.
+    p0_HF = utils.convert_space(p0_HF_ft, "fourier", output_type)
+    p0_LF = utils.convert_space(p0_LF_ft, "fourier", output_type)
+
+    return p0_HF, p0_LF, sensors_mask_ds, dom_downsample
+
+
+def oversample_window(
+    array: jnp.ndarray, dt_oversample: int = 0, axis: int = 0, window_type: str = "cos2"
+) -> jnp.ndarray:
+    """
+    Apply a windowing function to the array and oversample it in the temporal domain.
+
+    Parameters
+    ----------
+    array : jnp.ndarray
+        Input array to be windowed
+    dt_oversample : int, default=0
+        Number of points to oversample
+    axis : int, default=0
+        Axis along which to apply the window
+    window_type : str, default='cos2'
+        Type of window to apply. Options: 'cos2', 'hann', 'hamming', 'blackman'
+
+    Returns
+    -------
+    jnp.ndarray
+        Windowed array
+    """
+    if dt_oversample == 0:
+        return array
+
+    if window_type == "cos2":
+        window = jnp.cos(jnp.linspace(0, jnp.pi / 2, dt_oversample)) ** 2
+    elif window_type == "hann":
+        window = jnp.hanning(2 * dt_oversample)[-dt_oversample:]
+    elif window_type == "hamming":
+        window = jnp.hamming(2 * dt_oversample)[-dt_oversample:]
+    elif window_type == "blackman":
+        window = jnp.blackman(2 * dt_oversample)[-dt_oversample:]
+    else:
+        raise ValueError(f"Unsupported window type: {window_type}")
+
+    shape = [1] * array.ndim
+    shape[axis] = dt_oversample
+    window = window.reshape(shape)
+
+    slice_obj = [slice(None)] * array.ndim
+    slice_obj[axis] = slice(-dt_oversample, None)
+
+    # JAX-compatible: use .at[] API instead of in-place assignment
+    windowed_section = array[tuple(slice_obj)] * window
+    result = array.at[tuple(slice_obj)].set(windowed_section)
+
+    return result
+
+
+def interpolate_LF_soln(
+    lf_downsampled: jnp.ndarray,
+    target_size: Tuple,
+    interpolation_method: str = "spline",
+    interp_window: str = "cos2",
+    dt_oversample: int = 0,
+    spline_order: int = 3,
+) -> jnp.ndarray:
+    """
+    Interpolates a downsampled solution from a LF wave solver, to match the desired size.
+
+    Args:
+        lf_downsampled: The downsampled LF solution.
+        desired_size: The desired size of the solution.
+        interpolation_method: The interpolation method to use ("spline" or "fourier").
+        interp_window: The windowing function to use ("cos2", "hann", "hamming", "blackman").
+        temporal_oversample: The amount of timesteps I oversampled by.
+        spline_order: The order of the spline interpolation.
+
+    Returns:
+        The interpolated solution.
+    """
+    lf_windowed = oversample_window(
+        lf_downsampled, dt_oversample, axis=0, window_type=interp_window
+    )
+
+    if interpolation_method == "spline":
+        input_size = lf_downsampled.shape
+        new_shape = tuple(
+            [target_size[i] / input_size[i] for i in range(len(target_size))]
+        )
+        # Spline `zoom` is sample-value preserving by construction (it
+        # evaluates the spline interpolant at the new grid points), so no
+        # post-correction is needed; an energy-renormalisation here would
+        # actively un-preserve sample values.
+        lf_upsampled = zoom(lf_windowed, new_shape, order=spline_order)
+
+    elif interpolation_method == "fourier":
+        lf_upsampled = utils.interpolate_fourier(
+            lf_windowed, target_size, "spatial", "spatial"
+        )
+        scale = math.sqrt(
+            math.prod(
+                input_len / output_len
+                for input_len, output_len in zip(lf_windowed.shape, target_size)
+            )
+        )
+        lf_upsampled = lf_upsampled * scale
+    else:
+        raise ValueError(f"Interpolation method {interpolation_method} not supported.")
+
+    return lf_upsampled
