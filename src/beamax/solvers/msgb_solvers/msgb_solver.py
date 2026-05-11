@@ -720,11 +720,12 @@ class MSGBSolver(eqx.Module):
         ------------------
         use_raw_source : bool, default False
             If False (default), `data` is interpreted as a boundary
-            measurement r(t, x_s) and we internally form the adjoint
-            source
+            measurement r(s, x_s) in the original acquisition variable and
+            we internally form the adjoint source
 
                 F(t, x_s) = w(x_s) ∂_t r(T - t, x_s),
 
+            represented on the original-time grid as -w(x_s) ∂_s r(s, x_s),
             using a simple finite-difference in time and unit weights w≡1.
             If True, `data` is assumed to already be F(t, x_s) and is
             passed to `_prepare_adj_params` unchanged.

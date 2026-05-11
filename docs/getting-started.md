@@ -41,29 +41,54 @@ python -c "import beamax; print(beamax.__file__)"
 - Editable install should point to `.../src/beamax/__init__.py`.
 - If it points to `.../site-packages/beamax/...`, your environment is using an installed wheel instead of your local source tree.
 
-## Minimal Usage
+## Minimal 1D Forward Solve
 
 ```python
 import jax
-from beamax import Domain, DyadicDecomposition, MSWPT
+import jax.numpy as jnp
 
-domain = Domain(N=(64, 64), dx=(1e-3, 1e-3), c=1500.0, periodic=(True, True))
-decomp = DyadicDecomposition(3, domain.N, (2, 4, 8), (1, 1))
+from beamax import Domain, Sensor, DyadicDecomposition, MSWPT
+from beamax.gb import gb_solvers
+from beamax.solvers import MSGBSolver
+
+jax.config.update("jax_enable_x64", True)
+
+N = (128,)
+domain = Domain(N=N, dx=(1.0 / N[0],), c=1.0, periodic=(True,))
+ts = domain.generate_time_domain()
+x = jnp.arange(N[0]) * domain.dx[0]
+p0 = jnp.sin(2.0 * jnp.pi * x) + 0.5 * jnp.sin(4.0 * jnp.pi * x)
+
+decomp = DyadicDecomposition(
+    num_levels=2,
+    N=domain.N,
+    num_boxes_levels=(4, 8),
+    box_aspect_ratio=(1,),
+)
 wpt = MSWPT(decomp, redundancy=2, windowing="rectangular")
+sensors = Sensor(domain=domain, binary_mask=jnp.ones(domain.N))
 
-field = jax.random.normal(jax.random.PRNGKey(0), domain.N)
-coeffs = wpt.forward(field, input_type="spatial")
-recon = wpt.inverse(coeffs, output_type="spatial")
+solver = MSGBSolver(
+    thr=int(wpt.total_coeffs),
+    thr_strat="top_n",
+    batch_size=256,
+    input_type="spatial",
+    ode_solver=gb_solvers.solve_ODE_base,
+    sum_method="all_real",
+)
+
+sensor_data, params = solver.forward(p0, domain, sensors, ts, wpt)
+print(sensor_data.shape)
 ```
 
 ## Run an Example
 
 ```bash
-python examples/forward/forward-2d.py
+python examples/forward/forward-1d-v0.py
 ```
 
 For headless environments:
 
 ```bash
-MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/forward-2d.py
+MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/forward-1d-v0.py
 ```

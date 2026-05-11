@@ -75,7 +75,6 @@ nav:
   - index.md
   - Guides:
       - getting-started.md
-      - troubleshooting.md
   - Examples:
       - examples/index.md
       - Frequency decomposition: examples/decomp.md

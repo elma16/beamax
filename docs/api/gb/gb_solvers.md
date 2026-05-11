@@ -1,6 +1,6 @@
 # `beamax.gb.gb_solvers`
 
-ODE integrators for Gaussian-beam state evolution.
+ODE integrators for Gaussian beam state evolution.
 
 ## Key Objects
 

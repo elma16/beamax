@@ -1,6 +1,6 @@
 # `beamax.gb.gb_utils`
 
-Mathematical helper routines for Gaussian-beam dynamics.
+Mathematical helper routines for Gaussian beam dynamics.
 
 ## Scope
 

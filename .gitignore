@@ -1,4 +1,4 @@
-# AI assistant local settings
+# Local assistant/editor settings
 .claude/
 
 # IDE and editor files
@@ -31,11 +31,6 @@ trace/
 cache/
 checkpoints/
 
-# Thesis-figure local caches (MNIST + symlinks to FNO checkpoints)
-examples/thesis/5fwd/_data/
-examples/thesis/5fwd/_fno_cache/
-examples/thesis/**/_fno_smoketest.py
-
 # Python runtime
 *.pyc
 *.pyo
@@ -43,3 +38,8 @@ examples/thesis/**/_fno_smoketest.py
 
 # Virtual environment
 .venv/
+
+# Local environment overrides
+.env
+.env.*
+!.env.example

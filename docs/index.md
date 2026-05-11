@@ -20,8 +20,7 @@ Simulating the acoustic wave equation on large, smoothly varying media is expens
 
 ## Start here
 
-- **New users** — see [Getting Started](getting-started.md) for installation, a 20-line quickstart, and a tour of the solver hierarchy.
-- **Runtime or install issues** — [Troubleshooting](troubleshooting.md) covers the common stumbling blocks (editable-install import shadowing, k-Wave HDF5 compatibility on macOS, matplotlib style warnings).
+- **New users** — see [Getting Started](getting-started.md) for installation, a minimal 1D forward solve, and a tour of the solver hierarchy.
 - **API reference** — use the navigation tree under **Basic API**; every module page is generated from the in-source docstrings via `mkdocstrings`.
 
 ## References and related projects

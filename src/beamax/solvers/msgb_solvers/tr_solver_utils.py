@@ -179,6 +179,9 @@ def compute_TR_parameters(
     # centres_hat: physical Fourier center in (t, x_*) coords
     # First axis = time frequency τ; others = tangential spatial frequencies k_tan
     centres_hat = decomp.centres_ndim[box_idx, :] / L_phys  # (B, d_data)
+    # Euclidean norm in boundary frequency space, used only for direction
+    # normalisation. The beam frequency parameter itself is |tau|; otherwise
+    # omega * p_tan would not reproduce the tangential carrier 2*pi*k_tan.
     norm_xi = jnp.linalg.norm(centres_hat, axis=-1, keepdims=True)  # |(τ, k_tan)|
     centres_normed = centres_hat / norm_xi
 
@@ -201,7 +204,8 @@ def compute_TR_parameters(
     sign_tau = jnp.sign(centres_hat[:, 0])
     signum = rearrange(-sign_tau, "b -> b 1")
 
-    ωs = rearrange(norm_xi, "b 1 -> b")  # scalar frequency parameter per beam
+    omega_cyc = jnp.maximum(jnp.abs(tau), 1e-6)
+    ωs = rearrange(omega_cyc, "b 1 -> b")  # cyclic scalar frequency per beam
 
     # Time coordinate for each beam: where in the time grid it lives (start)
     ts = jnp.zeros((nn_idx.shape[1], 2))
@@ -264,8 +268,12 @@ def compute_TR_parameters(
     p_n_unit = jnp.sqrt(radicand)  # (B_, 1)
 
     # Orient the normal component so beams point *into* the domain:
-    dx_arr = jnp.array(domain_data.dx)
-    grid_max = domain_data.grid_size[normal_axis] - dx_arr[normal_axis]
+    # The detector side is a spatial-domain property, not a boundary-data-domain
+    # property. Using domain_data here confuses acquisition time with x_1 for
+    # max-side or non-x_1 detector planes.
+    spatial_dx = jnp.array(sources.domain.dx)
+    spatial_size = jnp.array(sources.domain.grid_size)
+    grid_max = spatial_size[normal_axis] - spatial_dx[normal_axis]
     inward_sign = jnp.where(
         jnp.isclose(normal_value, 0.0),
         1.0,
@@ -292,7 +300,7 @@ def compute_TR_parameters(
     # -------------------------------------------------------------------------
     # 4. Initial complex curvature and geometric amplitude
     # -------------------------------------------------------------------------
-    alpha = 2j * (jnp.pi * sigmas) ** 2 / norm_xi  # (B_, d_data)
+    alpha = 2j * (jnp.pi * sigmas) ** 2 / omega_cyc  # (B_, d_data)
 
     M_init = jnp.einsum("bi,ij->bij", alpha, jnp.eye(d_spatial))
 

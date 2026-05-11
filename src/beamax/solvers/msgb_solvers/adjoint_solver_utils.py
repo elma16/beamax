@@ -72,7 +72,7 @@ def compute_adj_parameters(
         Boundary points x_T (intersection of rays with acquisition
         surface Γ).
     omegas : (B,)
-        Absolute frequency |ξ| for each packet (same as TR).
+        Cyclic temporal carrier |tau| for each packet (same as TR).
     ats : (B, 1)
         Geometric amplitudes including the B^{-1} prefactor.
     signum : (B, 1)
@@ -126,9 +126,9 @@ def compute_adj_parameters(
     # -------------------------------------------------------------------------
     # 3. Principal symbol of B^{-1} in the hyperbolic region
     #
-    #    Γ(x^*; ω, ξ^*) = sqrt(ω^2 - c(x^*)^2 |ξ^*|^2),
+    #    Γ(x^*; τ, ξ^*) = sqrt(τ^2 - c(x^*)^2 |ξ^*|^2),
     #    b_0(x^*; ω, ξ^*) = -2 i c(x^*) Γ,
-    #    => |b_0| ≈ 2 c(x^*) Γ  ⇒  we use  (2 c Γ)^{-1} as magnitude.
+    #    => |b_0| ≈ 2 c(x^*) Γ for the rescaled cyclic multiplier used here.
     # -------------------------------------------------------------------------
     rad = omega**2 - (c_flat**2) * k_tan_sq
     rad = jnp.maximum(rad, 0.0)

@@ -102,6 +102,16 @@ def _make_small_domain_and_wpt():
     return domain, wpt
 
 
+def _make_2d_data_wpt(c_fn, data_dx=(1.0, 1.0)):
+    N = (16, 16)
+    domain = geometry.Domain(N=N, dx=data_dx, c=c_fn, periodic=(False, False))
+    decomp = DyadicDecomposition(
+        num_levels=1, N=N, num_boxes_levels=(2,), box_aspect_ratio=(1, 1)
+    )
+    wpt = transforms.MSWPT(decomp, redundancy=2, windowing="rectangular")
+    return domain, wpt
+
+
 def _assert_inward_normal(mask_idx: int, expected_sign: float):
     domain, wpt = _make_small_domain_and_wpt()
     mask = jnp.zeros(domain.N)
@@ -123,6 +133,78 @@ def test_tr_beam_angles_point_inward_left_boundary():
 
 def test_tr_beam_angles_point_inward_right_boundary():
     _assert_inward_normal(mask_idx=-1, expected_sign=-1.0)
+
+
+def test_tr_beam_angles_use_spatial_domain_for_detector_side():
+    def c_fn(x):
+        return 0.01 + 0.0 * x[..., 0]
+
+    data_domain, wpt = _make_2d_data_wpt(c_fn, data_dx=(1.0, 0.1))
+    spatial_domain = geometry.Domain(
+        N=(16, 16), dx=(0.1, 0.1), c=c_fn, periodic=(False, False)
+    )
+    mask = jnp.zeros(spatial_domain.N)
+    mask = mask.at[-1, :].set(1)
+    sensors = geometry.Sensor(domain=spatial_domain, binary_mask=mask)
+
+    coeffs = jnp.arange(min(64, wpt.total_coeffs))
+    pts, *_ = tr_solver_utils.compute_TR_parameters(
+        coeffs, data_domain, wpt, sensors
+    )
+    normal_comp = pts[:, 0]
+
+    decomp = wpt.dyadic_decomp
+    shapes = utils.compute_coeff_shapes(
+        decomp, wpt.redundancy, jnp.arange(decomp.num_levels)
+    )
+    cumsum_boxes = jnp.r_[0, jnp.cumsum(decomp.num_boxes_ndim)]
+    nn_level, nn_idx = utils.find_tensor_and_multiindex(coeffs, shapes)
+    box_idx = nn_idx[0, :] + cumsum_boxes[nn_level]
+    centres_hat = decomp.centres_ndim[box_idx, :] / jnp.array(data_domain.grid_size)
+    tau = centres_hat[:, 0]
+    k_tan_sq = jnp.sum(centres_hat[:, 1:] ** 2, axis=1)
+    hyperbolic = tau**2 - (0.01**2) * k_tan_sq > 1e-10
+
+    assert jnp.any(hyperbolic), "expected at least one non-grazing packet"
+    assert jnp.all(normal_comp[hyperbolic] <= 0)
+
+
+def test_tr_temporal_carrier_sets_tangential_phase():
+    def c_fn(x):
+        return 0.3 + 0.0 * x[..., 0]
+
+    data_domain, wpt = _make_2d_data_wpt(c_fn)
+    spatial_domain = geometry.Domain(
+        N=(16, 16), dx=(1.0, 1.0), c=c_fn, periodic=(False, False)
+    )
+    mask = jnp.zeros(spatial_domain.N)
+    mask = mask.at[0, :].set(1)
+    sensors = geometry.Sensor(domain=spatial_domain, binary_mask=mask)
+
+    coeffs = jnp.arange(min(64, wpt.total_coeffs))
+    pts, _, _, omegas, *_ = tr_solver_utils.compute_TR_parameters(
+        coeffs, data_domain, wpt, sensors
+    )
+
+    decomp = wpt.dyadic_decomp
+    shapes = utils.compute_coeff_shapes(
+        decomp, wpt.redundancy, jnp.arange(decomp.num_levels)
+    )
+    cumsum_boxes = jnp.r_[0, jnp.cumsum(decomp.num_boxes_ndim)]
+    nn_level, nn_idx = utils.find_tensor_and_multiindex(coeffs, shapes)
+    box_idx = nn_idx[0, :] + cumsum_boxes[nn_level]
+    centres_hat = decomp.centres_ndim[box_idx, :] / jnp.array(data_domain.grid_size)
+
+    tau = centres_hat[:, 0]
+    k_tan = centres_hat[:, 1:]
+    usable = (jnp.abs(tau) > 1e-8) & (jnp.linalg.norm(k_tan, axis=1) > 1e-8)
+
+    assert jnp.any(usable), "expected packets with nonzero tau and tangential carrier"
+    assert jnp.allclose(omegas[usable], jnp.abs(tau[usable]))
+    assert jnp.allclose(
+        omegas[usable, None] * pts[usable, 1:],
+        2.0 * jnp.pi * k_tan[usable],
+    )
 
 
 @pytest.mark.parametrize("d", [1, 2, 3])
