@@ -12,7 +12,9 @@ Test organization:
 
 import jax.numpy as jnp
 import jax
+import os
 import pytest
+import sys
 import warnings
 
 from beamax import geometry, utils, transforms
@@ -41,6 +43,14 @@ jax.config.update("jax_enable_x64", True)
 requires_kwave = pytest.mark.skipif(
     KWAVE_IMPORT_ERROR is not None,
     reason=f"k-wave-python stack is unavailable: {KWAVE_IMPORT_ERROR}",
+)
+
+requires_kwave_cpp_binary = pytest.mark.skipif(
+    sys.platform == "darwin" and not os.environ.get("BEAMAX_KWAVE_BINARY_PATH"),
+    reason=(
+        "k-wave-python's bundled macOS OMP binary is not stable on hosted macOS; "
+        "set BEAMAX_KWAVE_BINARY_PATH to test a known-good binary."
+    ),
 )
 
 
@@ -364,6 +374,7 @@ class TestMSGBSolverAccuracy:
 
 
 @requires_kwave
+@requires_kwave_cpp_binary
 class TestHybridSolverBasics:
     """Test basic hybrid solver functionality."""
 
@@ -585,6 +596,7 @@ class TestHybridSolverAdvanced:
 
 
 @requires_kwave
+@requires_kwave_cpp_binary
 def test_hybrid_downsample():
     """
     Testing that hybrid solver on periodic domain downsampled (with fourier interpolation) is close to non-downsampled.

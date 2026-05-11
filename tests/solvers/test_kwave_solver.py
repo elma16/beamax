@@ -1,7 +1,9 @@
 import jax.numpy as jnp
 import jax
+import os
 import pytest
 from pathlib import Path
+import sys
 import types
 import numpy as np
 
@@ -30,6 +32,14 @@ _SOLVER_KWARGS = dict(
     quiet=True,
 )
 
+requires_kwave_cpp_binary = pytest.mark.skipif(
+    sys.platform == "darwin" and not os.environ.get("BEAMAX_KWAVE_BINARY_PATH"),
+    reason=(
+        "k-wave-python's bundled macOS OMP binary is not stable on hosted macOS; "
+        "set BEAMAX_KWAVE_BINARY_PATH to test a known-good binary."
+    ),
+)
+
 
 def _make_kwave_solver() -> KWaveSolver:
     return KWaveSolver(**_SOLVER_KWARGS)
@@ -49,6 +59,7 @@ def _match_image_shape(arr: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
 @pytest.mark.parametrize(
     "periodic, d", [(periodic, d) for d in [2, 3] for periodic in [True, False]]
 )
+@requires_kwave_cpp_binary
 def test_kwave_linear(periodic, d):
     """
     Test the k-wave solver is linear.
@@ -98,6 +109,7 @@ def test_kwave_linear(periodic, d):
     assert jnp.allclose(pt_sum, pt_sum_lin, atol=1e-5)
 
 
+@requires_kwave_cpp_binary
 def test_kwave_converges():
     """
     Test that the k-wave solver converges to a solution in a periodic domain.
@@ -154,6 +166,7 @@ def test_kwave_converges():
     ), f"pt and pt_refine are not close: {jnp.max(jnp.abs(pt - pt_refine[slices]))}"
 
 
+@requires_kwave_cpp_binary
 def test_kwave_matches_matlab_reference():
     """
     Compare k-wave-python wrapper outputs against stored MATLAB reference data.
