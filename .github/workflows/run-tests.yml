@@ -29,20 +29,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,kwave,viz]" pytest-cov
+          python -m pip install -e ".[dev,kwave,viz]"
 
       - name: Lint with ruff
-        run: ruff check src tests
+        run: ruff check src tests tools examples
 
       - name: Test with pytest
-        run: pytest --cov=src/beamax --cov-report=xml --cov-report=term -q
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+        run: pytest --cov=src/beamax --cov-report=term-missing -q
 
       - name: Run example smoke tests
         env:
@@ -50,9 +43,7 @@ jobs:
           MPLCONFIGDIR: /tmp/mplconfig
         run: |
           mkdir -p "$MPLCONFIGDIR"
-          python examples/forward/forward-1d-v0.py
-          python examples/decomp/lp_hp_filter.py
-          python examples/reconstruction/time-reversal/TR-1d.py
+          python tools/run_examples.py --directory examples --fail-fast --silent-figures
 
   fno-smoke:
     runs-on: ubuntu-latest

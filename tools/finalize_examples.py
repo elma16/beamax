@@ -1,55 +1,78 @@
 #!/usr/bin/env python3
 """
-Finalise the restored example tree:
-1. Add a heuristic module docstring to any .py that lacks one.
-2. For every .py without a paired .ipynb, generate a thin Colab-runnable
+Finalise the public example tree:
+1. Add a heuristic module docstring to any public .py that lacks one.
+2. For every public .py without a paired .ipynb, generate a thin Colab-runnable
    notebook (markdown banner + install cell + single big code cell with the
    full .py source).
-3. For every existing .ipynb without an Open-in-Colab badge, prepend the
-   banner + install cell (matches the pattern already used in the kept set).
-4. Add an extra warning markdown cell for memory-heavy and OA-Breast-dependent
-   examples.
+3. For every existing public .ipynb without an Open-in-Colab badge, prepend the
+   banner + install cell.
 
-Idempotent: skips files that already have what's needed.
+Private examples are intentionally ignored by this tool.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import ast
 from pathlib import Path
 
 GITHUB_REPO = "elma16/beamax"
 GITHUB_BRANCH = "main"
-PUBLIC_EXAMPLE_ROOTS = {
-    "benchmarks",
-    "bowtie",
-    "decomp",
-    "forward",
-    "rays",
-    "reconstruction",
-    "singleGB",
-}
+PUBLIC_EXAMPLES_ROOT = Path("examples")
 
 # Examples that load the OA-Breast phantom from disk. Notebook gets a
 # data-download instructions banner.
-OABREAST_DEPENDENT = {
-    "examples/forward/forward-3d.py",
-    "examples/reconstruction/time-reversal/fwd-tr-img.py",
-    "examples/reconstruction/comparison/breast_tr_adj_faces.py",
-}
+OABREAST_DEPENDENT: set[str] = set()
 
 # Examples that need substantial RAM (gated behind BEAMAX_FULL_EXAMPLES,
 # 3D, or large grids). Notebook gets a memory-warning banner.
-MEMORY_HEAVY = {
-    "examples/forward/forward-3d.py",
-    "examples/reconstruction/time-reversal/TR-3d2.py",
-    "examples/reconstruction/adjoint/autodiff-3d.py",
-}
+MEMORY_HEAVY: set[str] = set()
 
 
 def is_public_example(path: Path) -> bool:
-    return len(path.parts) >= 2 and path.parts[1] in PUBLIC_EXAMPLE_ROOTS
+    try:
+        rel = path.relative_to(PUBLIC_EXAMPLES_ROOT)
+    except ValueError:
+        return False
+    return "private" not in rel.parts
+
+
+def example_metadata_from_text(text: str) -> dict[str, str]:
+    """Read ``Example key: value`` metadata from a module docstring."""
+    try:
+        docstring = ast.get_docstring(ast.parse(text))
+    except SyntaxError:
+        return {}
+    if not docstring:
+        return {}
+    metadata: dict[str, str] = {}
+    for line in docstring.splitlines():
+        if not line.startswith("Example "):
+            continue
+        key, sep, value = line.partition(":")
+        if sep:
+            metadata[key.removeprefix("Example ").strip().lower()] = value.strip()
+    return metadata
+
+
+def example_extras(text: str) -> list[str]:
+    """Return install extras requested by example metadata or inferred imports."""
+    metadata = example_metadata_from_text(text)
+    extras = [
+        item.strip()
+        for item in metadata.get("extras", "").split(",")
+        if item.strip()
+    ]
+    if extras:
+        return extras
+    return ["kwave", "viz-mpl"] if _needs_kwave(text) else ["viz-mpl"]
+
+
+def is_default_smoke_text(text: str) -> bool:
+    smoke = example_metadata_from_text(text).get("smoke", "true")
+    return smoke.lower() not in {"0", "false", "no", "off"}
 
 
 def heuristic_description(path: Path) -> str:
@@ -129,13 +152,24 @@ def colab_url(rel_nb: str) -> str:
     return f"https://colab.research.google.com/github/{GITHUB_REPO}/blob/{GITHUB_BRANCH}/{rel_nb}"
 
 
-def banner_md(rel_nb: str, title: str, oabreast: bool, memory_heavy: bool) -> list[str]:
+def banner_md(
+    rel_nb: str,
+    title: str,
+    oabreast: bool,
+    memory_heavy: bool,
+    default_smoke: bool,
+) -> list[str]:
+    scope_note = (
+        "> Optional example: requires extra dependencies and is not run by the default CI smoke suite.\n"
+        if not default_smoke
+        else "> Public examples are small enough to run on a standard CPU Colab runtime.\n"
+    )
     lines = [
         f"# {title}\n",
         "\n",
         f"[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]({colab_url(rel_nb)})\n",
         "\n",
-        "> Select **Runtime → Change runtime type → GPU or TPU** in Colab to demonstrate the hardware-acceleration story.\n",
+        scope_note,
     ]
     if memory_heavy:
         lines += [
@@ -150,12 +184,12 @@ def banner_md(rel_nb: str, title: str, oabreast: bool, memory_heavy: bool) -> li
     return lines
 
 
-def install_cell_source(needs_kwave: bool) -> list[str]:
-    extras = "[kwave]" if needs_kwave else ""
+def install_cell_source(extras: list[str]) -> list[str]:
+    extras_spec = f"[{','.join(extras)}]" if extras else ""
     return [
         "# Install beamax for Google Colab. Safe to skip when running locally.\n",
         "%%capture\n",
-        f'%pip install --quiet "beamax{extras} @ git+https://github.com/{GITHUB_REPO}.git"\n',
+        f'%pip install --quiet "beamax{extras_spec} @ git+https://github.com/{GITHUB_REPO}.git"\n',
     ]
 
 
@@ -164,7 +198,9 @@ def _needs_kwave(text: str) -> bool:
 
 
 def title_from_path(path: Path) -> str:
-    return path.stem.replace("_", " ").replace("-", " ").strip()
+    title = path.stem.replace("_", " ").replace("-", " ").strip()
+    title = re.sub(r"\b(\d+)d\b", lambda match: f"{match.group(1)}D", title)
+    return title
 
 
 def already_has_badge(nb: dict) -> bool:
@@ -189,18 +225,19 @@ def add_badge_to_existing_nb(path: Path) -> bool:
     title = title_from_path(path)
     oabreast = rel in OABREAST_DEPENDENT
     memory_heavy = rel in MEMORY_HEAVY
-    needs_kwave = _needs_kwave(full_text)
+    extras = example_extras(full_text)
+    default_smoke = is_default_smoke_text(full_text)
     banner = {
         "cell_type": "markdown",
         "metadata": {},
-        "source": banner_md(rel, title, oabreast, memory_heavy),
+        "source": banner_md(rel, title, oabreast, memory_heavy, default_smoke),
     }
     install = {
         "cell_type": "code",
         "execution_count": None,
         "metadata": {},
         "outputs": [],
-        "source": install_cell_source(needs_kwave),
+        "source": install_cell_source(extras),
     }
     nb["cells"] = [banner, install] + nb["cells"]
     path.write_text(json.dumps(nb, indent=1) + "\n")
@@ -216,7 +253,8 @@ def generate_nb_from_py(py_path: Path) -> bool:
     title = title_from_path(py_path)
     oabreast = str(py_path) in OABREAST_DEPENDENT
     memory_heavy = str(py_path) in MEMORY_HEAVY
-    needs_kwave = _needs_kwave(src)
+    extras = example_extras(src)
+    default_smoke = is_default_smoke_text(src)
 
     src_lines = src.splitlines(keepends=True)
     nb = {
@@ -224,14 +262,16 @@ def generate_nb_from_py(py_path: Path) -> bool:
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": banner_md(rel_nb, title, oabreast, memory_heavy),
+                "source": banner_md(
+                    rel_nb, title, oabreast, memory_heavy, default_smoke
+                ),
             },
             {
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {},
                 "outputs": [],
-                "source": install_cell_source(needs_kwave),
+                "source": install_cell_source(extras),
             },
             {
                 "cell_type": "code",
@@ -257,7 +297,7 @@ def generate_nb_from_py(py_path: Path) -> bool:
 
 
 def main() -> None:
-    root = Path("examples")
+    root = PUBLIC_EXAMPLES_ROOT
 
     docs_added = 0
     for p in sorted(root.rglob("*.py")):

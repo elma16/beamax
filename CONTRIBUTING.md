@@ -33,8 +33,18 @@ skipped automatically if the packages are not installed.
 
 1. Create a feature branch from `main`.
 2. Make your changes and add tests where appropriate.
-3. Run `ruff check src tests` and `pytest` locally.
+3. Run `ruff check src tests tools examples` and `pytest` locally.
 4. Open a PR against `main`. CI will run the full test suite.
+
+## Examples
+
+- Add supported, documented, self-contained examples under `examples/`.
+- Preserve research, profiling, data-dependent, or dependency-heavy material under
+  `examples/private/`; private examples are not linted, documented, or smoke-tested.
+- Public scripts should have a module docstring, a `main()` guard, small default
+  problem sizes, concise printed metrics, and a paired notebook.
+- Run `python tools/finalize_examples.py` and `python tools/gen_examples_readme.py`
+  after changing public examples.
 
 ## Reporting issues
 

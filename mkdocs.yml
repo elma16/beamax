@@ -77,12 +77,11 @@ nav:
       - getting-started.md
   - Examples:
       - examples/index.md
-      - Frequency decomposition: examples/decomp.md
+      - Frequency decomposition: examples/decomposition.md
       - Forward propagation: examples/forward.md
       - Time reversal: examples/time-reversal.md
-      - Adjoint reconstruction: examples/adjoint.md
-      - Inverse comparisons: examples/comparison.md
-      - Benchmarks: examples/benchmarks.md
+      - Rays and autofocus: examples/rays.md
+      - Single Gaussian beam: examples/single-gaussian-beam.md
   - Basic API:
       - decomposition: api/decomposition.md
       - geometry: api/geometry.md

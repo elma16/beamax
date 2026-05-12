@@ -1,37 +1,28 @@
 # Time-reversal reconstruction
 
-Time-reversal imaging with MSGB, contrasted against k-Wave reconstructions.
+Time-reversal imaging with MSGB. Examples marked optional require
+`beamax[kwave,viz-mpl]` and are skipped by the default smoke suite.
 
 ---
 
-## tr-1d
+## 1D time reversal
 
-1D time-reversal reconstruction with MSGB vs. k-Wave. Part of the CI example smoke suite.
+1D one-sided boundary time-reversal smoke test. It records synthetic data on the right boundary, propagates that data backward, and reports compact diagnostics.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/TR-1d.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/1d_time_reversal.ipynb)
 
 ```python
---8<-- "examples/reconstruction/time-reversal/TR-1d.py"
+--8<-- "examples/reconstruction/time-reversal/1d_time_reversal.py"
 ```
 
 ---
 
-## tr-2d
+## 2D time reversal and adjoint
 
-2D time-reversal comparison between MSGB and k-Wave.
+Optional: compare k-Wave time-reversal and adjoint reconstructions on a tiny 2D phantom.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/TR-2d.ipynb)
-
-```python
---8<-- "examples/reconstruction/time-reversal/TR-2d.py"
-```
-
----
-
-## tr-3d
-
-3D time-reversal diagnostic script that plots at each stage of the pipeline to isolate implementation issues. Memory-heavy — run on a 3D-capable host.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/2d_time_reversal_and_adjoint.ipynb)
 
 ```python
---8<-- "examples/reconstruction/time-reversal/TR-3d2.py"
+--8<-- "examples/reconstruction/time-reversal/2d_time_reversal_and_adjoint.py"
 ```

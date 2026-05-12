@@ -11,7 +11,7 @@ Convert Jupyter notebooks to cleaned Python scripts.
 - Skips .ipynb_checkpoints.
 - Optional: `--git-add` to stage converted .py files.
 - Default root is "<repo>/examples" if beamax.utils.detect_root() is available,
-  otherwise CWD / "examples".
+  otherwise CWD / "examples" when present. `examples/private` is skipped.
 """
 
 from __future__ import annotations
@@ -165,6 +165,7 @@ def convert_notebooks(
         p
         for p in root.rglob("*")
         if p.suffix == ".ipynb" and IPYNB_CHECKPOINTS not in p.parts
+        and "private" not in p.relative_to(root).parts
     ]
     total = len(nbs)
     if total == 0:

@@ -1,24 +1,24 @@
 # Examples
 
-This directory holds the beamax example gallery. Almost every script has a
-matching notebook with an **Open in Colab** badge so you can run it on a free
-GPU or TPU without any local setup — click the badge, then pick a GPU or TPU
-runtime in Colab (`Runtime → Change runtime type`).
+This directory holds the supported beamax example gallery. Base examples are
+small, documented, paired with notebooks, linted, and smoke-tested in CI.
+Examples marked optional require extra dependencies and are skipped by default
+smoke runs.
+
+`private/` preserves research, profiling, comparison, and diagnostic scripts.
+They may require extra data, optional solver backends, large memory, or local
+hardware assumptions, and are not part of the public docs or CI smoke suite.
+
+Every public script has a matching notebook with an **Open in Colab** badge.
+The public examples are small enough to run on a standard CPU Colab runtime.
 
 Each notebook installs beamax from this repository in its first code cell:
 
 ```
-%pip install --quiet "beamax[kwave] @ git+https://github.com/elma16/beamax.git"
+%pip install --quiet "beamax[viz-mpl] @ git+https://github.com/elma16/beamax.git"
 ```
 
-When running locally from a checkout, that cell is a no-op (skip it, or leave
-it — `pip install` will simply reinstall the current working copy).
-
-A few examples need additional data — most notably the OA-Breast phantom from
-the [Illinois OA-Breast database](https://anastasio.bioengineering.illinois.edu/downloadable-content/oa-breast-database/).
-Download `Neg_07_Left.h5` from there and place it under
-`<repo-root>/data/NumericalBreastPhantoms-selected/hdf5/`. Notebooks that
-need this data carry a banner pointing here.
+When running locally from a checkout, that cell can be skipped.
 
 ## Style
 
@@ -30,82 +30,40 @@ it resolves identically in a checkout, an installed wheel, or on Colab.
 
 ### Frequency decomposition & MSWPT
 
-- [`frames-figure.py`](examples/decomp/frames-figure.py) — Render the MSWPT frame atoms for a given dyadic decomposition, illustrating the multiscale tiling. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomp/frames-figure.ipynb)
-- [`frames_grid.py`](examples/decomp/frames_grid.py) — Plot a 3×3 grid of representative atoms for: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomp/frames_grid.ipynb)
-- [`lp_hp_filter.py`](examples/decomp/lp_hp_filter.py) — Low-pass / high-pass frequency separation built from MSWPT filters. Also part of the CI example smoke suite. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomp/lp_hp_filter.ipynb)
-- [`mswpt_error_plot.py`](examples/decomp/mswpt_error_plot.py) — Reconstruction error of the MSWPT forward+inverse pipeline as a function of box count and redundancy. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomp/mswpt_error_plot.ipynb)
+- [`low_high_pass_filters.py`](decomposition/low_high_pass_filters.py) — Visualise the low-pass/high-pass filter pairs used by the MSWPT. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomposition/low_high_pass_filters.ipynb)
+- [`wave_packet_cutoff_error.py`](decomposition/wave_packet_cutoff_error.py) — Plot MSWPT frame cutoff error across dyadic scales. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomposition/wave_packet_cutoff_error.ipynb)
+- [`wave_packet_frame_atoms.py`](decomposition/wave_packet_frame_atoms.py) — Render a small grid of MSWPT frame atoms in Fourier space. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomposition/wave_packet_frame_atoms.ipynb)
 
 ### Forward propagation
 
-- [`forward-1d-v0.py`](examples/forward/forward-1d-v0.py) — Forward solve with non-zero initial velocity (v0) compared to a spectral ground truth. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/forward-1d-v0.ipynb)
-- [`forward-2d-v0.py`](examples/forward/forward-2d-v0.py) — 2D forward solve with non-zero initial velocity, compared to a spectral ground truth. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/forward-2d-v0.ipynb)
-- [`forward-2d.py`](examples/forward/forward-2d.py) — 2D forward solve comparing MSGB against k-Wave and the hybrid MSGB + low-frequency solver. Requires `[kwave]`. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/forward-2d.ipynb)
-- [`forward-3d.py`](examples/forward/forward-3d.py) — 3D forward solve on an OA-Breast phantom comparing MSGB, k-Wave, and the hybrid MSGB + low-frequency solver on a planar sensor array, with orthogonal MIP figures and relative L2 error reporting. Requires `[kwave]`. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/forward-3d.ipynb)
+- [`1d_forward_solve.py`](forward/1d_forward_solve.py) — Forward solve with non-zero initial velocity (v0) compared to a spectral ground truth. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/1d_forward_solve.ipynb)
+- [`2d_forward_solve.py`](forward/2d_forward_solve.py) — 2D forward solve with non-zero initial velocity, compared to a spectral ground truth. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/2d_forward_solve.ipynb)
+- [`1d_forward_kwave_reference.py`](forward/1d_forward_kwave_reference.py) — Compare a compact 1D MSGB forward solve with a k-Wave strip reference. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/1d_forward_kwave_reference.ipynb)
+- [`2d_forward_kwave_reference.py`](forward/2d_forward_kwave_reference.py) — Compare a small 2D MSGB forward solve with a k-Wave boundary-sensor reference. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/2d_forward_kwave_reference.ipynb)
 
 ### Time-reversal reconstruction
 
-- [`TR-1d.py`](examples/reconstruction/time-reversal/TR-1d.py) — 1D time-reversal reconstruction with MSGB vs. k-Wave. Part of the CI example smoke suite. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/TR-1d.ipynb)
-- [`TR-2d.py`](examples/reconstruction/time-reversal/TR-2d.py) — 2D time-reversal comparison between MSGB and k-Wave. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/TR-2d.ipynb)
-- [`TR-3d2.py`](examples/reconstruction/time-reversal/TR-3d2.py) — 3D Time Reversal Diagnostic Script [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/TR-3d2.ipynb)
-- [`fwd-tr-img.py`](examples/reconstruction/time-reversal/fwd-tr-img.py) — 2D k-Wave forward + time-reversal reconstruction on an OA-Breast phantom slice, plotting p0, the sensor measurement, and the time-reversal estimate side by side. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/fwd-tr-img.ipynb)
+- [`1d_time_reversal.py`](reconstruction/time-reversal/1d_time_reversal.py) — Run a compact 1D MSGB time-reversal smoke test. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/1d_time_reversal.ipynb)
+- [`2d_time_reversal_and_adjoint.py`](reconstruction/time-reversal/2d_time_reversal_and_adjoint.py) — Compare k-Wave time-reversal and adjoint reconstructions on a tiny 2D phantom. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/2d_time_reversal_and_adjoint.ipynb)
 
-### Adjoint reconstruction
+### Rays and autofocus
 
-- [`AD-2d.py`](examples/reconstruction/adjoint/AD-2d.py) — Reconstruct p0 from k-Wave data using MSGB: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/adjoint/AD-2d.ipynb)
-- [`AD-2d2.py`](examples/reconstruction/adjoint/AD-2d2.py) — 2D PAT inverse problem with a *linearised* MSGB forward map and JAX autodiff. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/adjoint/AD-2d2.ipynb)
-- [`AD-2d3.py`](examples/reconstruction/adjoint/AD-2d3.py) — 2D PAT inverse problem with the full MSGB forward map and JAX autodiff. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/adjoint/AD-2d3.ipynb)
-- [`autodiff-1d.py`](examples/reconstruction/adjoint/autodiff-1d.py) — 1D adjoint via JAX autodiff, used as an independent check on the analytic MSGB adjoint. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/adjoint/autodiff-1d.ipynb)
-- [`autodiff-2d.py`](examples/reconstruction/adjoint/autodiff-2d.py) — 2D adjoint via JAX autodiff. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/adjoint/autodiff-2d.ipynb)
-- [`autodiff-3d.py`](examples/reconstruction/adjoint/autodiff-3d.py) — 3D adjoint via JAX autodiff. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/adjoint/autodiff-3d.ipynb)
-
-### Inverse-operator comparisons
-
-- [`adj-vs-TR-boxtest.py`](examples/reconstruction/comparison/adj-vs-TR-boxtest.py) — Adjoint vs. time-reversal reconstruction on a synthetic box phantom, contrasting the two inverse operators. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/comparison/adj-vs-TR-boxtest.ipynb)
-- [`breast_tr_adj_faces.py`](examples/reconstruction/comparison/breast_tr_adj_faces.py) — Create a 3-column figure comparing k-Wave time-reversal and adjoint [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/comparison/breast_tr_adj_faces.ipynb)
-- [`iterative-adj-tr.py`](examples/reconstruction/comparison/iterative-adj-tr.py) — Iterative refinement combining MSGB adjoint and time-reversal updates. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/comparison/iterative-adj-tr.ipynb)
-- [`kwave-TR-vs-Adj.py`](examples/reconstruction/comparison/kwave-TR-vs-Adj.py) — Reference comparison of k-Wave time-reversal against the k-Wave adjoint. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/comparison/kwave-TR-vs-Adj.ipynb)
-
-### Benchmarks
-
-- [`gb-vs-kw-runtime.py`](examples/benchmarks/gb-vs-kw-runtime.py) — Runtime comparison between the k-Wave forward solver and beamax's MSGB solver across a grid-size sweep. Requires `[kwave]` extra. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/benchmarks/gb-vs-kw-runtime.ipynb)
-- [`memory_test.py`](examples/benchmarks/memory_test.py) — Measure peak memory usage of an MSGB forward solve, annotated for CPU and GPU runs. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/benchmarks/memory_test.ipynb)
-- [`memory_test_detailed.py`](examples/benchmarks/memory_test_detailed.py) — Comprehensive profiling script that accounts for ALL time including JAX async ops. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/benchmarks/memory_test_detailed.ipynb)
-- [`strong-weak-scaling.py`](examples/benchmarks/strong-weak-scaling.py) — Aim: Work out the scalability of the ODE solver across multiple devices. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/benchmarks/strong-weak-scaling.ipynb)
-- [`wpt-decomp-runtime.py`](examples/benchmarks/wpt-decomp-runtime.py) — Runtime of the MSWPT forward and inverse transforms as a function of grid size and decomposition depth. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/benchmarks/wpt-decomp-runtime.ipynb)
+- [`2d_ray_bending.py`](rays/2d_ray_bending.py) — Trace a small fan of 2D rays through a smooth speed field. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/2d_ray_bending.ipynb)
+- [`neural_sound_speed_autofocus.py`](rays/neural_sound_speed_autofocus.py) — Optimize a neural sound-speed field so initially parallel rays focus. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/neural_sound_speed_autofocus.ipynb)
 
 ### Single Gaussian beam diagnostics
 
-- [`singleGBenergy.py`](examples/singleGB/singleGBenergy.py) — Track energy conservation along a single Gaussian beam trajectory. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/singleGB/singleGBenergy.ipynb)
-- [`singleGBplot.py`](examples/singleGB/singleGBplot.py) — Visualise a single Gaussian beam's amplitude and ellipse over time. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/singleGB/singleGBplot.ipynb)
-- [`singleGBpropagation.py`](examples/singleGB/singleGBpropagation.py) — Propagate a single Gaussian beam through a homogeneous medium. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/singleGB/singleGBpropagation.ipynb)
-- [`singleGBrayleigh-error.py`](examples/singleGB/singleGBrayleigh-error.py) — Single Gaussian beam Rayleigh-range / focal-error diagnostic. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/singleGB/singleGBrayleigh-error.ipynb)
-- [`singleGBwpt.py`](examples/singleGB/singleGBwpt.py) — Single Gaussian beam wave-packet transform diagnostic. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/singleGB/singleGBwpt.ipynb)
+- [`single_gaussian_beam_absorption.py`](single-gaussian-beam/single_gaussian_beam_absorption.py) — Compare lossless and absorbing single-Gaussian-beam propagation with k-Wave. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/single-gaussian-beam/single_gaussian_beam_absorption.ipynb)
 
-### Ray tracing & Hamiltonian
-
-- [`_curves.py`](examples/rays/_curves.py) — Ray-tracing diagnostic for the Gaussian beam Hamiltonian. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/_curves.ipynb)
-- [`_velocitymaps.py`](examples/rays/_velocitymaps.py) — Ray-tracing diagnostic for the Gaussian beam Hamiltonian. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/_velocitymaps.ipynb)
-- [`col.py`](examples/rays/col.py) — Ray-tracing diagnostic for the Gaussian beam Hamiltonian. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/col.ipynb)
-- [`rays-stiffness.py`](examples/rays/rays-stiffness.py) — Investigate the stiffness of the Gaussian beam ray ODEs. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/rays-stiffness.ipynb)
-- [`rays2d-anim.py`](examples/rays/rays2d-anim.py) — Animation of ray trajectories propagating through a 2D/3D medium. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/rays2d-anim.ipynb)
-- [`rays2d-animTR.py`](examples/rays/rays2d-animTR.py) — Animation of ray trajectories propagating through a 2D/3D medium. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/rays2d-animTR.ipynb)
-- [`rays2d.py`](examples/rays/rays2d.py) — Ray-tracing diagnostic for the Gaussian beam Hamiltonian. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/rays2d.ipynb)
-- [`rays3d.py`](examples/rays/rays3d.py) — Ray-tracing diagnostic for the Gaussian beam Hamiltonian. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/rays3d.ipynb)
-- [`rays3d2.py`](examples/rays/rays3d2.py) — Ray-tracing diagnostic for the Gaussian beam Hamiltonian. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/rays3d2.ipynb)
-
-### Bowtie sensor configurations
-
-- [`angle_mapping.py`](examples/bowtie/angle_mapping.py) — Angle-mapping experiment for planar line-sensor PAT data. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/bowtie/angle_mapping.ipynb)
-- [`test2d.py`](examples/bowtie/test2d.py) — Planar line-sensor wave data: 2D FFT in (sensor coordinate, time) and support-energy analysis. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/bowtie/test2d.ipynb)
-- [`test3d.py`](examples/bowtie/test3d.py) — Sweep CFL values for a 3D delta-source k-Wave run and measure the energy fractions of the planar-sensor (ky, kz, omega) spectrum that fall inside the continuum cone and curved Nyquist cap, diagnosing temporal aliasing as CFL crosses 1/sqrt(3). [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/bowtie/test3d.ipynb)
-- [`test3d_aliasing.py`](examples/bowtie/test3d_aliasing.py) — Compare a coarse-CFL 3D k-Wave planar-sensor spectrum against an aliased fine-CFL reference, quantifying how much of the observed cone violation is explained purely by temporal aliasing. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/bowtie/test3d_aliasing.ipynb)
 
 ## Contributing a new example
 
 1. Add the script under the appropriate `examples/<category>/` directory with
    a 1-2 sentence module docstring.
+   Use `Example extras: ...` and `Example smoke: false` for optional-runtime
+   examples.
 2. Run `python tools/finalize_examples.py` (or hand-edit a notebook) so a
    paired `.ipynb` exists with the Open-in-Colab badge + install cell pattern.
 3. Add a bullet to the section above (or rerun the regeneration script).
-4. If the example needs significant RAM or external data, mention it in the
-   docstring so the auto-generated notebook can surface a warning.
+4. Keep public examples self-contained and fast. Move research/profiling/data-
+   dependent material to `examples/private`.

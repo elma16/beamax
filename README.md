@@ -1,6 +1,6 @@
 # Beamax
 
-[![CI](https://github.com/elma16/beamax/actions/workflows/run-tests.yml/badge.svg)](https://github.com/elma16/beamax/actions/workflows/run-tests.yml) [![codecov](https://codecov.io/gh/elma16/beamax/branch/main/graph/badge.svg)](https://codecov.io/gh/elma16/beamax)
+[![CI](https://github.com/elma16/beamax/actions/workflows/run-tests.yml/badge.svg)](https://github.com/elma16/beamax/actions/workflows/run-tests.yml)
 
 Implementation of the fast multiscale Gaussian wavepacket transform and multiscale Gaussian beam method of [Qian and Ying (2010)](https://doi.org/10.1137/100787313) in JAX, with tools for Fourier tilings, multiscale wave-packet transforms, and acoustic forward/reconstruction solvers.
 
@@ -97,31 +97,28 @@ sensor_data, params = solver.forward(p0, domain, sensors, ts, wpt)
 print(sensor_data.shape)  # (Nt, 128)
 ```
 
-For the complete version with non-zero initial velocity and a spectral reference check, run `examples/forward/forward-1d-v0.py`.
+For the complete version with non-zero initial velocity and a spectral reference check, run `examples/forward/1d_forward_solve.py`.
 
 ## Running examples
 
-Every example under `examples/` runs locally from a checkout:
+The supported public examples live under `examples/`. They are small,
+self-contained, documented, paired with notebooks, linted, and smoke-tested in
+CI. Research, profiling, comparison, and data-dependent scripts are preserved
+under `examples/private/` as unsupported archived material.
 
 ```bash
-python examples/forward/forward-1d-v0.py
+python examples/forward/1d_forward_solve.py
 ```
 
 If you are running headless (CI/remote shell), disable interactive plotting:
 
 ```bash
-MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/forward-1d-v0.py
+MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/1d_forward_solve.py
 ```
 
 ### Google Colab
 
-Each notebook in the `examples/` tree carries an **Open in Colab** badge so you can run it on a free GPU or TPU without any local setup — see the gallery in [`examples/README.md`](examples/README.md). After clicking the badge, switch the runtime (`Runtime → Change runtime type → GPU` or `TPU`) to take advantage of JAX's hardware acceleration.
-
-Heavier benchmarks support a reduced default mode for faster validation. Opt into a full sweep with:
-
-```bash
-BEAMAX_FULL_BENCHMARKS=1 python examples/benchmarks/gb-vs-kw-runtime.py
-```
+Each notebook in `examples/` carries an **Open in Colab** badge. The public gallery is indexed in [`examples/README.md`](examples/README.md) and is designed to run on a standard CPU Colab runtime.
 
 Other optional environment variables:
 

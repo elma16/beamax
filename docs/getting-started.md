@@ -84,11 +84,11 @@ print(sensor_data.shape)
 ## Run an Example
 
 ```bash
-python examples/forward/forward-1d-v0.py
+python examples/forward/1d_forward_solve.py
 ```
 
 For headless environments:
 
 ```bash
-MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/forward-1d-v0.py
+MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/1d_forward_solve.py
 ```

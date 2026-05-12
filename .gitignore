@@ -20,6 +20,7 @@ coverage.json
 *.coverage
 
 # Local output directories
+examples/private/
 plots/
 plots_focusing/
 outputs/

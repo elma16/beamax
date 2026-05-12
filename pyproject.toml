@@ -51,6 +51,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest",
+  "pytest-cov",
   "ruff",
   "pre-commit",
   "mkdocs",
@@ -83,7 +84,7 @@ beamax = ["_assets/*.mplstyle", "py.typed"]
 
 [tool.ruff]
 extend-include = ["*.ipynb"]
-extend-exclude = ["examples"]
+extend-exclude = ["examples/private"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
