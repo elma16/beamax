@@ -9,7 +9,7 @@ git clone https://github.com/elma16/beamax.git
 cd beamax
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,kwave,viz]"
-pre-commit install
+tools/install-hooks.sh
 ```
 
 ## Running tests
@@ -26,7 +26,9 @@ skipped automatically if the packages are not installed.
 ## Code style
 
 - We use [ruff](https://docs.astral.sh/ruff/) for linting and formatting.
-- Pre-commit hooks run ruff, notebook stripping, and a fast pytest subset automatically.
+- Git hooks run ruff, notebook stripping, a fast pytest subset on commit, and
+  the full pytest suite before push. Install them with `tools/install-hooks.sh`
+  so the tracked public-push guard is preserved.
 - No maximum line length is enforced (`E501` is ignored), but keep lines reasonable.
 
 ## Pull requests

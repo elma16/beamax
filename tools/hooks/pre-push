@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+python_bin="${PRE_COMMIT_PYTHON:-$root/.venv/bin/python}"
+
+if [[ ! -x "$python_bin" ]]; then
+  python_bin="${PYTHON:-python3}"
+fi
+
+"$root/tools/hooks/check-public-push.sh" "$@"
+exec "$python_bin" -m pre_commit run --hook-stage pre-push --all-files
