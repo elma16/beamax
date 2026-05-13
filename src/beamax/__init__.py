@@ -35,6 +35,24 @@ __all__ = [
 # ---- Lazy submodules (to keep import cost small)
 # Access as: beamax.gb, beamax.utils, beamax.plotter, beamax.solvers
 def __getattr__(name: str) -> Any:
+    """
+    Lazily import optional public submodules.
+
+    Parameters
+    ----------
+    name : str
+        Attribute requested from the package namespace.
+
+    Returns
+    -------
+    Any
+        Imported submodule, cached in ``globals()``.
+
+    Raises
+    ------
+    AttributeError
+        If ``name`` is not a lazily exposed submodule.
+    """
     if name in {"gb", "utils", "plotter", "solvers"}:
         mod: ModuleType = import_module(f"{__name__}.{name}")
         globals()[name] = mod

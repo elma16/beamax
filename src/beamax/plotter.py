@@ -67,7 +67,20 @@ class PlotHelper:
     def __init__(
         self, figsize=(12, 5), font_size=12, title_font_size=14, colormap="viridis"
     ):
-        """Store global style defaults for plots."""
+        """
+        Store global style defaults for plots.
+
+        Parameters
+        ----------
+        figsize : Tuple[int, int], default=(12, 5)
+            Figure size passed to matplotlib.
+        font_size : int, default=12
+            Base font size for labels.
+        title_font_size : int, default=14
+            Title font size.
+        colormap : str, default="viridis"
+            Matplotlib colormap name.
+        """
         self.figsize = figsize
         self.font_size = font_size
         self.title_font_size = title_font_size
@@ -100,7 +113,20 @@ class PlotHelper:
         return fig, ax
 
     def set_labels(self, ax, xlabel=None, ylabel=None, zlabel=None):
-        """Apply axis labels if provided."""
+        """
+        Apply axis labels if provided.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Target axes.
+        xlabel : str, optional
+            X-axis label.
+        ylabel : str, optional
+            Y-axis label.
+        zlabel : str, optional
+            Z-axis label for 3D axes.
+        """
         if xlabel:
             ax.set_xlabel(xlabel, fontsize=self.font_size)
         if ylabel:
@@ -109,11 +135,29 @@ class PlotHelper:
             ax.set_zlabel(zlabel, fontsize=self.font_size)
 
     def save_plot(self, filename):
+        """
+        Save the current matplotlib figure and close it.
+
+        Parameters
+        ----------
+        filename : str or path-like
+            Output path passed to :func:`matplotlib.pyplot.savefig`.
+        """
         plt.tight_layout()
         plt.savefig(filename, transparent=True)
         plt.close()
 
     def _finalize_plot(self, fig, filename):
+        """
+        Save or display a figure depending on ``filename``.
+
+        Parameters
+        ----------
+        fig : matplotlib.figure.Figure
+            Figure to finalize.
+        filename : str or path-like, optional
+            Output path. If ``None``, the figure is shown interactively.
+        """
         if filename:
             self.save_plot(filename)
         else:
@@ -205,7 +249,28 @@ class PlotHelper:
         return fig, ax
 
     def _coeff_slice(self, arr, plane="xy", slice_index=None):
-        """Return a 2D view from 2D or 3D coefficient arrays."""
+        """
+        Return a 2D view from 2D or 3D coefficient arrays.
+
+        Parameters
+        ----------
+        arr : jnp.ndarray
+            Coefficient array.
+        plane : {"xy", "xz", "yz"}, default="xy"
+            Projection plane for 3D arrays.
+        slice_index : int, optional
+            Slice index orthogonal to ``plane``.
+
+        Returns
+        -------
+        jnp.ndarray
+            Absolute-value 2D coefficient view.
+
+        Raises
+        ------
+        ValueError
+            If ``arr`` is not 2D/3D or ``plane`` is invalid.
+        """
         if arr.ndim == 2:
             return jnp.abs(arr)
 
@@ -227,7 +292,28 @@ class PlotHelper:
         return jnp.abs(arr[sl, :, :])
 
     def _default_extent(self, dyadic_decomp, plane="xy", arr_shape=None):
-        """Symmetric extent centered at zero matching the plane dimensions."""
+        """
+        Compute a symmetric extent centered at zero for a projection plane.
+
+        Parameters
+        ----------
+        dyadic_decomp : DyadicDecomposition
+            Decomposition providing default grid shape.
+        plane : {"xy", "xz", "yz"}, default="xy"
+            Projection plane.
+        arr_shape : Tuple[int, ...], optional
+            Shape to use instead of ``dyadic_decomp.N``.
+
+        Returns
+        -------
+        list[int]
+            Matplotlib ``imshow`` extent.
+
+        Raises
+        ------
+        ValueError
+            If ``plane`` is invalid.
+        """
         if arr_shape is None:
             arr_shape = dyadic_decomp.N
         dshape = tuple(int(s) for s in arr_shape)
@@ -244,6 +330,20 @@ class PlotHelper:
         return [-ny // 2, ny // 2, -nz // 2, nz // 2]
 
     def _draw_boxes_1d(self, ax, dyadic_decomp, color="gray", alpha=0.4):
+        """
+        Draw 1D dyadic boxes as shaded spans.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Target axes.
+        dyadic_decomp : DyadicDecomposition
+            Decomposition providing centres and box lengths.
+        color : str, default="gray"
+            Span color.
+        alpha : float, default=0.4
+            Span opacity.
+        """
         cumsum_boxes = jnp.r_[0, jnp.cumsum(dyadic_decomp.num_boxes_ndim)]
         lengths = dyadic_decomp.box_lengths
         aspect = jnp.array(dyadic_decomp.box_aspect_ratio)
@@ -267,7 +367,29 @@ class PlotHelper:
         linewidth=1.0,
         colors=None,
     ):
-        """Overlay dyadic boxes projected onto a 2D plane (legacy geometry)."""
+        """
+        Overlay dyadic boxes projected onto a 2D plane.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Target axes.
+        dyadic_decomp : DyadicDecomposition
+            Decomposition providing centres and box sizes.
+        plane : {"xy", "xz", "yz"}, default="xy"
+            Projection plane.
+        alpha : float, default=0.5
+            Rectangle opacity.
+        linewidth : float, default=1.0
+            Rectangle line width.
+        colors : list[str], optional
+            Per-level colors. Defaults to white.
+
+        Raises
+        ------
+        ValueError
+            If ``plane`` is invalid.
+        """
         if colors is None:
             colors = ["white"] * max(1, dyadic_decomp.num_levels)
         plane = plane.lower()
@@ -367,6 +489,26 @@ class PlotHelper:
         filename=None,
         sensors=None,
     ):
+        """
+        Plot a one-dimensional wavefield trace.
+
+        Parameters
+        ----------
+        Y : jnp.ndarray, shape (Nx,)
+            Values to plot.
+        X : jnp.ndarray, optional
+            Coordinates for ``Y``. Defaults to integer indices.
+        title : str, optional
+            Figure title.
+        xlabel : str, default="X-axis"
+            X-axis label.
+        ylabel : str, default="Y-axis"
+            Y-axis label.
+        filename : str, optional
+            Output path. If ``None``, the figure is shown.
+        sensors : jnp.ndarray, optional
+            Sensor locations to overlay.
+        """
         fig, ax = self.setup_figure(title=title)
         if X is None:
             X = jnp.arange(len(Y))
@@ -518,6 +660,22 @@ class PlotHelper:
     def _plot_complex_wavefield_1d(
         self, y_complex, title=None, xlabel="X-axis", ylabel="Y-axis", filename=None
     ):
+        """
+        Plot real and imaginary parts of a one-dimensional complex field.
+
+        Parameters
+        ----------
+        y_complex : jnp.ndarray, shape (Nx,)
+            Complex-valued trace.
+        title : str, optional
+            Figure title.
+        xlabel : str, default="X-axis"
+            X-axis label.
+        ylabel : str, default="Y-axis"
+            Y-axis label.
+        filename : str, optional
+            Output path. If ``None``, the figure is shown.
+        """
         real_part = jnp.real(y_complex)
         imag_part = jnp.imag(y_complex)
         fig, (ax1, ax2) = plt.subplots(1, 2)
@@ -537,6 +695,20 @@ class PlotHelper:
             plt.show()
 
     def _plot_complex_wavefield_2d(self, Z_complex, X, Y, title=None, filename=None):
+        """
+        Plot real and imaginary parts of a two-dimensional complex field.
+
+        Parameters
+        ----------
+        Z_complex : jnp.ndarray, shape (Ny, Nx)
+            Complex-valued field.
+        X, Y : jnp.ndarray
+            Coordinate grids.
+        title : str, optional
+            Figure title.
+        filename : str, optional
+            Output path. If ``None``, the figure is shown.
+        """
         real_part = jnp.real(Z_complex)
         imag_part = jnp.imag(Z_complex)
         fig, (ax1, ax2) = plt.subplots(1, 2)
@@ -591,6 +763,18 @@ class PlotHelper:
         self._finalize_plot(fig, filename)
 
     def _plot_centers_1d(self, centers, title=None, filename=None):
+        """
+        Plot labelled one-dimensional centre locations.
+
+        Parameters
+        ----------
+        centers : jnp.ndarray, shape (n, 1)
+            Centre coordinates.
+        title : str, optional
+            Figure title.
+        filename : str, optional
+            Output path. If ``None``, the figure is shown.
+        """
         fig, ax = self.setup_figure(title=title)
         ax.scatter(
             centers[:, 0], jnp.zeros_like(centers[:, 0]), c="blue", s=50, zorder=5
@@ -613,6 +797,18 @@ class PlotHelper:
             plt.show()
 
     def _plot_centers_2d(self, centers, title=None, filename=None):
+        """
+        Plot labelled two-dimensional centre locations.
+
+        Parameters
+        ----------
+        centers : jnp.ndarray, shape (n, 2)
+            Centre coordinates.
+        title : str, optional
+            Figure title.
+        filename : str, optional
+            Output path. If ``None``, the figure is shown.
+        """
         fig, ax = self.setup_figure(title=title)
         ax.scatter(centers[:, 0], centers[:, 1], c="blue", s=50, zorder=5)
         for idx, (x, y) in enumerate(centers):
@@ -633,6 +829,18 @@ class PlotHelper:
             plt.show()
 
     def _plot_centers_3d(self, centers, title=None, filename=None):
+        """
+        Plot labelled three-dimensional centre locations.
+
+        Parameters
+        ----------
+        centers : jnp.ndarray, shape (n, 3)
+            Centre coordinates.
+        title : str, optional
+            Figure title.
+        filename : str, optional
+            Output path. If ``None``, the figure is shown.
+        """
         # Create figure with 3D projection
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot(111, projection="3d")
@@ -1017,6 +1225,19 @@ def animate_wavefield_2d(data, skip_frames=1, cmap="viridis", label="", timestep
     title = ax.set_title("")
 
     def update_plot(frame):
+        """
+        Update one frame of the 2D wavefield animation.
+
+        Parameters
+        ----------
+        frame : int
+            Animation frame index after applying ``skip_frames``.
+
+        Returns
+        -------
+        list
+            Matplotlib artists updated for this frame.
+        """
         im.set_array(data[frame * skip_frames])
         if timesteps is not None:
             current_time = timesteps[frame * skip_frames]
@@ -1048,6 +1269,19 @@ def animate_wavefield_1d(data, skip_frames=1):
     ax.set_xlim(0, data.shape[1])
 
     def update_plot(frame):
+        """
+        Update one frame of the 1D wavefield animation.
+
+        Parameters
+        ----------
+        frame : int
+            Animation frame index after applying ``skip_frames``.
+
+        Returns
+        -------
+        tuple
+            Updated line artist.
+        """
         line.set_ydata(data[frame * skip_frames])
         return (line,)
 
@@ -1192,10 +1426,26 @@ def plot_wavefields_interactive(
     button_next = Button(ax_button_next, "+dt")
 
     def update(val):
+        """
+        Respond to slider changes in the interactive comparison view.
+
+        Parameters
+        ----------
+        val : float
+            Slider value representing the time index.
+        """
         time_index = int(slider.val)
         update_plots(time_index)
 
     def update_plots(time_index):
+        """
+        Redraw all comparison panels for a time index.
+
+        Parameters
+        ----------
+        time_index : int
+            Index into ``ts`` and both wavefield sequences.
+        """
         difference = p0_kwave_all[time_index] - p0_msgb_all[time_index]
         if len(p0_kwave_all.shape) == 2:  # Handle 1D data
             im_kwave.set_ydata(p0_kwave_all[time_index])
@@ -1251,11 +1501,27 @@ def plot_wavefields_interactive(
         fig.canvas.draw_idle()
 
     def next_step(event):
+        """
+        Advance the interactive comparison by one time step.
+
+        Parameters
+        ----------
+        event : matplotlib.backend_bases.Event
+            Button-click event.
+        """
         current_time_index = int(slider.val)
         if current_time_index < len(ts) - 1:
             slider.set_val(current_time_index + 1)
 
     def prev_step(event):
+        """
+        Move the interactive comparison back by one time step.
+
+        Parameters
+        ----------
+        event : matplotlib.backend_bases.Event
+            Button-click event.
+        """
         current_time_index = int(slider.val)
         if current_time_index > 0:
             slider.set_val(current_time_index - 1)
@@ -1348,10 +1614,26 @@ def plot_wavefields_interactive_wpt(
     button_next = Button(ax_button_next, "+dt")
 
     def update(val):
+        """
+        Respond to slider changes in the WPT comparison view.
+
+        Parameters
+        ----------
+        val : float
+            Slider value representing the time index.
+        """
         time_index = int(slider.val)
         update_plots(time_index)
 
     def update_plots(time_index):
+        """
+        Redraw WPT comparison panels for a time index.
+
+        Parameters
+        ----------
+        time_index : int
+            Index into ``ts`` and both wavefield sequences.
+        """
         if len(p0_kwave_all.shape) == 2:  # 1D case
             im_kwave.set_ydata(p0_kwave_all[time_index])
             im_msgb.set_ydata(p0_msgb_all[time_index])
@@ -1360,11 +1642,27 @@ def plot_wavefields_interactive_wpt(
             im_msgb.set_data(p0_msgb_all[time_index])
 
     def next_step(event):
+        """
+        Advance the WPT comparison by one time step.
+
+        Parameters
+        ----------
+        event : matplotlib.backend_bases.Event
+            Button-click event.
+        """
         current_time_index = int(slider.val)
         if current_time_index < len(ts) - 1:
             slider.set_val(current_time_index + 1)
 
     def prev_step(event):
+        """
+        Move the WPT comparison back by one time step.
+
+        Parameters
+        ----------
+        event : matplotlib.backend_bases.Event
+            Button-click event.
+        """
         current_time_index = int(slider.val)
         if current_time_index > 0:
             slider.set_val(current_time_index - 1)
@@ -1553,10 +1851,30 @@ def plot_mswpt_coeffs(
     log_scale: bool = False,
 ):
     """
-    Plots MSWPT coefficients on a given axis with dyadic boxes, highlights, and asymptotes.
+    Plot MSWPT coefficients with dyadic boxes, highlights, and asymptotes.
 
-    Returns:
-        im: The image object returned by imshow (useful for colorbars).
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Target axes.
+    coeffs_array : jnp.ndarray
+        Two-dimensional coefficient image.
+    dyadic_decomp : DyadicDecomposition
+        Decomposition providing box centres and sizes.
+    cutoff_freq : float, optional
+        Highlight boxes whose centre norm is below this threshold.
+    box_corners : array-like, optional
+        Pair of global box indices defining a highlighted interval.
+    asymptote : bool, default=False
+        Whether to overlay diagonal asymptote guides.
+    log_scale : bool, default=False
+        Whether to display coefficient magnitudes with logarithmic
+        normalization.
+
+    Returns
+    -------
+    matplotlib.image.AxesImage
+        Image handle returned by ``imshow``.
     """
     # --- Data Prep ---
     # Transpose to match (Time, Space) orientation usually desired in plots

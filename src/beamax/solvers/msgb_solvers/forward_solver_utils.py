@@ -12,11 +12,47 @@ from beamax.geometry import Domain
 
 
 def _threshold_hard(coeff, val):
+    """
+    Select coefficients whose magnitude is strictly greater than a threshold.
+
+    Parameters
+    ----------
+    coeff : jnp.ndarray
+        Coefficient vector.
+    val : float
+        Absolute magnitude threshold.
+
+    Returns
+    -------
+    idx : jnp.ndarray
+        Selected coefficient indices.
+    values : jnp.ndarray
+        Selected coefficient values.
+    """
     idx = jnp.where(jnp.abs(coeff) > val)[0]
     return idx, coeff[idx]
 
 
 def _threshold_percentile(coeff, val, max_size=None):
+    """
+    Select coefficients above a magnitude percentile.
+
+    Parameters
+    ----------
+    coeff : jnp.ndarray
+        Coefficient vector.
+    val : float
+        Percentile threshold in ``[0, 100]``.
+    max_size : int, optional
+        Fixed output size for ``jnp.nonzero``. Defaults to ``len(coeff)``.
+
+    Returns
+    -------
+    idx : jnp.ndarray
+        Selected indices, padded with ``-1`` if needed.
+    values : jnp.ndarray
+        Selected values, padded with zeros if needed.
+    """
     if max_size is None:
         max_size = coeff.shape[0]
     thresh = jnp.percentile(jnp.abs(coeff), val)
@@ -27,6 +63,23 @@ def _threshold_percentile(coeff, val, max_size=None):
 
 
 def _threshold_top_n(coeff, val):
+    """
+    Select the largest ``val`` coefficients by magnitude.
+
+    Parameters
+    ----------
+    coeff : jnp.ndarray
+        Coefficient vector.
+    val : int
+        Number of coefficients to select.
+
+    Returns
+    -------
+    idx : jnp.ndarray
+        Selected indices.
+    values : jnp.ndarray
+        Selected coefficient values.
+    """
     N = int(val)
     abs_c = jnp.abs(coeff)
     idx_unsorted = jnp.argpartition(abs_c, abs_c.size - N)[-N:]
@@ -35,6 +88,23 @@ def _threshold_top_n(coeff, val):
 
 
 def _threshold_hard_reassign(coeff, val):
+    """
+    Hard-threshold coefficients and rescale retained energy.
+
+    Parameters
+    ----------
+    coeff : jnp.ndarray
+        Coefficient vector.
+    val : float
+        Relative threshold as a fraction of the maximum magnitude.
+
+    Returns
+    -------
+    idx : jnp.ndarray
+        Selected indices.
+    values : jnp.ndarray
+        Reassigned coefficient values.
+    """
     thr = jnp.where(jnp.abs(coeff) / jnp.max(jnp.abs(coeff)) >= val, coeff, 0)
     ratio = jnp.sqrt(jnp.sum(jnp.abs(coeff) ** 2) / jnp.sum(jnp.abs(thr) ** 2))
     reassigned = thr * ratio
@@ -43,6 +113,27 @@ def _threshold_hard_reassign(coeff, val):
 
 
 def _threshold_bao_energy(coeff, val, decomp, red):
+    """
+    Threshold coefficients by Bao-style frequency-weighted energy.
+
+    Parameters
+    ----------
+    coeff : jnp.ndarray
+        Coefficient vector.
+    val : float
+        Weighted-energy threshold.
+    decomp : DyadicDecomposition
+        Dyadic decomposition used to map coefficients to boxes.
+    red : int
+        Transform redundancy.
+
+    Returns
+    -------
+    idx : jnp.ndarray
+        Selected indices.
+    values : jnp.ndarray
+        Weighted coefficient values.
+    """
     shapes = utils.compute_coeff_shapes(decomp, red, jnp.arange(decomp.num_levels))
     cumsum = jnp.r_[0, jnp.cumsum(decomp.num_boxes_ndim)]
     nn_level, nn_idx = utils.find_tensor_and_multiindex(
@@ -56,6 +147,23 @@ def _threshold_bao_energy(coeff, val, decomp, red):
 
 
 def _threshold_perc_max_abs(coeff, val):
+    """
+    Select coefficients above a fraction of the maximum magnitude.
+
+    Parameters
+    ----------
+    coeff : jnp.ndarray
+        Coefficient vector.
+    val : float
+        Fraction of ``max(abs(coeff))`` used as the threshold.
+
+    Returns
+    -------
+    idx : jnp.ndarray
+        Selected indices, padded with ``-1`` if needed.
+    values : jnp.ndarray
+        Selected values, padded with zeros if needed.
+    """
     thresh = jnp.max(jnp.abs(coeff)) * val
     mask = jnp.abs(coeff) > thresh
     size = int(coeff.shape[0])
@@ -73,14 +181,28 @@ def threshold_coefficients(
     """
     Apply thresholding to wavelet coefficients.
 
-    Args:
-        coeffs: Coefficients to threshold (single array or tuple of arrays)
-        val: Threshold value
-        strategy: Thresholding strategy
-        wpt: Wavelet packet transform (required for some strategies)
+    Parameters
+    ----------
+    coeffs : jnp.ndarray or Tuple[jnp.ndarray, jnp.ndarray]
+        Coefficients to threshold.
+    val : float
+        Threshold value.
+    strategy : str, default="hard"
+        Thresholding strategy.
+    wpt : MSWPT, optional
+        Wave-packet transform required by strategies that depend on the
+        dyadic layout.
 
-    Returns:
-        Thresholded coefficient indices and values
+    Returns
+    -------
+    Tuple[jnp.ndarray, jnp.ndarray] or Tuple[Tuple[jnp.ndarray, jnp.ndarray], ...]
+        Selected indices and values. If ``coeffs`` is a tuple, returns one
+        ``(idx, values)`` pair for each coefficient vector.
+
+    Raises
+    ------
+    ValueError
+        If ``strategy`` is unknown.
     """
     funcs = {
         "hard": lambda c: _threshold_hard(c, val),
@@ -108,16 +230,58 @@ def compute_forward_parameters(
     """
     Compute Gaussian beam parameters from wavelet coefficients.
 
-    Args:
-        significant_coeffs: Significant coefficient indices (single array or tuple)
-        wpt: Wavelet packet transform
-        domain: Domain object
+    Parameters
+    ----------
+    significant_coeffs : jnp.ndarray or Tuple[jnp.ndarray, jnp.ndarray]
+        Significant coefficient indices for positive, or positive/negative,
+        modes.
+    wpt : MSWPT
+        Wave-packet transform.
+    domain : Domain
+        Physical domain.
 
-    Returns:
-        Tuple of (p0s, M0s, x0s, ωs, a0s, modes)
+    Returns
+    -------
+    p0s : jnp.ndarray
+        Initial beam momenta.
+    M0s : jnp.ndarray
+        Initial beam Hessians.
+    x0s : jnp.ndarray
+        Initial beam positions.
+    ωs : jnp.ndarray
+        Beam frequencies.
+    a0s : jnp.ndarray
+        Initial beam amplitudes.
+    modes : jnp.ndarray
+        Beam branch signs.
     """
 
     def compute_params(coeffs: jnp.ndarray, sign: int):
+        """
+        Compute beam parameters for one sign branch.
+
+        Parameters
+        ----------
+        coeffs : jnp.ndarray
+            Significant coefficient indices for one sign branch.
+        sign : int
+            Mode sign multiplier.
+
+        Returns
+        -------
+        p0s : jnp.ndarray
+            Initial beam momenta.
+        M0s : jnp.ndarray
+            Initial beam Hessians.
+        x0s : jnp.ndarray
+            Initial beam positions.
+        ωs : jnp.ndarray
+            Beam frequencies.
+        a0s : jnp.ndarray
+            Initial beam amplitudes.
+        modes : jnp.ndarray
+            Beam branch signs.
+        """
         grid_size = domain.grid_size
         box_lengths = jnp.array(wpt.dyadic_decomp.box_lengths)
         box_aspect_ratio = jnp.array(wpt.dyadic_decomp.box_aspect_ratio)
@@ -170,13 +334,19 @@ def compute_memory_requirements(b: int, N: Tuple, Nt: int) -> str:
     """
     Estimate memory requirements for Gaussian beam computation.
 
-    Args:
-        b: Number of beams
-        N: Grid dimensions
-        Nt: Number of time points
+    Parameters
+    ----------
+    b : int
+        Number of beams.
+    N : Tuple[int, ...]
+        Grid dimensions.
+    Nt : int
+        Number of time points.
 
-    Returns:
-        Memory estimate string
+    Returns
+    -------
+    str
+        Human-readable memory estimate.
     """
     dims = (Nt,) + N + (b,)
     dtype = jnp.float64 if jax.config.x64_enabled else jnp.float32
@@ -204,25 +374,45 @@ def _compute_beams(
     """
     Unified beam computation function.
 
-    Args:
-        x0: Initial positions
-        p0: Initial momentum vectors
-        M0: Initial M matrices
-        a0: Initial amplitudes
-        ω: Angular frequencies
-        mode: Beam modes
-        c: Speed of sound function
-        lam: Lambda parameter
-        ts: Time points
-        sensors: Sensor positions
-        domain_size: Domain size
-        periodic: Boundary conditions
-        ode_solver: ODE solver function
-        use_real: Whether to use real-valued computation
-        sum_beams: Whether to sum over beams
+    Parameters
+    ----------
+    x0 : jnp.ndarray
+        Initial positions.
+    p0 : jnp.ndarray
+        Initial momentum vectors.
+    M0 : jnp.ndarray
+        Initial Hessian matrices.
+    a0 : jnp.ndarray
+        Initial amplitudes.
+    ω : jnp.ndarray
+        Angular frequencies.
+    mode : jnp.ndarray
+        Beam modes.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption parameter.
+    ts : jnp.ndarray
+        Time points.
+    sensors : jnp.ndarray
+        Sensor positions.
+    domain_size : jnp.ndarray
+        Domain size.
+    periodic : jnp.ndarray
+        Boundary periodicity flags.
+    ode_solver : SolverFn
+        ODE solver.
+    use_real : bool, default=True
+        Whether to use real-valued beam computation.
+    sum_beams : bool, default=False
+        Whether to sum over the beam axis.
+    solver_config : SolverConfig, optional
+        Numerical ODE configuration.
 
-    Returns:
-        Computed beams (summed if sum_beams=True)
+    Returns
+    -------
+    jnp.ndarray
+        Computed beams, summed if ``sum_beams=True``.
     """
     compute_fn = (
         core.compute_gaussian_beam_real if use_real else core.compute_gaussian_beam
@@ -265,8 +455,42 @@ def _aggregate_beams(
     """
     Generic beam aggregation supporting scan, vmap, or direct computation.
 
-    Note: compute_gaussian_beam_real already sums over beams internally,
-    while compute_gaussian_beam keeps the beam axis.
+    Parameters
+    ----------
+    params : Tuple[jnp.ndarray, ...]
+        Beam parameter tuple ``(p0, M0, x0, omega, a0, mode)``.
+    aggregate_method : {"scan", "vmap", "all"}
+        Aggregation strategy.
+    init_shape : Tuple[int, ...]
+        Shape of the running accumulated field.
+    use_real : bool
+        Whether beam computation is real-valued.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption parameter.
+    ts : jnp.ndarray
+        Time grid.
+    sensors : jnp.ndarray
+        Sensor positions.
+    domain_size : jnp.ndarray
+        Domain size.
+    periodic : jnp.ndarray
+        Boundary periodicity flags.
+    ode_solver : SolverFn
+        ODE solver.
+    solver_config : SolverConfig, optional
+        Numerical ODE configuration.
+
+    Returns
+    -------
+    jnp.ndarray
+        Aggregated field.
+
+    Notes
+    -----
+    ``compute_gaussian_beam_real`` already sums over beams internally, while
+    ``compute_gaussian_beam`` keeps the beam axis.
     """
     p0_batches, M0_batches, x0_batches, ω_batches, a0_batches, mode_batches = params
 
@@ -280,6 +504,23 @@ def _aggregate_beams(
             init = jnp.zeros(init_shape, dtype=complex_dtype)
 
         def scan_fn(carry, inp):
+            """
+            Accumulate one beam batch into the scanned field.
+
+            Parameters
+            ----------
+            carry : jnp.ndarray
+                Running accumulated field.
+            inp : Tuple[jnp.ndarray, ...]
+                One batch of beam parameters.
+
+            Returns
+            -------
+            carry : jnp.ndarray
+                Updated accumulated field.
+            aux : None
+                Empty scan output.
+            """
             p0, M0, x0, ω, a0, mode = inp
             batch_result = _compute_beams(
                 x0,
@@ -379,20 +620,35 @@ def compute_forward_result(
     """
     Compute forward solution to the wave equation using Gaussian beams.
 
-    Args:
-        params: Tuple of beam parameters (p0, M0, x0, ω, a0, mode)
-        c: Speed of sound function
-        lam: Lambda parameter
-        ts: Time points
-        ode_solver: ODE solver function
-        sensors: Sensor positions
-        domain_size: Domain size
-        periodic: Boundary conditions
-        use_real: Whether to use real-valued computation
-        aggregate_method: 'scan', 'vmap', or 'all'
+    Parameters
+    ----------
+    params : Tuple[jnp.ndarray, ...]
+        Beam parameters ``(p0, M0, x0, omega, a0, mode)``.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption parameter.
+    ts : jnp.ndarray
+        Time points.
+    ode_solver : SolverFn
+        ODE solver.
+    sensors : jnp.ndarray
+        Sensor positions.
+    domain_size : jnp.ndarray
+        Domain size.
+    periodic : jnp.ndarray
+        Boundary periodicity flags.
+    use_real : bool, default=True
+        Whether to use real-valued beam computation.
+    aggregate_method : {"scan", "vmap", "all"}, default="scan"
+        Beam aggregation method.
+    solver_config : SolverConfig, optional
+        Numerical ODE configuration.
 
-    Returns:
-        Forward solution at sensor locations
+    Returns
+    -------
+    jnp.ndarray
+        Forward solution at sensor locations.
     """
     init_shape = ts.shape + sensors.shape[:-1]
 
@@ -423,16 +679,32 @@ def compute_coefficients(
     """
     Compute wavelet packet transform coefficients.
 
-    Args:
-        p0: Initial pressure field
-        dpdt: Time derivative of pressure field
-        input_type: Type of input data
-        domain: Domain object
-        wpt: Wavelet packet transform object
-        mode: 'both' returns (cpos, cneg), 'pos_only' returns cpos masked
+    Parameters
+    ----------
+    p0 : jnp.ndarray
+        Initial pressure field.
+    dpdt : jnp.ndarray
+        Initial pressure time derivative.
+    input_type : {"spatial", "fourier"}
+        Domain of ``p0`` and ``dpdt``.
+    domain : Domain
+        Physical domain.
+    wpt : MSWPT
+        Wave-packet transform.
+    mode : {"both", "pos_only"}, default="both"
+        ``"both"`` returns positive and negative frequency coefficients.
+        ``"pos_only"`` returns masked positive coefficients.
 
-    Returns:
-        Coefficients (cpos, cneg) if mode='both', or masked cpos if mode='pos_only'
+    Returns
+    -------
+    jnp.ndarray or Tuple[jnp.ndarray, jnp.ndarray]
+        Coefficients ``(cpos, cneg)`` if ``mode="both"``, otherwise masked
+        ``cpos``.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is invalid.
     """
     # Compute wavelet transforms
     a_coeff = wpt.forward(p0, input_type)

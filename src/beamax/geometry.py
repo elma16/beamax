@@ -93,6 +93,19 @@ class Domain(eqx.Module):
         val = jnp.asarray(self.c)
 
         def _const_c(x):
+            """
+            Broadcast a constant sound speed over query coordinates.
+
+            Parameters
+            ----------
+            x : jnp.ndarray, shape (..., d)
+                Query coordinates.
+
+            Returns
+            -------
+            jnp.ndarray, shape (...)
+                Constant sound speed with the leading shape of ``x``.
+            """
             return val + jnp.zeros(x.shape[:-1], dtype=val.dtype)
 
         return _const_c
@@ -291,6 +304,15 @@ class Sensor(eqx.Module):
     ):
         """
         Construct from positions or mask.
+
+        Parameters
+        ----------
+        domain : Domain
+            Spatial domain the sensor belongs to.
+        positions : jnp.ndarray, shape (Ns, d), optional
+            Physical sensor positions.
+        binary_mask : jnp.ndarray, shape (*domain.N,), optional
+            Binary sensor mask.
 
         Raises
         ------

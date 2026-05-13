@@ -24,6 +24,24 @@ DEFAULT_MUA = {0: 0.10, 2: 0.15, 3: 0.05, 4: 0.20, 5: 2.00}
 
 
 def _first_dataset(f: h5py.File) -> np.ndarray:
+    """
+    Return the first dataset found in an HDF5 file or first-level group.
+
+    Parameters
+    ----------
+    f : h5py.File
+        Open HDF5 file.
+
+    Returns
+    -------
+    np.ndarray
+        Dataset values loaded into memory.
+
+    Raises
+    ------
+    ValueError
+        If no dataset is found.
+    """
     for _, obj in f.items():
         if isinstance(obj, h5py.Dataset):
             return np.array(obj)
@@ -35,6 +53,19 @@ def _first_dataset(f: h5py.File) -> np.ndarray:
 
 
 def _find_labels(f: h5py.File) -> np.ndarray:
+    """
+    Locate a label dataset in an OA-BREAST HDF5 file.
+
+    Parameters
+    ----------
+    f : h5py.File
+        Open HDF5 file.
+
+    Returns
+    -------
+    np.ndarray
+        Label volume.
+    """
     for key in ("MergedPhantom", "merged_phantom", "phantom", "labels", "tissueType"):
         if key in f and isinstance(f[key], h5py.Dataset):
             return np.array(f[key])
@@ -42,6 +73,26 @@ def _find_labels(f: h5py.File) -> np.ndarray:
 
 
 def _ensure_axis_order_zyx(arr: np.ndarray, axis_order: str) -> np.ndarray:
+    """
+    Convert a label volume to ``(Z, Y, X)`` axis order.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input label volume.
+    axis_order : {"ZYX", "XYZ", "YZX"}
+        Axis order of ``arr``.
+
+    Returns
+    -------
+    np.ndarray
+        Volume in ``(Z, Y, X)`` order.
+
+    Raises
+    ------
+    ValueError
+        If ``axis_order`` is unsupported.
+    """
     ao = axis_order.upper()
     if ao == "ZYX":
         return arr
@@ -53,6 +104,19 @@ def _ensure_axis_order_zyx(arr: np.ndarray, axis_order: str) -> np.ndarray:
 
 
 def _check_labels(lbl: np.ndarray):
+    """
+    Validate that labels are within the OA-BREAST label set.
+
+    Parameters
+    ----------
+    lbl : np.ndarray
+        Label array.
+
+    Raises
+    ------
+    ValueError
+        If labels outside :data:`VALID_LABELS` are present.
+    """
     u = set(np.unique(lbl).tolist())
     if not u.issubset(VALID_LABELS):
         raise ValueError(
@@ -63,6 +127,26 @@ def _check_labels(lbl: np.ndarray):
 def _resample_labels_to_shape(
     labels_zyx: np.ndarray, target_shape: Tuple[int, int, int]
 ) -> np.ndarray:
+    """
+    Resample labels to a target shape with nearest-neighbour interpolation.
+
+    Parameters
+    ----------
+    labels_zyx : np.ndarray
+        Label volume in ``(Z, Y, X)`` order.
+    target_shape : Tuple[int, int, int]
+        Desired output shape.
+
+    Returns
+    -------
+    np.ndarray
+        Resampled label volume.
+
+    Raises
+    ------
+    ValueError
+        If any target dimension is non-positive.
+    """
     src_shape = np.array(labels_zyx.shape, dtype=float)
     tgt_shape = np.array(target_shape, dtype=float)
     if (tgt_shape <= 0).any():
@@ -79,6 +163,28 @@ def _resample_labels_to_spacing(
     src_spacing_mm: Tuple[float, float, float],
     tgt_spacing_mm: Tuple[float, float, float],
 ) -> np.ndarray:
+    """
+    Resample labels from source spacing to target spacing.
+
+    Parameters
+    ----------
+    labels_zyx : np.ndarray
+        Label volume in ``(Z, Y, X)`` order.
+    src_spacing_mm : Tuple[float, float, float]
+        Source spacing ``(dz, dy, dx)`` in millimetres.
+    tgt_spacing_mm : Tuple[float, float, float]
+        Target spacing ``(dz, dy, dx)`` in millimetres.
+
+    Returns
+    -------
+    np.ndarray
+        Resampled label volume.
+
+    Raises
+    ------
+    ValueError
+        If any spacing is non-positive.
+    """
     sz, sy, sx = map(float, src_spacing_mm)
     tz, ty, tx = map(float, tgt_spacing_mm)
     if min(tz, ty, tx) <= 0 or min(sz, sy, sx) <= 0:
@@ -91,6 +197,23 @@ def _resample_labels_to_spacing(
 
 
 def _effective_spacing_after_shape_resample(src_spacing_mm, src_shape, tgt_shape):
+    """
+    Compute effective spacing after resampling to a target shape.
+
+    Parameters
+    ----------
+    src_spacing_mm : Tuple[float, float, float]
+        Source spacing in millimetres.
+    src_shape : Tuple[int, int, int]
+        Source volume shape.
+    tgt_shape : Tuple[int, int, int]
+        Target volume shape.
+
+    Returns
+    -------
+    Tuple[float, float, float]
+        Effective target spacing in millimetres.
+    """
     src_shape = np.array(src_shape, dtype=float)
     tgt_shape = np.array(tgt_shape, dtype=float)
     zf = tgt_shape / src_shape
@@ -104,6 +227,36 @@ def _slice_axis_and_spacing(
     slice_idx: Optional[int],
     policy: Literal["middle", "max_variance", None],
 ):
+    """
+    Extract a 2D slice and corresponding spacing from a 3D label volume.
+
+    Parameters
+    ----------
+    labels_zyx : np.ndarray
+        Label volume in ``(Z, Y, X)`` order.
+    spacing_zyx_mm : Tuple[float, float, float]
+        Source spacing in ``(Z, Y, X)`` order.
+    slice_axis : int
+        Axis to slice along.
+    slice_idx : int, optional
+        Explicit slice index. If ``None``, ``policy`` selects one.
+    policy : {"middle", "max_variance", None}
+        Slice-selection policy used when ``slice_idx`` is ``None``.
+
+    Returns
+    -------
+    lbl2d : np.ndarray
+        Extracted 2D label image.
+    slice_idx : int
+        Chosen slice index.
+    sp2d : Tuple[float, float]
+        Spacing of the returned 2D image.
+
+    Raises
+    ------
+    ValueError
+        If ``slice_axis`` is invalid for ``max_variance`` selection.
+    """
     Z, Y, X = labels_zyx.shape
     if slice_idx is None:
         if policy == "max_variance":
@@ -142,7 +295,25 @@ def _make_p0_vessels_only(
     gruneisen: float,
     normalize: bool,
 ) -> np.ndarray:
-    """p0 is vessels only (binary mask scaled by Γ*μa[vessel])."""
+    """
+    Build a vessel-only initial pressure map.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        Tissue label array.
+    label_to_mua : Dict[int, float]
+        Absorption coefficient per label.
+    gruneisen : float
+        Gruneisen coefficient.
+    normalize : bool
+        Whether to normalize nonzero pressure values to maximum one.
+
+    Returns
+    -------
+    np.ndarray
+        Vessel mask scaled by ``gruneisen * mua[vessel]``.
+    """
     if VESSEL_LABEL not in np.unique(labels):
         # no vessels present; return zeros
         p0 = np.zeros_like(labels, dtype=np.float32)
@@ -155,7 +326,21 @@ def _make_p0_vessels_only(
 
 
 def _labels_to_c_map(labels: np.ndarray, label_to_sos: Dict[int, float]) -> np.ndarray:
-    """Simple per-label mapping → speed of sound."""
+    """
+    Map tissue labels to sound speed values.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        Tissue label array.
+    label_to_sos : Dict[int, float]
+        Sound speed per label.
+
+    Returns
+    -------
+    np.ndarray
+        Sound-speed map.
+    """
     c = np.empty(labels.shape, dtype=np.float32)
     uniq = np.unique(labels)
     for lab in uniq:
@@ -168,6 +353,23 @@ def _fill_line_nearest_non_vessel(
 ) -> np.ndarray:
     """
     In 1D, replace vessel positions by the nearest non-vessel speed along the line.
+
+    Parameters
+    ----------
+    c_line : np.ndarray, shape (L,)
+        Sound-speed line.
+    lab_line : np.ndarray, shape (L,)
+        Label line aligned with ``c_line``.
+    default_speed : float
+        Fallback speed if the full line is vessel-labelled.
+
+    Returns
+    -------
+    np.ndarray, shape (L,)
+        Filled sound-speed line.
+
+    Notes
+    -----
     If a line is all vessels, fill with default_speed.
     """
     L = c_line.shape[0]
@@ -209,9 +411,32 @@ def _fill_vessels_in_c_by_nearest_along_axis(
     default_speed: float,
 ) -> np.ndarray:
     """
-    Replace vessel-labelled voxels in c_map with the nearest non-vessel value
-    along the specified axis (column-wise 1D nearest fill).
-    Works for 2D and 3D arrays.
+    Replace vessel-labelled voxels with nearest non-vessel speeds.
+
+    Parameters
+    ----------
+    c_map : np.ndarray
+        Sound-speed map.
+    labels : np.ndarray
+        Label array aligned with ``c_map``.
+    axis : int
+        Axis along which nearest non-vessel values are searched.
+    default_speed : float
+        Fallback speed for all-vessel lines.
+
+    Returns
+    -------
+    np.ndarray
+        Filled sound-speed map.
+
+    Raises
+    ------
+    ValueError
+        If ``labels`` is not 2D/3D or if ``axis`` is invalid.
+
+    Notes
+    -----
+    The fill is column-wise and one-dimensional along the specified axis.
     """
     if labels.ndim not in (2, 3):
         raise ValueError("Expected 2D or 3D labels for nearest-along-axis fill.")
@@ -260,7 +485,21 @@ def _fill_vessels_in_c_by_nearest_along_axis(
 
 
 def _max_intensity_proj_vessels(labels_zyx: np.ndarray, axis: int) -> np.ndarray:
-    """Boolean MIP of vessels along the given axis; returns 2D mask."""
+    """
+    Compute a boolean maximum-intensity projection of vessel labels.
+
+    Parameters
+    ----------
+    labels_zyx : np.ndarray
+        Label volume in ``(Z, Y, X)`` order.
+    axis : int
+        Axis along which to project.
+
+    Returns
+    -------
+    np.ndarray
+        Two-dimensional vessel mask as ``float32``.
+    """
     vmax = (labels_zyx == VESSEL_LABEL).max(axis=axis).astype(np.float32)
     return vmax
 

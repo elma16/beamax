@@ -38,6 +38,19 @@ def make_c_function_from_grid(
     origin = jnp.array(origin if origin is not None else (0.0,) * d)
 
     def c_fun(coords: jnp.ndarray) -> jnp.ndarray:
+        """
+        Evaluate the n-linear interpolant at physical coordinates.
+
+        Parameters
+        ----------
+        coords : jnp.ndarray, shape (..., d)
+            Physical query coordinates.
+
+        Returns
+        -------
+        jnp.ndarray, shape (...)
+            Interpolated grid values.
+        """
         # coords: (..., d) in physical units
         x = (coords - origin) / spacing  # (..., d) in index space
         i0 = jnp.floor(x).astype(jnp.int32)
@@ -47,6 +60,21 @@ def make_c_function_from_grid(
 
         # Iterate over 2^d corners via integer bit masks
         def corner_acc(mask, acc):
+            """
+            Add one hypercube corner contribution to the interpolation sum.
+
+            Parameters
+            ----------
+            mask : int
+                Corner bit mask in ``[0, 2**d)``.
+            acc : jnp.ndarray, shape (...)
+                Running interpolation sum.
+
+            Returns
+            -------
+            jnp.ndarray, shape (...)
+                Updated interpolation sum.
+            """
             # mask in [0, 2^d)
             bits = jnp.array(
                 [(mask >> k) & 1 for k in range(d)], dtype=jnp.int32
@@ -88,6 +116,25 @@ class Interpolator:
     """
 
     def __init__(self, grid_points: List[jnp.ndarray], values: jnp.ndarray, **_):
+        """
+        Construct an interpolator from axis vectors and grid values.
+
+        Parameters
+        ----------
+        grid_points : List[jnp.ndarray]
+            One strictly increasing one-dimensional coordinate vector per
+            axis.
+        values : jnp.ndarray
+            Grid values with dimensionality matching ``grid_points``.
+        **_ : dict
+            Ignored compatibility keyword arguments.
+
+        Raises
+        ------
+        ValueError
+            If axis count and value dimensionality disagree, or if any axis
+            is not one-dimensional with at least two points.
+        """
         if len(grid_points) != values.ndim:
             raise ValueError(
                 f"grid_points dims ({len(grid_points)}) must match values.ndim ({values.ndim})"
@@ -107,10 +154,49 @@ class Interpolator:
         )
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        """
+        Evaluate the interpolant.
+
+        Parameters
+        ----------
+        x : jnp.ndarray, shape (..., d)
+            Physical query coordinates.
+
+        Returns
+        -------
+        jnp.ndarray, shape (...)
+            Interpolated values.
+        """
         return self._c(x)
 
     def grad(self, x: jnp.ndarray) -> jnp.ndarray:
+        """
+        Evaluate the gradient of the interpolant.
+
+        Parameters
+        ----------
+        x : jnp.ndarray, shape (d,)
+            Physical query coordinate.
+
+        Returns
+        -------
+        jnp.ndarray, shape (d,)
+            Gradient at ``x``.
+        """
         return grad(lambda z: self._c(z))(x)
 
     def hessian(self, x: jnp.ndarray) -> jnp.ndarray:
+        """
+        Evaluate the Hessian of the interpolant.
+
+        Parameters
+        ----------
+        x : jnp.ndarray, shape (d,)
+            Physical query coordinate.
+
+        Returns
+        -------
+        jnp.ndarray, shape (d, d)
+            Hessian at ``x``.
+        """
         return hessian(lambda z: self._c(z))(x)

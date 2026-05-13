@@ -49,6 +49,22 @@ class FNOpdequinoxSolver(Solver):
     """
 
     def __init__(self, folder: str, key=jax.random.PRNGKey(0)):
+        """
+        Load a pdequinox FNO checkpoint and build a batched predictor.
+
+        Parameters
+        ----------
+        folder : str
+            Directory containing ``hparams.json`` and ``model.eqx``.
+        key : jax.random.PRNGKey, optional
+            PRNG key used to instantiate the model skeleton before
+            deserializing weights.
+
+        Raises
+        ------
+        FileNotFoundError
+            If checkpoint files are missing when opened.
+        """
         # paths to hyperparams and checkpoint
         folder = Path(folder)
         hparam_path = folder / "hparams.json"
@@ -116,9 +132,45 @@ class FNOpdequinoxSolver(Solver):
     def time_reversal(
         self, data: Union[jnp.ndarray, np.ndarray]
     ) -> Union[jnp.ndarray, np.ndarray]:
+        """
+        Raise because pdequinox FNO time reversal is not implemented.
+
+        Parameters
+        ----------
+        data : jnp.ndarray or np.ndarray
+            Sensor data or model output that would be inverted.
+
+        Returns
+        -------
+        jnp.ndarray or np.ndarray
+            This method never returns.
+
+        Raises
+        ------
+        NotImplementedError
+            Always raised for this solver.
+        """
         raise NotImplementedError("Time reversal is not implemented for FNOSolver.")
 
     def adjoint(
         self, data: Union[jnp.ndarray, np.ndarray]
     ) -> Union[jnp.ndarray, np.ndarray]:
+        """
+        Raise because pdequinox FNO adjoint is not implemented.
+
+        Parameters
+        ----------
+        data : jnp.ndarray or np.ndarray
+            Sensor data or model output that would be used by an adjoint solve.
+
+        Returns
+        -------
+        jnp.ndarray or np.ndarray
+            This method never returns.
+
+        Raises
+        ------
+        NotImplementedError
+            Always raised for this solver.
+        """
         raise NotImplementedError("Adjoint is not implemented for FNOSolver.")

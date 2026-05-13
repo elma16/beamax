@@ -34,6 +34,26 @@ _LAZY = {
 
 
 def __getattr__(name: str) -> Any:
+    """
+    Lazily import optional solver classes.
+
+    Parameters
+    ----------
+    name : str
+        Solver symbol requested from ``beamax.solvers``.
+
+    Returns
+    -------
+    Any
+        Imported solver class, cached in ``globals()``.
+
+    Raises
+    ------
+    ImportError
+        If the requested optional solver cannot be imported.
+    AttributeError
+        If ``name`` is not part of the lazy solver map.
+    """
     if name in _LAZY:
         modpath, sym = _LAZY[name]
         try:

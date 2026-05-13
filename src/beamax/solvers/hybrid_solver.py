@@ -75,6 +75,15 @@ class HybridSolverConfig:
     use_time_extension: bool = True
 
     def __post_init__(self):
+        """
+        Validate mutually exclusive split options and interpolation settings.
+
+        Raises
+        ------
+        ValueError
+            If neither or both frequency split definitions are provided, if
+            ``order`` is outside ``[0, 5]``, or if ``window_type`` is unknown.
+        """
         has_corners = self.box_corners is not None
         has_freq = self.cutoff_freq is not None
         if not (has_corners or has_freq):
@@ -94,7 +103,21 @@ class InterpolationStrategy(ABC):
 
     @abstractmethod
     def interpolate(self, data: jnp.ndarray, target_shape: Tuple) -> jnp.ndarray:
-        """Interpolate data to target_shape."""
+        """
+        Interpolate data to a target shape.
+
+        Parameters
+        ----------
+        data : jnp.ndarray
+            Input array.
+        target_shape : Tuple[int, ...]
+            Desired output shape.
+
+        Returns
+        -------
+        jnp.ndarray
+            Interpolated array.
+        """
         pass
 
 
@@ -102,6 +125,21 @@ class FourierInterpolation(InterpolationStrategy):
     """Fourier-based interpolation (periodic boundaries assumed)."""
 
     def interpolate(self, data: jnp.ndarray, target_shape: Tuple) -> jnp.ndarray:
+        """
+        Interpolate by Fourier-domain padding or cropping.
+
+        Parameters
+        ----------
+        data : jnp.ndarray
+            Spatial-domain array to resize.
+        target_shape : Tuple[int, ...]
+            Desired output shape.
+
+        Returns
+        -------
+        jnp.ndarray
+            Real-valued resized array with sample-value normalization.
+        """
         resampled = utils.interpolate_fourier(
             data, target_shape, input_type="spatial", output_type="spatial"
         ).real
@@ -121,9 +159,32 @@ class ZoomInterpolation(InterpolationStrategy):
     """Spline-based interpolation (handles non-periodic domains)."""
 
     def __init__(self, order: int = 3):
+        """
+        Initialize spline interpolation order.
+
+        Parameters
+        ----------
+        order : int, default=3
+            Spline order passed to :func:`scipy.ndimage.zoom`.
+        """
         self.order = order
 
     def interpolate(self, data: jnp.ndarray, target_shape: Tuple) -> jnp.ndarray:
+        """
+        Interpolate by spline zoom factors.
+
+        Parameters
+        ----------
+        data : jnp.ndarray
+            Input array.
+        target_shape : Tuple[int, ...]
+            Desired output shape.
+
+        Returns
+        -------
+        jnp.ndarray
+            Resized array from :func:`scipy.ndimage.zoom`.
+        """
         zoom_factors = tuple(o / i for o, i in zip(target_shape, data.shape))
         return zoom(data, zoom_factors, order=self.order)
 
@@ -214,6 +275,24 @@ class HybridSolver(eqx.Module):
 
         Uses Fourier interpolation for periodic domains, spline interpolation
         for non-periodic domains.
+
+        Parameters
+        ----------
+        lf_solver : Solver
+            Low-frequency solver.
+        hf_solver : MSGBSolver or Solver
+            High-frequency solver.
+        domain : Domain
+            Domain whose periodic flags determine interpolation choice.
+        config : HybridSolverConfig, optional
+            Explicit configuration. If provided, ``config_kwargs`` are ignored.
+        **config_kwargs
+            Configuration options used when ``config`` is ``None``.
+
+        Returns
+        -------
+        HybridSolver
+            Configured hybrid solver.
         """
         if config is None:
             config_dict = config_kwargs.copy()
@@ -232,7 +311,19 @@ class HybridSolver(eqx.Module):
         return HybridSolver(lf_solver, hf_solver, config)
 
     def _extend_time(self, ts: jnp.ndarray) -> jnp.ndarray:
-        """Extend time array for oversampling (if enabled)."""
+        """
+        Extend time array for oversampling when configured.
+
+        Parameters
+        ----------
+        ts : jnp.ndarray, shape (Nt,)
+            Original time grid.
+
+        Returns
+        -------
+        jnp.ndarray
+            Original or extended time grid.
+        """
         if (
             not self.config.use_time_extension
             or not self.config.downsample
@@ -246,7 +337,19 @@ class HybridSolver(eqx.Module):
         return jnp.arange(0, Nt_extended) * dt
 
     def _apply_window(self, data: jnp.ndarray) -> jnp.ndarray:
-        """Apply window taper to end of time series (if enabled)."""
+        """
+        Apply a window taper to the end of a time series when configured.
+
+        Parameters
+        ----------
+        data : jnp.ndarray
+            Time-leading array.
+
+        Returns
+        -------
+        jnp.ndarray
+            Windowed data, or ``data`` unchanged when windowing is disabled.
+        """
         if (
             not self.config.use_windowing
             or not self.config.downsample
@@ -262,7 +365,19 @@ class HybridSolver(eqx.Module):
             return data
 
     def _apply_kaiser_window(self, data: jnp.ndarray) -> jnp.ndarray:
-        """Apply Kaiser window taper."""
+        """
+        Apply a Kaiser taper to the final time samples.
+
+        Parameters
+        ----------
+        data : jnp.ndarray
+            Time-leading array.
+
+        Returns
+        -------
+        jnp.ndarray
+            Tapered data.
+        """
         Nt = data.shape[0]
         if self.config.dt_oversample <= 0:
             return data
@@ -280,7 +395,21 @@ class HybridSolver(eqx.Module):
         return data * window
 
     def _apply_tukey_window(self, data: jnp.ndarray, alpha: float = 0.5) -> jnp.ndarray:
-        """Apply Tukey (tapered cosine) window."""
+        """
+        Apply a Tukey taper to the final time samples.
+
+        Parameters
+        ----------
+        data : jnp.ndarray
+            Time-leading array.
+        alpha : float, default=0.5
+            Fraction of ``dt_oversample`` used for the taper length.
+
+        Returns
+        -------
+        jnp.ndarray
+            Tapered data.
+        """
         Nt = data.shape[0]
         if self.config.dt_oversample <= 0:
             return data
@@ -359,7 +488,31 @@ class HybridSolver(eqx.Module):
         wpt: MSWPT,
         domain: Domain,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Domain]:
-        """Split data into HF/LF components."""
+        """
+        Split data into high- and low-frequency components.
+
+        Parameters
+        ----------
+        data : jnp.ndarray
+            Input array to split.
+        mask : jnp.ndarray
+            Sensor mask aligned with ``data``.
+        wpt : MSWPT
+            Wave-packet transform used for the split.
+        domain : Domain
+            Physical domain.
+
+        Returns
+        -------
+        p0_HF : jnp.ndarray
+            High-frequency component.
+        p0_LF : jnp.ndarray
+            Low-frequency component.
+        ds_mask : jnp.ndarray
+            Possibly downsampled sensor mask.
+        ds_domain : Domain
+            Possibly downsampled domain.
+        """
         return split_frequency_components(
             p0=data,
             sensors_mask=mask,
@@ -410,7 +563,14 @@ class HybridSolver(eqx.Module):
             return solver_fn(data, domain, mask, ts, **kwargs)
 
     def _validate_configuration(self, domain: Domain):
-        """Warn if configuration may cause issues."""
+        """
+        Warn if the hybrid configuration may cause boundary artifacts.
+
+        Parameters
+        ----------
+        domain : Domain
+            Domain whose periodicity is checked against interpolation method.
+        """
         if (
             self.config.interp_method == "fourier"
             and self.config.downsample

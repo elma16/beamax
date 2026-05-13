@@ -207,7 +207,47 @@ def compute_gaussian_beam_real(
 ):
     """
     Real-valued streaming GB: scan over beams, vmap over time.
-    Memory: O(Nt × S) instead of O(b × Nt × S)
+
+    Parameters
+    ----------
+    x0 : jnp.ndarray, shape (b, d)
+        Initial beam positions.
+    p0 : jnp.ndarray, shape (b, d)
+        Initial momenta.
+    M0 : jnp.ndarray, shape (b, d, d)
+        Initial complex Hessian matrices.
+    a0 : jnp.ndarray, shape (b,)
+        Initial amplitudes.
+    omega0 : jnp.ndarray, shape (b,)
+        Beam angular frequencies.
+    mode : jnp.ndarray, shape (b,)
+        Hamiltonian branch signs.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption parameter passed to ``ode_solver``.
+    ts : jnp.ndarray, shape (Nt,)
+        Time grid.
+    sensors : jnp.ndarray, shape (*S, d)
+        Sensor positions.
+    domain_size : jnp.ndarray, shape (d,)
+        Physical domain size.
+    periodic : jnp.ndarray, shape (d,)
+        Per-axis periodicity flags.
+    ode_solver : SolverFn
+        ODE integrator returning ``(xt, pt, Mt, At)``.
+    solver_config : SolverConfig, optional
+        Optional numerical configuration for ``ode_solver``.
+
+    Returns
+    -------
+    jnp.ndarray, shape (Nt, *S)
+        Real-valued summed field at the sensor positions.
+
+    Notes
+    -----
+    Uses ``O(Nt * S)`` memory instead of materializing the beam axis with
+    ``O(b * Nt * S)`` storage.
     """
     # Solve ODEs for all beams (this is fine, ODEs are small)
     xt, pt, Mt, At = ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
@@ -225,8 +265,24 @@ def compute_gaussian_beam_real(
     def single_beam_all_times(xi, pi, Mi, Ai, wi):
         """
         Process one beam at all time points.
-        Input shapes: xi (Nt,d), pi (Nt,d), Mi (Nt,d,d), Ai (Nt,), wi ()
-        Output shape: (Nt, S)
+
+        Parameters
+        ----------
+        xi : jnp.ndarray, shape (Nt, d)
+            Beam centre over time.
+        pi : jnp.ndarray, shape (Nt, d)
+            Beam momentum over time.
+        Mi : jnp.ndarray, shape (Nt, d, d)
+            Complex Hessian over time.
+        Ai : jnp.ndarray, shape (Nt,)
+            Complex amplitude over time.
+        wi : jnp.ndarray
+            Scalar beam frequency.
+
+        Returns
+        -------
+        jnp.ndarray, shape (Nt, S)
+            Real beam contribution at flattened sensor positions.
         """
         Mr = jnp.real(Mi)  # (Nt, d, d)
         Mi_im = jnp.imag(Mi)  # (Nt, d, d)
@@ -246,6 +302,21 @@ def compute_gaussian_beam_real(
 
     # Scan over beams to accumulate without materializing (b, Nt, S)
     def scan_fn(acc, beam_data):
+        """
+        Accumulate one beam contribution into the streaming field.
+
+        Parameters
+        ----------
+        acc : jnp.ndarray, shape (Nt, S)
+            Running field sum.
+        beam_data : Tuple[jnp.ndarray, ...]
+            Per-beam tuple ``(xi, pi, Mi, Ai, wi)``.
+
+        Returns
+        -------
+        (jnp.ndarray, None)
+            Updated accumulator and empty scan output.
+        """
         xi, pi, Mi, Ai, wi = beam_data
         contrib = single_beam_all_times(xi, pi, Mi, Ai[:, 0], wi)
         return acc + contrib, None
@@ -278,6 +349,42 @@ def compute_gaussian_beam_real_TR(
     u + bar(u) = 2|A|cos(ω(x p + 0.5 x Mr x) + angle(A))exp(-ω/2 x Mi x).
 
     This should require 2 times less memory than the complex version, and should be faster.
+
+    Parameters
+    ----------
+    x0 : jnp.ndarray, shape (b, d)
+        Initial beam positions.
+    p0 : jnp.ndarray, shape (b, d)
+        Initial momenta.
+    M0 : jnp.ndarray, shape (b, d, d)
+        Initial complex Hessian matrices.
+    a0 : jnp.ndarray, shape (b,)
+        Initial amplitudes.
+    omega0 : jnp.ndarray, shape (b,)
+        Beam angular frequencies.
+    mode : jnp.ndarray, shape (b,)
+        Hamiltonian branch signs.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption parameter passed to ``ode_solver``.
+    ts : jnp.ndarray, shape (Nt,)
+        Time grid.
+    sensors : jnp.ndarray, shape (*S, d)
+        Sensor positions.
+    domain_size : jnp.ndarray, shape (d,)
+        Physical domain size.
+    periodic : jnp.ndarray, shape (d,)
+        Per-axis periodicity flags.
+    ode_solver : SolverFn
+        ODE integrator returning ``(xt, pt, Mt, At)``.
+    solver_config : SolverConfig, optional
+        Optional numerical configuration for ``ode_solver``.
+
+    Returns
+    -------
+    jnp.ndarray, shape (Nt, *S, b)
+        Real-valued beam field with the beam axis retained.
     """
     xt, pt, Mt, At = ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
 

@@ -32,9 +32,12 @@ class ShardingStrategy:
     """
     Strategy for sharding beam parameters across devices.
 
-    Attributes:
-        mesh: JAX device mesh for multi-device parallelization
-        beam_axis: Which mesh axis to shard beams along (default: "x")
+    Attributes
+    ----------
+    mesh : Mesh
+        JAX device mesh for multi-device parallelization.
+    beam_axis : str
+        Mesh axis used to shard beams.
     """
 
     mesh: Mesh
@@ -44,6 +47,25 @@ class ShardingStrategy:
         """
         Build a partition spec for beam parameters.
 
+        Parameters
+        ----------
+        ndim : int
+            Number of dimensions of the parameter array.
+        is_batched : bool
+            Whether the parameter array has a leading batch axis.
+
+        Returns
+        -------
+        PartitionSpec
+            Sharding specification for the parameter array.
+
+        Raises
+        ------
+        ValueError
+            If a scalar or malformed batched array is requested.
+
+        Notes
+        -----
         For batched tensors `(num_batches, batch_size, ...)` used by scan/vmap
         aggregation, we keep all axes replicated. This avoids unsupported
         sharding interactions inside nested `scan`/`diffrax` transforms.
@@ -69,7 +91,29 @@ class ShardingStrategy:
         a0: jnp.ndarray,
         modes: jnp.ndarray,
     ) -> Tuple[jnp.ndarray, ...]:
-        """Shard beam parameters along the beam dimension."""
+        """
+        Shard forward beam parameters along the beam dimension.
+
+        Parameters
+        ----------
+        p0 : jnp.ndarray
+            Beam momenta.
+        M0 : jnp.ndarray
+            Beam Hessian matrices.
+        x0 : jnp.ndarray
+            Beam positions.
+        omega : jnp.ndarray
+            Beam frequencies.
+        a0 : jnp.ndarray
+            Beam amplitudes.
+        modes : jnp.ndarray
+            Beam branch signs.
+
+        Returns
+        -------
+        Tuple[jnp.ndarray, ...]
+            Device-placed arrays with sharding specifications applied.
+        """
         is_batched = p0.ndim == 3
 
         return (
@@ -123,7 +167,31 @@ class ShardingStrategy:
         signum: jnp.ndarray,
         ts: jnp.ndarray,
     ) -> Tuple[jnp.ndarray, ...]:
-        """Shard time-reversal parameters along the beam dimension."""
+        """
+        Shard time-reversal beam parameters along the beam dimension.
+
+        Parameters
+        ----------
+        pts : jnp.ndarray
+            Beam momenta at the boundary.
+        Mts : jnp.ndarray
+            Beam Hessians at the boundary.
+        xts : jnp.ndarray
+            Boundary positions.
+        omega_ts : jnp.ndarray
+            Beam frequencies.
+        ats : jnp.ndarray
+            Beam amplitudes.
+        signum : jnp.ndarray
+            Beam branch signs.
+        ts : jnp.ndarray
+            Per-beam time intervals.
+
+        Returns
+        -------
+        Tuple[jnp.ndarray, ...]
+            Device-placed arrays with sharding specifications applied.
+        """
         is_batched = pts.ndim == 3
 
         return (
@@ -241,6 +309,32 @@ class MSGBSolver(eqx.Module):
         sharding: Optional[ShardingStrategy] = None,
         ode_config: Optional[SolverConfig] = None,
     ):
+        """
+        Initialize the MSGB solver.
+
+        Parameters
+        ----------
+        thr : int or float
+            Threshold value for coefficient selection.
+        thr_strat : str
+            Thresholding strategy name.
+        batch_size : int
+            Number of beams per batch for scan/vmap aggregation.
+        input_type : {"spatial", "fourier"}
+            Domain of inputs supplied to the solver.
+        ode_solver : SolverFn
+            Forward ODE solver.
+        sum_method : str
+            Aggregation mode string. Recognized substrings are ``"real"``,
+            ``"scan"``, and ``"vmap"``.
+        tr_ode_solver : SolverFn, optional
+            ODE solver for time reversal. Defaults to ``ode_solver``.
+        sharding : ShardingStrategy, optional
+            Multi-device sharding strategy.
+        ode_config : SolverConfig, optional
+            Numerical ODE solver configuration. Defaults to
+            ``SolverConfig.from_precision()``.
+        """
         self.thr = thr
         self.thr_strat = thr_strat
         self.batch_size = batch_size
@@ -262,7 +356,19 @@ class MSGBSolver(eqx.Module):
             self.aggregate_method = "all"
 
     def _replicate_array(self, arr: jnp.ndarray) -> jnp.ndarray:
-        """Materialize an array with fully replicated sharding on the active mesh."""
+        """
+        Materialize an array with fully replicated sharding on the active mesh.
+
+        Parameters
+        ----------
+        arr : jnp.ndarray
+            Array to replicate.
+
+        Returns
+        -------
+        jnp.ndarray
+            Replicated array, or ``arr`` unchanged if no sharding is active.
+        """
         if self.sharding is None:
             return arr
         replicated = PartitionSpec(*([None] * arr.ndim))
@@ -271,7 +377,25 @@ class MSGBSolver(eqx.Module):
     def _prepare_forward_params_real(
         self, p0: jnp.ndarray, dpdt: jnp.ndarray, domain: Domain, wpt: MSWPT
     ) -> Tuple[jnp.ndarray, ...]:
-        """Prepare beam parameters for real-valued forward solve."""
+        """
+        Prepare beam parameters for a real-valued forward solve.
+
+        Parameters
+        ----------
+        p0 : jnp.ndarray
+            Initial pressure field.
+        dpdt : jnp.ndarray
+            Initial pressure time derivative.
+        domain : Domain
+            Physical domain.
+        wpt : MSWPT
+            Wave-packet transform.
+
+        Returns
+        -------
+        Tuple[jnp.ndarray, ...]
+            Beam parameters ``(p0s, M0s, x0s, omegas, a0s, modes)``.
+        """
         c_pos = compute_coefficients(
             p0, dpdt, self.input_type, domain, wpt, mode="pos_only"
         )
@@ -309,7 +433,25 @@ class MSGBSolver(eqx.Module):
     def _prepare_forward_params_complex(
         self, p0: jnp.ndarray, dpdt: jnp.ndarray, domain: Domain, wpt: MSWPT
     ) -> Tuple[jnp.ndarray, ...]:
-        """Prepare beam parameters for complex-valued forward solve."""
+        """
+        Prepare beam parameters for a complex-valued forward solve.
+
+        Parameters
+        ----------
+        p0 : jnp.ndarray
+            Initial pressure field.
+        dpdt : jnp.ndarray
+            Initial pressure time derivative.
+        domain : Domain
+            Physical domain.
+        wpt : MSWPT
+            Wave-packet transform.
+
+        Returns
+        -------
+        Tuple[jnp.ndarray, ...]
+            Beam parameters ``(p0s, M0s, x0s, omegas, a0s, modes)``.
+        """
         c_pos, c_neg = compute_coefficients(
             p0, dpdt, self.input_type, domain, wpt, mode="both"
         )
@@ -343,7 +485,26 @@ class MSGBSolver(eqx.Module):
     def _prepare_tr_params(
         self, data: jnp.ndarray, data_domain: Domain, data_wpt: MSWPT, sources
     ) -> Tuple[jnp.ndarray, ...]:
-        """Prepare beam parameters for time-reversal solve."""
+        """
+        Prepare beam parameters for a time-reversal solve.
+
+        Parameters
+        ----------
+        data : jnp.ndarray
+            Sensor time-series data.
+        data_domain : Domain
+            Domain describing ``data``.
+        data_wpt : MSWPT
+            Wave-packet transform for ``data``.
+        sources : Sensor
+            Boundary source geometry.
+
+        Returns
+        -------
+        Tuple[jnp.ndarray, ...]
+            Time-reversal beam parameters
+            ``(pts, Mts, xts, omegas, ats, signum, ts)``.
+        """
         dpdt = jnp.zeros_like(data)
 
         c_pos, _ = compute_coefficients(
@@ -376,6 +537,27 @@ class MSGBSolver(eqx.Module):
     def _infer_planar_surface(self, sensor_positions: jnp.ndarray, eps: float = 1e-9):
         """
         Infer a planar detector surface x_axis = const from sensor positions.
+
+        Parameters
+        ----------
+        sensor_positions : jnp.ndarray, shape (Ns, d)
+            Sensor coordinates.
+        eps : float, default=1e-9
+            Maximum standard deviation allowed on the inferred normal axis.
+
+        Returns
+        -------
+        surface : Callable[[jnp.ndarray], jnp.ndarray]
+            Implicit surface function.
+        axis : int
+            Inferred normal axis.
+        coord : float
+            Constant coordinate value on that axis.
+
+        Raises
+        ------
+        ValueError
+            If no nearly constant sensor-position axis is found.
         """
         stds = jnp.std(sensor_positions, axis=0)
         axis = int(jnp.argmin(stds))
@@ -386,6 +568,19 @@ class MSGBSolver(eqx.Module):
         coord = float(sensor_positions[0, axis])
 
         def surface(x):
+            """
+            Evaluate the inferred planar surface function.
+
+            Parameters
+            ----------
+            x : jnp.ndarray, shape (d,)
+                Query coordinate.
+
+            Returns
+            -------
+            jnp.ndarray
+                Signed distance-like residual ``x[axis] - coord``.
+            """
             return x[axis] - coord
 
         return surface, axis, coord

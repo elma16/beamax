@@ -24,6 +24,26 @@ __all__ = [
 
 
 class SolverFn(Protocol):
+    """
+    Protocol for Gaussian-beam ODE integrators.
+
+    Implementations integrate beam initial data and return beam positions,
+    momenta, Hessians, and amplitudes over time.
+
+    Notes
+    -----
+    Expected signature is ``(x0, p0, M0, a0, mode, ts, c, *args, **kwargs)``
+    returning ``(xt, pt, Mt, At)``. Standard shapes are:
+
+    - ``x0, p0``: ``(b, d)``
+    - ``M0``: ``(b, d, d)``
+    - ``a0, mode``: ``(b,)``
+    - ``ts``: ``(Nt,)``
+    - ``xt, pt``: ``(b, Nt, d)``
+    - ``Mt``: ``(b, Nt, d, d)``
+    - ``At``: ``(b, Nt, 1)``
+    """
+
     def __call__(
         self,
         x0: jnp.ndarray,
@@ -36,26 +56,42 @@ class SolverFn(Protocol):
         *args,
         **kwargs,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """
+        Integrate Gaussian-beam ODE state over the requested times.
+
+        Parameters
+        ----------
+        x0 : jnp.ndarray, shape (b, d)
+            Initial positions.
+        p0 : jnp.ndarray, shape (b, d)
+            Initial momenta.
+        M0 : jnp.ndarray, shape (b, d, d)
+            Initial complex Hessian matrices.
+        a0 : jnp.ndarray, shape (b,)
+            Initial amplitudes.
+        mode : jnp.ndarray, shape (b,)
+            Hamiltonian branch signs.
+        ts : jnp.ndarray, shape (Nt,)
+            Time grid.
+        c : Callable
+            Sound-speed function.
+        *args
+            Additional integrator-specific positional arguments.
+        **kwargs
+            Additional integrator-specific keyword arguments.
+
+        Returns
+        -------
+        xt : jnp.ndarray, shape (b, Nt, d)
+            Beam positions over time.
+        pt : jnp.ndarray, shape (b, Nt, d)
+            Beam momenta over time.
+        Mt : jnp.ndarray, shape (b, Nt, d, d)
+            Beam Hessians over time.
+        At : jnp.ndarray, shape (b, Nt, 1)
+            Beam amplitudes over time.
+        """
         ...
-
-    """
-    Protocol for GB ODE integrators.
-
-    Signature
-    ---------
-    (x0, p0, M0, a0, mode, ts, c, *args, **kwargs) -> (xt, pt, Mt, At)
-
-    Shapes
-    ------
-    x0, p0 : (b, d)
-    M0 : (b, d, d)
-    a0 : (b,)
-    mode : (b,)
-    ts : (Nt,)
-    xt, pt : (b, Nt, d)
-    Mt : (b, Nt, d, d)
-    At : (b, Nt, 1)
-    """
 
 
 def create_p_perp(
@@ -240,6 +276,21 @@ def compute_amp_hom_diag(
     """
     Dispatch amplitude formula for diagonal M0 (2D/3D).
 
+    Parameters
+    ----------
+    p0 : jnp.ndarray, shape (b, d)
+        Initial momenta.
+    normp : jnp.ndarray, shape (b, 1)
+        Momentum norms.
+    alpha0 : jnp.ndarray, shape (b, d)
+        Diagonal entries of ``M0``.
+    c0 : jnp.ndarray, shape (b, 1)
+        Signed homogeneous sound speed.
+    ts : jnp.ndarray, shape (Nt,)
+        Time grid.
+    a0 : jnp.ndarray, shape (b,)
+        Initial amplitudes.
+
     Returns
     -------
     jnp.ndarray, shape (b, Nt)
@@ -317,27 +368,43 @@ def solve_hom_diag(
     """
     Solver for homogeneous media with simplified equations.
 
-    Args:
-        x0:   (b, d)    The initial position of the GB.
-        p0:   (b, d)    The initial momentum of the GB.
-        M0:   (b, d, d) The initial covariance of the GB.
-        a0:   (b,  )    The initial amplitude of the GB.
-        mode: (b,  )    The mode of the GB.
-        ts:   (nt, )    The time steps.
-        c:    Callable  The speed of sound function.
+    Parameters
+    ----------
+    x0 : jnp.ndarray, shape (b, d)
+        Initial beam positions.
+    p0 : jnp.ndarray, shape (b, d)
+        Initial momenta.
+    M0 : jnp.ndarray, shape (b, d, d)
+        Initial Hessian matrices. Only diagonal entries are used.
+    a0 : jnp.ndarray, shape (b,)
+        Initial amplitudes.
+    mode : jnp.ndarray, shape (b,)
+        Hamiltonian branch signs.
+    ts : jnp.ndarray, shape (Nt,)
+        Time grid.
+    c : Callable
+        Homogeneous sound-speed function.
+    lam : Any, optional
+        Ignored compatibility argument.
+    config : Any, optional
+        Ignored compatibility argument.
 
-    Returns:
-        xt: (b, nt, d)    The position of the GB.
-        pt: (b, nt, d)    The momentum of the GB.
-        Mt: (b, nt, d, d) The covariance of the GB.
-        At: (b, nt)       The amplitude of the GB.
+    Returns
+    -------
+    xt : jnp.ndarray, shape (b, Nt, d)
+        Beam positions over time.
+    pt : jnp.ndarray, shape (b, Nt, d)
+        Beam momenta over time.
+    Mt : jnp.ndarray, shape (b, Nt, d, d)
+        Beam Hessians over time.
+    At : jnp.ndarray, shape (b, Nt, 1)
+        Beam amplitudes over time.
 
-    Assumptions placed on this solver are
-     - c(x) is homogeneous
-     - The GB is anisotropic => m0 is diagonal.
-     - d = 1, 2, 3
-
-    The last two assumptions are not used in the solver ```solve_hom_general```.
+    Notes
+    -----
+    Assumes ``c(x)`` is homogeneous, ``M0`` is diagonal, and ``d`` is 1, 2,
+    or 3. The diagonal and dimensionality assumptions are relaxed by
+    :func:`solve_hom_general`.
     """
     d = p0.shape[-1]
     nt = ts.shape[0]
@@ -370,20 +437,37 @@ def solve_hom_general(
     """
     Solver for homogeneous media with simplified equations.
 
-    Args:
-        x0:   (b, d)    The initial position of the GB.
-        p0:   (b, d)    The initial momentum of the GB.
-        M0:   (b, d, d) The initial covariance of the GB.
-        a0:   (b,  )    The initial amplitude of the GB.
-        mode: (b,  )    The mode of the GB.
-        ts:   (nt, )    The time steps.
-        c:    Callable  The speed of sound function.
+    Parameters
+    ----------
+    x0 : jnp.ndarray, shape (b, d)
+        Initial beam positions.
+    p0 : jnp.ndarray, shape (b, d)
+        Initial momenta.
+    m0 : jnp.ndarray, shape (b, d, d)
+        Initial Hessian matrices.
+    a0 : jnp.ndarray, shape (b,)
+        Initial amplitudes.
+    mode : jnp.ndarray, shape (b,)
+        Hamiltonian branch signs.
+    ts : jnp.ndarray, shape (Nt,)
+        Time grid.
+    c : Callable
+        Homogeneous sound-speed function.
+    lam : Any, optional
+        Ignored compatibility argument.
+    config : Any, optional
+        Ignored compatibility argument.
 
-    Returns:
-        xt: (b, nt, d)    The position of the GB.
-        pt: (b, nt, d)    The momentum of the GB.
-        Mt: (b, nt, d, d) The covariance of the GB.
-        At: (b, nt)       The amplitude of the GB.
+    Returns
+    -------
+    xt : jnp.ndarray, shape (b, Nt, d)
+        Beam positions over time.
+    pt : jnp.ndarray, shape (b, Nt, d)
+        Beam momenta over time.
+    Mt : jnp.ndarray, shape (b, Nt, d, d)
+        Beam Hessians over time.
+    At : jnp.ndarray, shape (b, Nt, 1)
+        Beam amplitudes over time.
     """
     d = p0.shape[-1]
     c0 = c(jnp.zeros((d,))) * mode[..., None]
@@ -410,22 +494,39 @@ def solve_hom_TR(
     config=None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
-    Time Reversal solver for homogeneous media.
+    Time-reversal solver for homogeneous media.
 
-    Args:
-        xT:   (b, d)    The position of the GB at time T.
-        pT:   (b, d)    The momentum of the GB at time T.
-        mT:   (b, d, d) The covariance of the GB at time T.
-        aT:   (b, 1)    The amplitude of the GB at time T.
-        mode: (b, 1)    The mode of the GB.
-        ts:   (b, )     The time steps.
-        c:    Callable  The speed of sound function.
+    Parameters
+    ----------
+    xT : jnp.ndarray, shape (b, d)
+        Beam positions at the reference final time.
+    pT : jnp.ndarray, shape (b, d)
+        Beam momenta at the reference final time.
+    mT : jnp.ndarray, shape (b, d, d)
+        Beam Hessians at the reference final time.
+    aT : jnp.ndarray, shape (b,) or (b, 1)
+        Beam amplitudes at the reference final time.
+    mode : jnp.ndarray, shape (b,) or (b, 1)
+        Hamiltonian branch signs.
+    ts : jnp.ndarray
+        Per-beam or shared time grid.
+    c : Callable
+        Homogeneous sound-speed function.
+    lam : Any, optional
+        Ignored compatibility argument.
+    config : Any, optional
+        Ignored compatibility argument.
 
-    Returns:
-        x0: (b, d)    The position of the GB.
-        p0: (b, d)    The momentum of the GB.
-        m0: (b, d, d) The covariance of the GB.
-        a0: (b, 1)    The amplitude of the GB.
+    Returns
+    -------
+    x0 : jnp.ndarray, shape (b, Nt, d)
+        Time-reversed beam positions.
+    p0_time : jnp.ndarray, shape (b, Nt, d)
+        Time-reversed beam momenta.
+    m0 : jnp.ndarray, shape (b, Nt, d, d)
+        Time-reversed Hessians.
+    a0 : jnp.ndarray, shape (b, Nt, 1)
+        Time-reversed amplitudes.
     """
 
     d = pT.shape[-1]
@@ -595,18 +696,33 @@ def ode_solver_setup(
     """
     Setup the ODE solver for the coupled system of ODEs for the GB motion.
 
-    Args:
-        y0: The initial conditions
-        t0: The initial time
-        t1: The final time
-        dt0: The initial time step
-        ts: The time steps
-        args: The arguments for the ODEs
-        config: SolverConfig object containing solver parameters
-        cond_fn: Optional condition function for events
+    Parameters
+    ----------
+    coupled_rhs : Callable
+        Right-hand-side function passed to :class:`diffrax.ODETerm`.
+    y0 : jnp.ndarray
+        Initial state vector.
+    t0 : float
+        Initial time.
+    t1 : float
+        Final time.
+    dt0 : float
+        Initial time step.
+    ts : jnp.ndarray
+        Save times.
+    args : Tuple
+        Extra ODE arguments.
+    config : SolverConfig, optional
+        Numerical solver configuration.
+    cond_fn : Callable, optional
+        Event condition function.
+    saveat : diffrax.SaveAt, optional
+        Custom save specification. Defaults to ``SaveAt(ts=ts)``.
 
-    Returns:
-        The solution to the ODEs
+    Returns
+    -------
+    diffrax.Solution
+        Diffrax solution object.
     """
     if config is None:
         config = SolverConfig()
@@ -772,15 +888,23 @@ def format_solution(ys, d):
     """
     Format the solution of the ODEs.
 
-    Args:
-        ys: The solution of the ODEs
-        d: The dimension of the system
+    Parameters
+    ----------
+    ys : jnp.ndarray, shape (Nt, d + d + d**2 + 1)
+        Flat ODE state trajectory.
+    d : int
+        Spatial dimension.
 
-    Returns:
-        xt: (b, nt, d) The position of the GB
-        pt: (b, nt, d) The momentum of the GB
-        Mt: (b, nt, d, d) The covariance of the GB
-        At: (b, nt) The amplitude of the GB
+    Returns
+    -------
+    xt : jnp.ndarray, shape (Nt, d)
+        Beam positions.
+    pt : jnp.ndarray, shape (Nt, d)
+        Beam momenta.
+    Mt : jnp.ndarray, shape (Nt, d, d)
+        Beam Hessians.
+    At : jnp.ndarray, shape (Nt, 1)
+        Beam amplitudes.
     """
     xt = ys[..., :d].real
     pt = ys[..., d : 2 * d].real
@@ -804,19 +928,37 @@ def solve_ODE_base(
     """
     Solve the coupled system of ODEs for the GB with configurable solver settings.
 
-    Args:
-        x0:   (b, d)    The initial position of the GB
-        p0:   (b, d)    The initial momentum of the GB
-        M0:   (b, d, d) The initial covariance of the GB
-        a0:   (b, )     The initial amplitude of the GB
-        mode: (b, )     The mode of the GB
-        lam:  float     The absorption coefficient.
-        ts:   (nt, )    The time steps
-        c:              The speed of sound function
-        solver_config:  Optional SolverConfig object with solver parameters
+    Parameters
+    ----------
+    x0 : jnp.ndarray, shape (d,)
+        Initial beam position for one vmapped beam.
+    p0 : jnp.ndarray, shape (d,)
+        Initial momentum for one vmapped beam.
+    M0 : jnp.ndarray, shape (d, d)
+        Initial Hessian for one vmapped beam.
+    a0 : jnp.ndarray, shape (1,) or scalar
+        Initial amplitude.
+    mode : jnp.ndarray
+        Hamiltonian branch sign.
+    ts : jnp.ndarray, shape (Nt,)
+        Time grid.
+    c : Callable
+        Sound-speed function.
+    lam : float, default=0.0
+        Absorption coefficient.
+    solver_config : SolverConfig, optional
+        Numerical solver configuration.
 
-    Returns:
-        Tuple of (xt, pt, Mt, At) containing the solutions
+    Returns
+    -------
+    xt : jnp.ndarray, shape (Nt, d)
+        Beam positions.
+    pt : jnp.ndarray, shape (Nt, d)
+        Beam momenta.
+    Mt : jnp.ndarray, shape (Nt, d, d)
+        Beam Hessians.
+    At : jnp.ndarray, shape (Nt, 1)
+        Beam amplitudes.
     """
     t0 = ts[0]
     t1 = ts[-1]
@@ -862,22 +1004,60 @@ def solve_ODE_batch_t(
     """
     Solve the coupled system of ODEs for the GB motion with per-batch time points.
 
-    Args:
-        x0: The initial position of the GB. (b, d)
-        p0: The initial momentum of the GB. (b, d)
-        M0: The initial covariance of the GB. (b, d, d)
-        A0: The initial amplitude of the GB. (b,)
-        mode: The mode of the GB. (b,)
-        ts: The time steps. (b, 2)
-        c: The speed of sound function.
-        lam: The absorption coefficient.
-        solver_config: Optional SolverConfig object with solver parameters
+    Parameters
+    ----------
+    x0 : jnp.ndarray, shape (b, d)
+        Initial beam positions.
+    p0 : jnp.ndarray, shape (b, d)
+        Initial momenta.
+    M0 : jnp.ndarray, shape (b, d, d)
+        Initial Hessian matrices.
+    A0 : jnp.ndarray, shape (b,)
+        Initial amplitudes.
+    mode : jnp.ndarray, shape (b,)
+        Hamiltonian branch signs.
+    ts : jnp.ndarray, shape (b, Nt)
+        Per-beam time grids, commonly ``(t0, t1)`` intervals.
+    c : Callable
+        Sound-speed function.
+    lam : float, optional
+        Absorption coefficient. Currently unused by this no-absorption RHS.
+    solver_config : SolverConfig, optional
+        Numerical solver configuration.
 
-    NB: ts is of shape (b, 2) because it is a tuple of (t0, t1) for each batch.
+    Returns
+    -------
+    xt : jnp.ndarray, shape (b, Nt, d)
+        Beam positions.
+    pt : jnp.ndarray, shape (b, Nt, d)
+        Beam momenta.
+    Mt : jnp.ndarray, shape (b, Nt, d, d)
+        Beam Hessians.
+    At : jnp.ndarray, shape (b, Nt, 1)
+        Beam amplitudes.
     """
     d = x0.shape[-1]
 
     def single_solve(args):
+        """
+        Solve one beam with its own time grid.
+
+        Parameters
+        ----------
+        args : Tuple[jnp.ndarray, ...]
+            Tuple ``(x0_i, p0_i, M0_i, A0_i, pol_i, ts_i)``.
+
+        Returns
+        -------
+        xt : jnp.ndarray, shape (Nt, d)
+            Beam positions.
+        pt : jnp.ndarray, shape (Nt, d)
+            Beam momenta.
+        Mt : jnp.ndarray, shape (Nt, d, d)
+            Beam Hessians.
+        At : jnp.ndarray, shape (Nt, 1)
+            Beam amplitudes.
+        """
         x0_i, p0_i, M0_i, A0_i, pol_i, ts_i = args
         t0 = ts_i[0]
         t1 = ts_i[-1]
@@ -925,10 +1105,46 @@ def solve_ODE_intersection(
     """
     Solve the ODE for the Gaussian beam and find the intersection time with the surface.
 
-    Step 1. Solve the ODEs as usual.
-    Step 2. For each ray, solve a root finding problem with respect to the surface.
-    If the ray intersects the surface, compute its intersection time, otherwise return inf.
+    Parameters
+    ----------
+    x0 : jnp.ndarray, shape (d,)
+        Initial beam position for one vmapped beam.
+    p0 : jnp.ndarray, shape (d,)
+        Initial momentum for one vmapped beam.
+    M0 : jnp.ndarray, shape (d, d)
+        Initial Hessian.
+    a0 : jnp.ndarray
+        Initial amplitude.
+    mode : jnp.ndarray
+        Hamiltonian branch sign.
+    ts : jnp.ndarray, shape (Nt,)
+        Time grid.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption coefficient.
+    surface : Callable
+        Implicit surface function whose zero defines the target surface.
+    solver_config : SolverConfig, optional
+        Numerical solver configuration.
 
+    Returns
+    -------
+    xt : jnp.ndarray, shape (Nt, d)
+        Beam positions.
+    pt : jnp.ndarray, shape (Nt, d)
+        Beam momenta.
+    Mt : jnp.ndarray, shape (Nt, d, d)
+        Beam Hessians.
+    At : jnp.ndarray, shape (Nt, 1)
+        Beam amplitudes.
+    t_int : jnp.ndarray
+        Intersection time, or ``inf`` when the root solve fails.
+
+    Notes
+    -----
+    First solves the beam ODE with dense output, then solves a scalar root
+    problem for ``surface(x(t))``.
     """
     t0 = ts[0]
     t1 = ts[-1]
@@ -951,6 +1167,21 @@ def solve_ODE_intersection(
     )
 
     def surface_root(t, _=None):
+        """
+        Evaluate the surface function along the dense ODE solution.
+
+        Parameters
+        ----------
+        t : float
+            Candidate time.
+        _ : Any, optional
+            Ignored argument accepted for Optimistix compatibility.
+
+        Returns
+        -------
+        jnp.ndarray
+            Surface residual at ``x(t)``.
+        """
         y_t = sol.evaluate(t)
         xt = y_t[:d].real
         return surface(xt)
@@ -1018,6 +1249,25 @@ def solve_ODE_first_hit(
     args_ode = (mode, c, d, lam)
 
     def cond_fn(t, y, *_, **__):
+        """
+        Event condition for first surface hit.
+
+        Parameters
+        ----------
+        t : float
+            Current integration time.
+        y : jnp.ndarray
+            Current flat ODE state.
+        *_ : tuple
+            Ignored positional event arguments.
+        **__ : dict
+            Ignored keyword event arguments.
+
+        Returns
+        -------
+        jnp.ndarray
+            Surface residual for the current beam position.
+        """
         return surface(y[:d].real)
 
     event = diffrax.Event(
@@ -1143,7 +1393,23 @@ def format_solution_QP(ys, d):
     """
     Format the solution of the ODEs in (x, p, Q, P, A) into (x, p, M, A).
 
-    ys: (Nt, d + d + d² + d² + 1)
+    Parameters
+    ----------
+    ys : jnp.ndarray, shape (Nt, d + d + d**2 + d**2 + 1)
+        Flat ODE state trajectory.
+    d : int
+        Spatial dimension.
+
+    Returns
+    -------
+    xt : jnp.ndarray, shape (Nt, d)
+        Beam positions.
+    pt : jnp.ndarray, shape (Nt, d)
+        Beam momenta.
+    Mt : jnp.ndarray, shape (Nt, d, d)
+        Hessians reconstructed as ``P @ inv(Q)``.
+    At : jnp.ndarray, shape (Nt, 1)
+        Beam amplitudes.
     """
     xt = ys[..., :d].real
     pt = ys[..., d : 2 * d].real
@@ -1156,6 +1422,21 @@ def format_solution_QP(ys, d):
     Pt = rearrange(P_flat, "t (d1 d2) -> t d1 d2", d1=d, d2=d)
 
     def _MK(Q, P):
+        """
+        Reconstruct the Hessian matrix from Q/P variables.
+
+        Parameters
+        ----------
+        Q : jnp.ndarray, shape (d, d)
+            Q block of the linearised Hamiltonian system.
+        P : jnp.ndarray, shape (d, d)
+            P block of the linearised Hamiltonian system.
+
+        Returns
+        -------
+        jnp.ndarray, shape (d, d)
+            ``P @ inv(Q)``.
+        """
         return P @ jnp.linalg.inv(Q)
 
     Mt = jax.vmap(_MK)(Qt, Pt)
@@ -1178,7 +1459,42 @@ def solve_ODE_QP_base(
     """
     Solve the GB ODEs using (Q,P) instead of M directly.
 
-    Initial condition: Q(0) = I, P(0) = M0 so that M(0) = M0.
+    Parameters
+    ----------
+    x0 : jnp.ndarray, shape (d,)
+        Initial beam position for one vmapped beam.
+    p0 : jnp.ndarray, shape (d,)
+        Initial beam momentum.
+    M0 : jnp.ndarray, shape (d, d)
+        Initial Hessian matrix.
+    a0 : jnp.ndarray
+        Initial amplitude.
+    mode : jnp.ndarray
+        Hamiltonian branch sign.
+    ts : jnp.ndarray, shape (Nt,)
+        Time grid.
+    c : Callable
+        Sound-speed function.
+    lam : float, default=0.0
+        Absorption coefficient.
+    solver_config : SolverConfig, optional
+        Numerical solver configuration.
+
+    Returns
+    -------
+    xt : jnp.ndarray, shape (Nt, d)
+        Beam positions.
+    pt : jnp.ndarray, shape (Nt, d)
+        Beam momenta.
+    Mt : jnp.ndarray, shape (Nt, d, d)
+        Reconstructed Hessian matrices.
+    At : jnp.ndarray, shape (Nt, 1)
+        Beam amplitudes.
+
+    Notes
+    -----
+    Uses initial condition ``Q(0) = I`` and ``P(0) = M0`` so that
+    ``M(0) = M0``.
     """
     t0 = ts[0]
     t1 = ts[-1]

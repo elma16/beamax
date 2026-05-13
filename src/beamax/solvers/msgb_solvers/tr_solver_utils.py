@@ -26,7 +26,34 @@ def compute_mT_linear_system(
     mode: jnp.ndarray,
     c: Callable,
 ) -> jnp.ndarray:
-    """Compute the linear system involving mT and m_init at the final time."""
+    """
+    Compute the linear system relating spatial and spacetime Hessians.
+
+    Parameters
+    ----------
+    xT : jnp.ndarray, shape (b, d)
+        Beam positions at the final time.
+    pT : jnp.ndarray, shape (b, d)
+        Beam momenta at the final time.
+    mT_spc : jnp.ndarray or None
+        Spatial Hessian representation.
+    mT_spc_time : jnp.ndarray or None
+        Spacetime Hessian representation.
+    mode : jnp.ndarray
+        Beam branch signs.
+    c : Callable
+        Sound-speed function.
+
+    Returns
+    -------
+    jnp.ndarray
+        Converted Hessian representation.
+
+    Raises
+    ------
+    ValueError
+        If both Hessian representations are ``None``.
+    """
     if mT_spc is None and mT_spc_time is None:
         raise ValueError("Either m_init or mT must be provided.")
     elif mT_spc_time is None:
@@ -42,7 +69,27 @@ def mT_forward(
     mode: jnp.ndarray,
     c: Callable,
 ) -> jnp.ndarray:
-    """Given the matrix mT in space, compute the matrix mT in space-time."""
+    """
+    Convert final-time spatial Hessians to spacetime Hessians.
+
+    Parameters
+    ----------
+    xT : jnp.ndarray, shape (b, d)
+        Beam positions at the final time.
+    pT : jnp.ndarray, shape (b, d)
+        Beam momenta at the final time.
+    mT_spc : jnp.ndarray, shape (b, d, d)
+        Spatial Hessian matrices.
+    mode : jnp.ndarray
+        Beam branch signs.
+    c : Callable
+        Sound-speed function.
+
+    Returns
+    -------
+    jnp.ndarray, shape (b, d, d)
+        Spacetime Hessian matrices.
+    """
     b, d = xT.shape
     xdot = gb_utils.vmap_gp(xT, pT, mode, c)
     pdot = -gb_utils.vmap_gx(xT, pT, mode, c)
@@ -65,7 +112,27 @@ def mT_forward(
 
 
 def mT_inverse(xT, pT, mT_spc_time, mode, c):
-    """Given the matrix mT in space-time, compute the matrix mT in space."""
+    """
+    Convert final-time spacetime Hessians to spatial Hessians.
+
+    Parameters
+    ----------
+    xT : jnp.ndarray, shape (b, d)
+        Beam positions at the final time.
+    pT : jnp.ndarray, shape (b, d)
+        Beam momenta at the final time.
+    mT_spc_time : jnp.ndarray, shape (b, d, d)
+        Spacetime Hessian matrices.
+    mode : jnp.ndarray
+        Beam branch signs.
+    c : Callable
+        Sound-speed function.
+
+    Returns
+    -------
+    jnp.ndarray, shape (b, d, d)
+        Spatial Hessian matrices.
+    """
     xdot = gb_utils.vmap_gp(xT, pT, mode, c)
     pdot = -gb_utils.vmap_gx(xT, pT, mode, c)
 
@@ -105,14 +172,21 @@ def find_constant_columns(arr, max_constant_axes=None):
     """
     Find columns where all values are the same (e.g., the boundary normal axis).
 
-    Args:
-        arr: Array to check, shape (N, d)
-        max_constant_axes: expected #constant axes; for TR typically 1 (plane/line)
+    Parameters
+    ----------
+    arr : jnp.ndarray, shape (N, d)
+        Array to check.
+    max_constant_axes : int, optional
+        Maximum number of constant axes to return. For TR this is typically 1.
 
-    Returns:
-        constant_mask: boolean mask of constant columns
-        constant_values: values of those columns (padded with 0)
-        constant_axes: indices of constant columns (padded with -1)
+    Returns
+    -------
+    constant_mask : jnp.ndarray, shape (d,)
+        Boolean mask of constant columns.
+    constant_values : jnp.ndarray
+        Values of constant columns, padded with zeros.
+    constant_axes : jnp.ndarray
+        Indices of constant columns, padded with ``-1``.
     """
     d = arr.shape[1]
     if max_constant_axes is None:
@@ -135,14 +209,33 @@ def compute_TR_parameters(
     """
     Compute the components for the time reversal problem.
 
-    Returns:
-        pts: The momentum at the final time (spatial, shape (B, d_spatial))
-        Mts: The matrix M at the final time (B, d_spatial, d_spatial)
-        xts: The position at the final time (B, d_spatial)
-        ωs: The scale at the final time (B,)
-        ats: The scale at the initial time (B, 1)
-        signum: The mode of the Gaussian beam (B, 1)
-        ts: The time interval per beam (B, 2)
+    Parameters
+    ----------
+    significant_coeffs : jnp.ndarray
+        Flattened significant coefficient indices in the boundary-data WPT.
+    domain_data : Domain
+        Domain describing the boundary data coordinates.
+    wpt_data : MSWPT
+        Boundary-data wave-packet transform.
+    sources : Sensor
+        Source/sensor geometry on the acquisition boundary.
+
+    Returns
+    -------
+    pts : jnp.ndarray, shape (B, d_spatial)
+        Momentum at the final time.
+    Mts : jnp.ndarray, shape (B, d_spatial, d_spatial)
+        Hessian matrix at the final time.
+    xts : jnp.ndarray, shape (B, d_spatial)
+        Position at the final time.
+    ωs : jnp.ndarray, shape (B,)
+        Beam frequency scale at the final time.
+    ats : jnp.ndarray, shape (B, 1)
+        Beam amplitude scale at the final time.
+    signum : jnp.ndarray, shape (B, 1)
+        Gaussian-beam mode sign.
+    ts : jnp.ndarray, shape (B, 2)
+        Per-beam time interval.
     """
     # -------------------------------------------------------------------------
     # 0. Boundary geometry: which spatial axis is normal to the detector?
@@ -359,24 +452,43 @@ def _compute_tr_beams(
     Similar to _compute_beams in forward_solver_utils.py but for time reversal.
     TR always uses real-valued computation.
 
-    Args:
-        x0: Initial positions
-        p0: Initial momentum vectors
-        M0: Initial M matrices
-        a0: Initial amplitudes
-        ω: Angular frequencies
-        mode: Beam modes
-        c: Speed of sound function
-        lam: Lambda parameter
-        ts: Time points (can be per-beam)
-        sensors: Sensor positions
-        domain_size: Domain size
-        periodic: Boundary conditions
-        ode_solver: ODE solver function
-        sum_beams: Whether to sum over beams
+    Parameters
+    ----------
+    x0 : jnp.ndarray
+        Initial positions.
+    p0 : jnp.ndarray
+        Initial momentum vectors.
+    M0 : jnp.ndarray
+        Initial Hessian matrices.
+    a0 : jnp.ndarray
+        Initial amplitudes.
+    ω : jnp.ndarray
+        Angular frequencies.
+    mode : jnp.ndarray
+        Beam modes.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption parameter.
+    ts : jnp.ndarray
+        Time points, possibly per beam.
+    sensors : jnp.ndarray
+        Sensor positions.
+    domain_size : jnp.ndarray
+        Domain size.
+    periodic : jnp.ndarray
+        Boundary periodicity flags.
+    ode_solver : SolverFn
+        ODE solver.
+    sum_beams : bool, default=False
+        Whether to sum over beams.
+    solver_config : SolverConfig, optional
+        Numerical ODE configuration.
 
-    Returns:
-        Computed TR beams (summed if sum_beams=True)
+    Returns
+    -------
+    jnp.ndarray
+        Computed TR beams, summed if ``sum_beams=True``.
     """
     beams = core.compute_gaussian_beam_real_TR(
         x0=x0,
@@ -416,19 +528,33 @@ def _aggregate_tr_beams(
     Similar structure to _aggregate_beams but for time reversal.
     Takes the final time point (t=0 for TR) from each batch.
 
-    Args:
-        params: Tuple of beam parameters (p0, M0, x0, ω, a0, mode, ts)
-        aggregate_method: 'scan', 'vmap', or 'all'
-        init_shape: Shape of result array
-        c: Speed of sound function
-        lam: Lambda parameter
-        sensors: Sensor positions
-        domain_size: Domain size
-        periodic: Boundary conditions
-        ode_solver: ODE solver function
+    Parameters
+    ----------
+    params : Tuple[jnp.ndarray, ...]
+        Beam parameters ``(p0, M0, x0, omega, a0, mode, ts)``.
+    aggregate_method : {"scan", "vmap", "all"}
+        Aggregation strategy.
+    init_shape : Tuple[int, ...]
+        Shape of the output field.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption parameter.
+    sensors : jnp.ndarray
+        Sensor positions.
+    domain_size : jnp.ndarray
+        Domain size.
+    periodic : jnp.ndarray
+        Boundary periodicity flags.
+    ode_solver : SolverFn
+        ODE solver.
+    solver_config : SolverConfig, optional
+        Numerical ODE configuration.
 
-    Returns:
-        Aggregated TR result at final time point
+    Returns
+    -------
+    jnp.ndarray
+        Aggregated TR result at the final time point.
     """
     (
         p0_batches,
@@ -444,6 +570,23 @@ def _aggregate_tr_beams(
         init = jnp.zeros(init_shape)
 
         def scan_fn(carry, inp):
+            """
+            Accumulate one time-reversal beam batch.
+
+            Parameters
+            ----------
+            carry : jnp.ndarray
+                Running reconstructed field.
+            inp : Tuple[jnp.ndarray, ...]
+                One batch of TR beam parameters.
+
+            Returns
+            -------
+            carry : jnp.ndarray
+                Updated reconstructed field.
+            aux : None
+                Empty scan output.
+            """
             p0, M0, x0, ω, a0, mode, ts_batch = inp
             batch_result = _compute_tr_beams(
                 x0,
@@ -537,21 +680,36 @@ def compute_TR_result(
 
     Unified interface similar to compute_forward_result.
 
-    Args:
-        params: Tuple of beam parameters (p0, M0, x0, ω, a0, mode, ts)
-        c: Speed of sound function
-        lam: Lambda parameter (absorption)
-        sensors: Sensor positions
-        domain_size: Domain size
-        periodic: Boundary conditions
-        ode_solver: ODE solver function (if None, uses solve_ODE_batch_t)
-        aggregate_method: 'scan', 'vmap', or 'all'
-        dt0: Optional initial time step passed to solve_ODE_batch_t
+    Parameters
+    ----------
+    params : Tuple[jnp.ndarray, ...]
+        Beam parameters ``(p0, M0, x0, omega, a0, mode, ts)``.
+    c : Callable
+        Sound-speed function.
+    lam : float
+        Absorption parameter.
+    sensors : jnp.ndarray
+        Sensor positions.
+    domain_size : jnp.ndarray
+        Domain size.
+    periodic : jnp.ndarray
+        Boundary periodicity flags.
+    ode_solver : SolverFn, optional
+        ODE solver. If ``None``, uses :func:`solve_ODE_batch_t`.
+    aggregate_method : {"scan", "vmap", "all"}, default="scan"
+        Beam aggregation method.
+    solver_config : SolverConfig, optional
+        Numerical ODE configuration.
+    dt0 : float, optional
+        Optional initial time step passed to ``solve_ODE_batch_t``.
 
-    Returns:
-        Time-reversed field at sensor locations (final time point)
+    Returns
+    -------
+    jnp.ndarray
+        Time-reversed field at sensor locations at the final time point.
 
-    Notes:
+    Notes
+    -----
         TR requires per-beam time intervals (shape (b, 2)), so the ODE solver
         must support this. Default is solve_ODE_batch_t. If passing a custom
         solver, ensure it handles per-beam time arrays correctly.

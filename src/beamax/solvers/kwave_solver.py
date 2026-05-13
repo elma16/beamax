@@ -27,15 +27,29 @@ from kwave.compat import options_to_kwargs
 
 def _patch_cpp_simulation_stale_hdf5():
     """
-    Work around k-wave-python CppSimulation._write_hdf5 not removing stale
-    HDF5 files before writing, causing "name already exists" errors when the
-    same temp path is reused.
+    Patch stale HDF5 handling in k-wave-python.
+
+    Notes
+    -----
+    Some k-wave-python versions do not remove stale HDF5 files before
+    writing, causing "name already exists" errors when the same temp path is
+    reused.
     """
     from kwave.solvers.cpp_simulation import CppSimulation
 
     _orig_write = CppSimulation._write_hdf5
 
     def _patched_write(self, filepath):
+        """
+        Remove an existing HDF5 file before delegating to k-Wave.
+
+        Parameters
+        ----------
+        self : kwave.solvers.cpp_simulation.CppSimulation
+            Simulation instance.
+        filepath : str or path-like
+            HDF5 output path.
+        """
         if os.path.exists(filepath):
             os.remove(filepath)
         _orig_write(self, filepath)
@@ -45,8 +59,12 @@ def _patch_cpp_simulation_stale_hdf5():
 
 def _patch_kwave_binary_path():
     """
-    Allow overriding the k-wave-python bundled binary via the
-    ``BEAMAX_KWAVE_BINARY_PATH`` env var.
+    Allow overriding the k-wave-python bundled binary path.
+
+    Notes
+    -----
+    The override path is read from the ``BEAMAX_KWAVE_BINARY_PATH`` environment
+    variable.
 
     The pip-installed darwin binary at ``kwave.BINARY_PATH/kspaceFirstOrder-OMP``
     silently ignores ``alpha_coeff``/``alpha_power`` (no absorption applied).
@@ -123,6 +141,19 @@ class KWaveSolver(Solver):
         execution_options=None,
         **kwargs,
     ):
+        """
+        Initialize k-Wave solver options.
+
+        Parameters
+        ----------
+        simulation_options : kwave.options.SimulationOptions, optional
+            Legacy simulation options object.
+        execution_options : kwave.options.SimulationExecutionOptions, optional
+            Legacy execution options object.
+        **kwargs
+            Unified keyword options forwarded to
+            :func:`kwave.kspaceFirstOrder`.
+        """
         if simulation_options is not None:
             # Legacy path: convert old option objects to unified kwargs
             self._solver_kwargs = options_to_kwargs(
@@ -143,8 +174,13 @@ class KWaveSolver(Solver):
     @classmethod
     def _ensure_macos_hdf5_compat(cls) -> None:
         """
-        Create DYLD symlinks so the k-Wave OMP binary (linked against
-        libhdf5.310) can load on systems that only ship libhdf5.320.
+        Create DYLD symlinks for macOS HDF5 version compatibility.
+
+        Notes
+        -----
+        The k-Wave OMP binary may be linked against ``libhdf5.310`` while a
+        system only ships ``libhdf5.320``. This method creates temporary
+        compatibility symlinks when possible.
         """
         if cls._hdf5_compat_done or sys.platform != "darwin":
             cls._hdf5_compat_done = True
@@ -263,17 +299,26 @@ class KWaveSolver(Solver):
         """
         Run K-Wave simulation with current configuration.
 
-        Args:
-            domain: Domain object.
-            ts: Time steps.
-            source: Source object.
-            sensor: Sensor object.
-            force_python: Force the python backend even when cpp is configured.
-                Used for time-varying source simulations (TR/adjoint) where
-                the v0.6.1 cpp backend has missing source-term preprocessing.
+        Parameters
+        ----------
+        domain : Domain
+            Physical domain and medium.
+        ts : np.ndarray, shape (Nt,)
+            Time grid.
+        source : kSource
+            k-Wave source object.
+        sensor : kSensor
+            k-Wave sensor object.
+        force_python : bool, default=False
+            Force the Python backend even when C++ is configured. Used for
+            time-varying source simulations where the C++ backend lacks
+            source-term preprocessing.
 
-        Returns:
-            Pressure field.
+        Returns
+        -------
+        np.ndarray
+            Raw k-Wave result object/array returned by
+            :func:`kwave.kspaceFirstOrder`.
         """
         kgrid = self._create_kgrid(domain, ts)
 
@@ -422,6 +467,19 @@ class KWaveSolver(Solver):
         """
         Build additive adjoint source from sensor data in (Ns, Nt) layout.
 
+        Parameters
+        ----------
+        sensor_data_ns_nt : np.ndarray, shape (Ns, Nt)
+            Sensor data with sensors along the first axis and time along the
+            second axis.
+
+        Returns
+        -------
+        np.ndarray, shape (Ns, Nt)
+            Additive adjoint source for k-Wave.
+
+        Notes
+        -----
         This matches the updated k-Wave MATLAB adjoint example:
             p_adj = [r, 0] + [0, r]
             p_adj(:, end-1) = p_adj(:, end-1) + p_adj(:, end)
@@ -448,9 +506,33 @@ class KWaveSolver(Solver):
         data_layout: str = "auto",
     ) -> np.ndarray:
         """
+        Run classic k-Wave time reversal.
 
-        Classic k-Wave TR: enforce p(x_s,t) = sensor_data(t,x_s) (Dirichlet).
-        Accepts either (Ns, Nt) or (Nt, Ns) input and returns `record`.
+        Parameters
+        ----------
+        data : np.ndarray or jnp.ndarray, shape (Ns, Nt) or (Nt, Ns)
+            Sensor measurements.
+        domain : Domain
+            Reconstruction domain.
+        sensors : array-like
+            Sensor mask.
+        sources : array-like
+            Source mask where the reversed data are injected.
+        ts : np.ndarray or jnp.ndarray, shape (Nt,)
+            Time grid.
+        record : str, default="p_final"
+            k-Wave field to return.
+        data_layout : {"auto", "ns_nt", "nt_ns"}, default="auto"
+            Sensor-data layout interpretation.
+
+        Returns
+        -------
+        np.ndarray
+            Requested k-Wave record.
+
+        Notes
+        -----
+        Enforces ``p(x_s, t) = sensor_data(t, x_s)`` as a Dirichlet source.
         """
         sensor_mask = np.array(sensors)
         source_mask = np.array(sources)
@@ -551,12 +633,49 @@ class TimedKWaveSolver(KWaveSolver):
     _RE = re.compile(r"Total execution time:\s*([\d.]+)s")
 
     def __init__(self, *args, mode: str = "stdout", **kwargs):
+        """
+        Initialize timed k-Wave solver.
+
+        Parameters
+        ----------
+        *args
+            Positional arguments forwarded to :class:`KWaveSolver`.
+        mode : {"stdout", "wall"}, default="stdout"
+            Timing mode. ``"stdout"`` parses k-Wave output; ``"wall"`` uses
+            Python wall-clock timing.
+        **kwargs
+            Keyword arguments forwarded to :class:`KWaveSolver`.
+
+        Raises
+        ------
+        ValueError
+            If ``mode`` is not ``"stdout"`` or ``"wall"``.
+        """
         super().__init__(*args, **kwargs)
         if mode not in {"stdout", "wall"}:
             raise ValueError("mode must be 'stdout' or 'wall'")
         self._mode = mode
 
     def _time_call(self, fn, *a, **k) -> Tuple[np.ndarray, float]:
+        """
+        Execute a solver call and measure elapsed time.
+
+        Parameters
+        ----------
+        fn : Callable
+            Solver function to call.
+        *a
+            Positional arguments forwarded to ``fn``.
+        **k
+            Keyword arguments forwarded to ``fn``.
+
+        Returns
+        -------
+        result : np.ndarray
+            Solver result.
+        seconds : float
+            Parsed kernel time or wall-clock fallback.
+        """
         if self._mode == "wall":
             t0 = time.perf_counter()
             out = fn(*a, **k)
@@ -594,6 +713,28 @@ class TimedKWaveSolver(KWaveSolver):
     ) -> Tuple[np.ndarray, float]:
         """
         Same as KWaveSolver.forward, but returns (result, seconds).
+
+        Parameters
+        ----------
+        p0 : array-like
+            Initial pressure.
+        domain : Domain
+            Computational domain.
+        sensors : array-like
+            Sensor mask or positions.
+        ts : array-like, shape (Nt,)
+            Time grid.
+        record : str, default="p"
+            k-Wave field to record.
+        **solver_kwargs
+            Additional solver keyword arguments.
+
+        Returns
+        -------
+        result : np.ndarray
+            Forward simulation result.
+        seconds : float
+            Execution time.
         """
         return self._time_call(
             super().forward,
@@ -619,6 +760,32 @@ class TimedKWaveSolver(KWaveSolver):
     ) -> Tuple[np.ndarray, float]:
         """
         Same as KWaveSolver.time_reversal, but returns (result, seconds).
+
+        Parameters
+        ----------
+        data : array-like
+            Sensor measurements.
+        domain : Domain
+            Reconstruction domain.
+        sensors : array-like
+            Sensor mask.
+        sources : array-like
+            Source mask.
+        ts : array-like, shape (Nt,)
+            Time grid.
+        record : str, default="p_final"
+            k-Wave field to return.
+        data_layout : {"auto", "ns_nt", "nt_ns"}, default="auto"
+            Sensor-data layout interpretation.
+        **solver_kwargs
+            Additional solver keyword arguments.
+
+        Returns
+        -------
+        result : np.ndarray
+            Time-reversal result.
+        seconds : float
+            Execution time.
         """
         return self._time_call(
             super().time_reversal,
@@ -646,6 +813,32 @@ class TimedKWaveSolver(KWaveSolver):
     ) -> Tuple[np.ndarray, float]:
         """
         Same as KWaveSolver.adjoint, but returns (result, seconds).
+
+        Parameters
+        ----------
+        data : array-like
+            Sensor measurements.
+        domain : Domain
+            Reconstruction domain.
+        sensors : array-like
+            Sensor mask.
+        sources : array-like
+            Source mask.
+        ts : array-like, shape (Nt,)
+            Time grid.
+        record : str, default="p_final"
+            k-Wave field to return.
+        data_layout : {"auto", "ns_nt", "nt_ns"}, default="auto"
+            Sensor-data layout interpretation.
+        **solver_kwargs
+            Additional solver keyword arguments.
+
+        Returns
+        -------
+        result : np.ndarray
+            Adjoint result.
+        seconds : float
+            Execution time.
         """
         return self._time_call(
             super().adjoint,

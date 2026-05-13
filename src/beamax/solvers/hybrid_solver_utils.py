@@ -94,6 +94,21 @@ def compute_gh_filter(
     sum_gsq = wpt.sum_gsquare
 
     def body(i, gh):
+        """
+        Add one selected filter contribution to the low-pass accumulator.
+
+        Parameters
+        ----------
+        i : int
+            Index into ``boxes_include``.
+        gh : jnp.ndarray, shape (*N,)
+            Current accumulated low-pass filter.
+
+        Returns
+        -------
+        jnp.ndarray, shape (*N,)
+            Updated accumulated filter.
+        """
         idx = boxes_include[i]
         g_b = single_filter_idx(
             idx,
@@ -114,13 +129,24 @@ def get_indices_between_two_opposing_corners(
     """
     Get the indices in the box defined by the two corners.
 
-    Args:
-        centers: The centers of the boxes.
-        corner1_idx: The index of the first corner.
-        corner2_idx: The index of the second corner.
+    Parameters
+    ----------
+    centers : jnp.ndarray, shape (num_centers, ndim)
+        Box centre coordinates.
+    corner1_idx : int
+        Index of the first corner.
+    corner2_idx : int
+        Index of the opposing corner.
 
-    Returns:
-        The indices in the box.
+    Returns
+    -------
+    jnp.ndarray
+        Indices of centres inside the closed axis-aligned box.
+
+    Raises
+    ------
+    ValueError
+        If both corner indices refer to the same centre.
     """
     corner1 = centers[corner1_idx]
     corner2 = centers[corner2_idx]
@@ -144,14 +170,19 @@ def get_indices_with_norm_less_than(
     """
     Get the indices of the boxes with a norm less than (or equal to) the given value.
 
-    Args:
-        centers: The centers of the boxes.
-        norm: The norm to compare against.
-        inclusive: If True, use <= (matches box_corners behavior).
-                   If False, use < (original behavior).
+    Parameters
+    ----------
+    centers : jnp.ndarray, shape (num_centers, ndim)
+        Box centre coordinates.
+    norm : float
+        L-infinity norm threshold.
+    inclusive : bool, default=True
+        If ``True``, use ``<=``; otherwise use ``<``.
 
-    Returns:
-        The indices of the boxes with a norm less than the given value.
+    Returns
+    -------
+    jnp.ndarray
+        Indices whose centre norm satisfies the threshold.
     """
     norms = jnp.linalg.norm(centers, axis=1, ord=jnp.inf)
     if inclusive:
@@ -171,13 +202,24 @@ def find_bounding_corner_indices(
     that exist in the centers array (rather than computing component-wise
     min/max which may not correspond to actual centers).
 
-    Args:
-        centers: All center coordinates, shape (num_centers, ndim).
-        idx_box: Indices of selected centers.
+    Parameters
+    ----------
+    centers : jnp.ndarray, shape (num_centers, ndim)
+        All centre coordinates.
+    idx_box : jnp.ndarray
+        Indices of selected centres.
 
-    Returns:
-        (corner1_idx, corner2_idx): Indices into the centers array
-        representing two opposing corners of the bounding box.
+    Returns
+    -------
+    corner1_idx : int
+        Index of one selected bounding corner.
+    corner2_idx : int
+        Index of the opposing selected bounding corner.
+
+    Raises
+    ------
+    ValueError
+        If ``idx_box`` is empty.
     """
     if idx_box.size == 0:
         raise ValueError("Cannot find corners from empty index set")
@@ -219,12 +261,17 @@ def are_opposing(corner1: int, corner2: int) -> bool:
     """
     Check two corners are opposing.
 
-    Args:
-        corner1: The first corner.
-        corner2: The second corner.
+    Parameters
+    ----------
+    corner1 : int
+        First corner index.
+    corner2 : int
+        Second corner index.
 
-    Returns:
-        Whether the corners are opposing.
+    Returns
+    -------
+    bool
+        Whether the corner indices differ.
     """
     return jnp.any(corner1 != corner2)
 
@@ -235,18 +282,40 @@ def get_bounds(
     """
     Get the bounds of the filter banks required, using the opposite corners of the box.
 
-    Args:
-        dyadic_decomp: The dyadic decomposition.
-        domain: The domain.
-        corner1: The first corner.
-        corner2: The second corner.
+    Parameters
+    ----------
+    dyadic_decomp : DyadicDecomposition
+        Dyadic decomposition.
+    domain : Domain
+        Physical domain.
+    corner1 : int
+        First corner index.
+    corner2 : int
+        Opposing corner index.
 
-    Returns:
-        The bounds of the filter banks.
+    Returns
+    -------
+    jnp.ndarray, shape (ndim, 2)
+        Inclusive/exclusive bounds in grid coordinates.
     """
     box_corners = jnp.array([corner1, corner2])
 
     def box_bounds(box_idx):
+        """
+        Compute grid bounds for one dyadic box.
+
+        Parameters
+        ----------
+        box_idx : int
+            Global box index.
+
+        Returns
+        -------
+        bounds_min : jnp.ndarray, shape (ndim,)
+            Minimum Fourier-index bound.
+        bounds_max : jnp.ndarray, shape (ndim,)
+            Maximum Fourier-index bound.
+        """
         level = utils.find_level(dyadic_decomp, box_idx)
         box_length = dyadic_decomp.box_lengths[level]
         center = dyadic_decomp.centres_ndim[box_idx]
@@ -270,12 +339,18 @@ def closest_power_of_two(size: int, max_size: int) -> int:
     """
     Returns the closest power of two to the given size.
 
-    Args:
-        size: The size.
-        max_size: The maximum size.
+    Parameters
+    ----------
+    size : int
+        Input size.
+    max_size : int
+        Upper bound for the returned size.
 
-    Returns:
-        The closest power of two.
+    Returns
+    -------
+    int
+        Smallest power of two greater than or equal to ``size``, capped at
+        ``max_size``.
     """
 
     power_of_two = 2 ** jnp.ceil(jnp.log2(size)).astype(jnp.int32)
@@ -288,13 +363,19 @@ def downsample_p0(
     """
     Downsample p0 after applying the low pass filter to it.
 
-    Args:
-        p0_LF: The low pass filtered p0.
-        bd: The bounds of the box.
-        use_power_of_two: Whether to use the closest power of two.
+    Parameters
+    ----------
+    p0_LF : jnp.ndarray
+        Low-pass filtered field.
+    bd : jnp.ndarray, shape (ndim, 2)
+        Bounds of the selected low-frequency support.
+    use_power_of_two : bool, default=False
+        Whether to round the crop size up to a power of two.
 
-    Returns:
-        The downsampled p0.
+    Returns
+    -------
+    jnp.ndarray
+        Centred crop of ``p0_LF``.
     """
     nonzero_size = jnp.min(jnp.array([int(stop - start) for start, stop in bd]))
 
@@ -315,14 +396,21 @@ def downsample_domain(domain: Domain, p0_LF_downsampled: jnp.ndarray) -> Domain:
     """
     Downsample the domain after downsampling the p0.
 
-    Args:
-        domain: The domain.
-        p0_LF_downsampled: The downsampled p0.
+    Parameters
+    ----------
+    domain : Domain
+        Original domain.
+    p0_LF_downsampled : jnp.ndarray
+        Downsampled low-frequency field.
 
-    Returns:
-        The downsampled domain.
+    Returns
+    -------
+    Domain
+        Domain with shape and spacing adjusted to ``p0_LF_downsampled``.
 
-    N.B: The domain is downsampled to match the downsampled p0.
+    Notes
+    -----
+    The domain is downsampled to match the downsampled field.
     """
     N_resized = p0_LF_downsampled.shape
     resize_factor = tuple([domain.N[i] / N_resized[i] for i in range(len(N_resized))])
@@ -353,9 +441,34 @@ def split_frequency_components(
     gh: Optional[jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Domain]:
     """
-    Split the input into high- and low-frequency components, optionally
-    downsampling the low-frequency part and returning a correspondingly
-    reduced domain.
+    Split input into high- and low-frequency components.
+
+    Parameters
+    ----------
+    p0 : jnp.ndarray
+        Input field.
+    sensors_mask : jnp.ndarray
+        Sensor mask aligned with ``p0``.
+    input_type : {"spatial", "fourier"}
+        Domain of ``p0``.
+    output_type : {"spatial", "fourier"}
+        Domain for returned components.
+    wpt : MSWPT
+        Wave-packet transform defining the dyadic boxes.
+    box_corners : jnp.ndarray, optional
+        Pair of box indices defining the low-frequency region.
+    windowing : str
+        Windowing type passed to the filter construction.
+    domain : Domain
+        Physical domain.
+    cutoff_freq : float, optional
+        Frequency-radius alternative to ``box_corners``.
+    downsample : bool, default=False
+        Whether to downsample the low-frequency part.
+    use_pow2 : bool, default=False
+        Whether downsampled sizes should be powers of two.
+    gh : jnp.ndarray, optional
+        Precomputed low-pass filter.
 
     Returns
     -------
@@ -505,16 +618,25 @@ def interpolate_LF_soln(
     """
     Interpolates a downsampled solution from a LF wave solver, to match the desired size.
 
-    Args:
-        lf_downsampled: The downsampled LF solution.
-        desired_size: The desired size of the solution.
-        interpolation_method: The interpolation method to use ("spline" or "fourier").
-        interp_window: The windowing function to use ("cos2", "hann", "hamming", "blackman").
-        temporal_oversample: The amount of timesteps I oversampled by.
-        spline_order: The order of the spline interpolation.
+    Parameters
+    ----------
+    lf_downsampled : jnp.ndarray
+        Downsampled low-frequency solver output.
+    target_size : Tuple[int, ...]
+        Desired output shape.
+    interpolation_method : {"spline", "fourier"}, default="spline"
+        Interpolation method.
+    interp_window : {"cos2", "hann", "hamming", "blackman"}, default="cos2"
+        Temporal taper to apply before interpolation.
+    dt_oversample : int, default=0
+        Number of oversampled time steps in the taper region.
+    spline_order : int, default=3
+        Spline order for ``scipy.ndimage.zoom``.
 
-    Returns:
-        The interpolated solution.
+    Returns
+    -------
+    jnp.ndarray
+        Interpolated low-frequency solution.
     """
     lf_windowed = oversample_window(
         lf_downsampled, dt_oversample, axis=0, window_type=interp_window

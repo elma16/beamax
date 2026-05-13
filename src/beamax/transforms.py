@@ -436,6 +436,21 @@ class MSWPT(eqx.Module):
         """
 
         def body_fun(i, current_sum):
+            """
+            Add one squared tile filter to the running sum.
+
+            Parameters
+            ----------
+            i : int
+                Global box index.
+            current_sum : jnp.ndarray, shape (*N,)
+                Running sum of squared filters.
+
+            Returns
+            -------
+            jnp.ndarray, shape (*N,)
+                Updated running sum.
+            """
             filter_i = single_filter_idx(
                 i,
                 self.dyadic_decomp.fourier_meshgrid,
@@ -534,6 +549,21 @@ class MSWPT(eqx.Module):
 
             # This function processes a single box for the forward transform
             def loop_body(i, coeffs_for_level):
+                """
+                Compute and store coefficients for one box at the current level.
+
+                Parameters
+                ----------
+                i : int
+                    Local box index within the level.
+                coeffs_for_level : jnp.ndarray
+                    Running coefficient tensor for the level.
+
+                Returns
+                -------
+                jnp.ndarray
+                    Updated coefficient tensor for the level.
+                """
                 centre = centres_level[i]
 
                 fft_patch = utils.extract_centered_box(
@@ -654,6 +684,21 @@ class MSWPT(eqx.Module):
             centres_lvl = centres_all[start:end]  # (nbox, d)
 
             def body(i, ft):
+                """
+                Scatter-add one inverse-transform box contribution.
+
+                Parameters
+                ----------
+                i : int
+                    Local box index within the level.
+                ft : jnp.ndarray, shape (*N,)
+                    Running Fourier-domain reconstruction.
+
+                Returns
+                -------
+                jnp.ndarray, shape (*N,)
+                    Updated Fourier-domain reconstruction.
+                """
                 centre = centres_lvl[i]  # (d,)
 
                 # ----- compute parity rolls r (same as forward) -----

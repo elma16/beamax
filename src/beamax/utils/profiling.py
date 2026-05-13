@@ -96,15 +96,18 @@ def _rusage_maxrss_mb() -> Optional[float]:
 
 
 def get_memory_mb() -> float:
-    """Get current device/process memory usage in MB.
+    """
+    Get current device/process memory usage in MB.
 
-    Order:
-      1) GPU via NVML if on GPU
-      2) Process RSS via psutil
-      3) ru_maxrss via resource (platform-dependent)
+    Returns
+    -------
+    float
+        Memory in MB, or ``-1.0`` if no method succeeded.
 
-    Returns:
-        float: Memory in MB, or -1.0 if no method succeeded (kept for backward compatibility).
+    Notes
+    -----
+    The lookup order is GPU memory via NVML, process RSS via ``psutil``, then
+    ``resource.getrusage`` maximum RSS as a platform-dependent fallback.
     """
     for f in (_gpu_memory_used_mb, _rss_memory_used_mb, _rusage_maxrss_mb):
         val = f()
@@ -117,7 +120,19 @@ def get_memory_mb() -> float:
 
 
 def format_bytes(nbytes: int) -> str:
-    """Format bytes into human-readable string."""
+    """
+    Format bytes into a human-readable string.
+
+    Parameters
+    ----------
+    nbytes : int
+        Byte count.
+
+    Returns
+    -------
+    str
+        Formatted size in KB, MB, or GB.
+    """
     if nbytes < 1024**2:
         return f"{nbytes / 1024:.2f} KB"
     elif nbytes < 1024**3:
@@ -127,7 +142,21 @@ def format_bytes(nbytes: int) -> str:
 
 
 def array_info(arr: jnp.ndarray, name: str = "array") -> Dict[str, Any]:
-    """Get detailed info about a JAX array."""
+    """
+    Get detailed information about a JAX array.
+
+    Parameters
+    ----------
+    arr : jnp.ndarray
+        Array to inspect.
+    name : str, default="array"
+        Display name for the array.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Shape, dtype, size, and memory metadata.
+    """
     if arr is None:
         return {name: "None"}
 
@@ -160,14 +189,21 @@ def profile_section(
     """
     Context manager for profiling a code section.
 
-    Args:
-        name: Section name for logging.
-        enabled: Override global PROFILING_ENABLED.
-        print_arrays: Optional dict of arrays to print info about at start.
-        sync: Optional array or iterable of arrays to block on at exit.
-              If provided, each will have `.block_until_ready()` invoked.
+    Parameters
+    ----------
+    name : str
+        Section name for logging.
+    enabled : bool, optional
+        Override global :data:`PROFILING_ENABLED`.
+    print_arrays : Dict[str, jnp.ndarray], optional
+        Arrays whose metadata should be printed at the start.
+    sync : Iterable[jnp.ndarray] or jnp.ndarray, optional
+        Array or iterable of arrays to ``block_until_ready`` at exit.
 
-    Example:
+    Examples
+    --------
+    ::
+
         with profile_section("forward_pass",
                              print_arrays={"p0": p0, "dpdt": dpdt},
                              sync=[p0, dpdt]):
@@ -237,19 +273,58 @@ def profile_function(name: Optional[str] = None, print_args: bool = False):
     """
     Decorator for profiling functions.
 
-    Args:
-        name: Optional custom name (defaults to function name).
-        print_args: Whether to print argument shapes.
+    Parameters
+    ----------
+    name : str, optional
+        Custom profile section name. Defaults to the wrapped function name.
+    print_args : bool, default=False
+        Whether to print shapes for JAX-array arguments.
 
-    Example:
+    Returns
+    -------
+    Callable
+        Decorator that wraps a function in :func:`profile_section`.
+
+    Examples
+    --------
+    ::
+
         @profile_function(print_args=True)
         def my_function(x, y):
             return x + y
     """
 
     def decorator(func):
+        """
+        Wrap a function with optional profiling instrumentation.
+
+        Parameters
+        ----------
+        func : Callable
+            Function to wrap.
+
+        Returns
+        -------
+        Callable
+            Wrapped function.
+        """
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            """
+            Execute the wrapped function with optional profiling output.
+
+            Parameters
+            ----------
+            *args
+                Positional arguments forwarded to the wrapped function.
+            **kwargs
+                Keyword arguments forwarded to the wrapped function.
+
+            Returns
+            -------
+            Any
+                Result returned by the wrapped function.
+            """
             fname = name or func.__name__
 
             if not PROFILING_ENABLED:
@@ -301,7 +376,14 @@ def profile_function(name: Optional[str] = None, print_args: bool = False):
 
 
 def print_memory_summary(label: str = ""):
-    """Print current memory usage summary (no exceptions swallowed)."""
+    """
+    Print the current memory usage summary when profiling is enabled.
+
+    Parameters
+    ----------
+    label : str, default=""
+        Optional label included in the printed message.
+    """
     if not PROFILING_ENABLED:
         return
     mem = get_memory_mb()

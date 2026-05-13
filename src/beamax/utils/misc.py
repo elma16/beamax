@@ -35,6 +35,21 @@ def batch_data(*args, batch_size, zero_padded_args=()):
     num_batches = (b + batch_size - 1) // batch_size
 
     def pad_array(arr, zero_pad=True):
+        """
+        Pad one array along its leading axis to a full batch count.
+
+        Parameters
+        ----------
+        arr : jnp.ndarray
+            Array whose leading axis is batched.
+        zero_pad : bool, default=True
+            If ``True``, pad with zeros. Otherwise repeat the last entry.
+
+        Returns
+        -------
+        jnp.ndarray
+            Padded array with leading length ``num_batches * batch_size``.
+        """
         pad_size = num_batches * batch_size - arr.shape[0]
         if pad_size == 0:
             return arr
@@ -154,6 +169,21 @@ def find_tensor_and_multiindex(
     )
 
     def unravel_index(local_index, shape):
+        """
+        Convert one local flat index to a multi-index.
+
+        Parameters
+        ----------
+        local_index : jnp.ndarray
+            Flat index within one tensor.
+        shape : jnp.ndarray
+            Tensor shape.
+
+        Returns
+        -------
+        Tuple[jnp.ndarray, ...]
+            Multi-index components.
+        """
         return jnp.unravel_index(local_index, shape)
 
     unravel_index_jit = jit(unravel_index)
@@ -227,17 +257,16 @@ def _rand_rot(key, d, K):
     Parameters
     ----------
     key : jax.random.PRNGKey
-                JAX random key for generating random numbers.
+        JAX random key for generating random numbers.
     d : int
-                Dimension of the rotation (1, 2, or 3).
-        K : int
-                Number of rotation matrices to generate.
+        Dimension of the rotation (1, 2, or 3).
+    K : int
+        Number of rotation matrices to generate.
 
-        Returns
-        -------
-        jnp.ndarray
-                A tensor of shape (K, d, d) containing K random rotation matrices.
-
+    Returns
+    -------
+    jnp.ndarray, shape (K, d, d)
+        Random rotation matrices.
     """
     if d == 1:
         return jnp.ones((K, 1, 1))
@@ -324,7 +353,26 @@ def ellipsoid_superposition(
 
 
 def _center_slices(curr: Tuple[int, ...], target: Tuple[int, ...]):
-    """Compute centered slice for cropping `curr -> target` per axis."""
+    """
+    Compute centered slices for cropping one shape to another.
+
+    Parameters
+    ----------
+    curr : Tuple[int, ...]
+        Current shape.
+    target : Tuple[int, ...]
+        Target crop shape.
+
+    Returns
+    -------
+    Tuple[slice, ...]
+        Per-axis centered slices.
+
+    Raises
+    ------
+    ValueError
+        If any target dimension is larger than the current dimension.
+    """
     sl = []
     for c, t in zip(curr, target):
         if t > c:
@@ -480,7 +528,25 @@ def extract_centered_box(arr, box_shape_tuple, center):
 
 
 def _per_level_meta(dyadic, wpt):
-    """Return shapes, level sizes, and flat offsets for coeff layout."""
+    """
+    Return shapes, level sizes, and flat offsets for coefficient layout.
+
+    Parameters
+    ----------
+    dyadic : DyadicDecomposition
+        Dyadic decomposition.
+    wpt : MSWPT
+        Wave-packet transform.
+
+    Returns
+    -------
+    shapes : jnp.ndarray
+        Per-level coefficient shapes.
+    sizes : jnp.ndarray
+        Per-level flat coefficient counts.
+    offs : jnp.ndarray
+        Cumulative flat offsets.
+    """
     shapes = compute_coeff_shapes(
         dyadic, wpt.redundancy, jnp.arange(dyadic.num_levels)
     )  # (L, d+1)
@@ -490,7 +556,23 @@ def _per_level_meta(dyadic, wpt):
 
 
 def _split_by_level(coeffs, sizes, offs):
-    """Yield (lvl, flat_slice_view_of_level)."""
+    """
+    Split a flat coefficient vector into per-level views.
+
+    Parameters
+    ----------
+    coeffs : jnp.ndarray
+        Flat coefficient vector.
+    sizes : jnp.ndarray
+        Per-level coefficient counts.
+    offs : jnp.ndarray
+        Cumulative flat offsets.
+
+    Returns
+    -------
+    list[Tuple[int, jnp.ndarray]]
+        Pairs of level index and flat coefficient view for that level.
+    """
     views = []
     for lvl in range(len(sizes)):
         sl = slice(int(offs[lvl]), int(offs[lvl + 1]))
@@ -499,7 +581,26 @@ def _split_by_level(coeffs, sizes, offs):
 
 
 def _allocate_K_by_energy(K, coeffs, sizes, offs):
-    """K_l ∝ energy_l with rounding + correction so sum K_l == K and K_l ≤ size_l."""
+    """
+    Allocate a coefficient budget across levels by coefficient energy.
+
+    Parameters
+    ----------
+    K : int
+        Total number of coefficients to allocate.
+    coeffs : jnp.ndarray
+        Flat coefficient vector.
+    sizes : jnp.ndarray
+        Per-level coefficient counts.
+    offs : jnp.ndarray
+        Cumulative flat offsets.
+
+    Returns
+    -------
+    jnp.ndarray
+        Per-level allocation where the sum is ``K`` and each allocation is
+        bounded by the corresponding level size.
+    """
     per_level = _split_by_level(coeffs, sizes, offs)
     e = jnp.array([jnp.sum(jnp.abs(v) ** 2) for _, v in per_level])
     e_sum = float(e.sum())
@@ -526,7 +627,27 @@ def _allocate_K_by_energy(K, coeffs, sizes, offs):
 
 
 def select_levelaware_topK_indices(coeffs, dyadic, wpt, K: int):
-    """Return (indices, values) of selected coefs (level-aware)."""
+    """
+    Select top-K coefficients with per-level energy allocation.
+
+    Parameters
+    ----------
+    coeffs : jnp.ndarray
+        Flat coefficient vector.
+    dyadic : DyadicDecomposition
+        Dyadic decomposition.
+    wpt : MSWPT
+        Wave-packet transform.
+    K : int
+        Number of coefficients to select.
+
+    Returns
+    -------
+    indices : jnp.ndarray
+        Selected flat coefficient indices.
+    values : jnp.ndarray
+        Selected coefficient values.
+    """
     shapes, sizes, offs = _per_level_meta(dyadic, wpt)
     K = int(max(0, min(K, int(offs[-1]))))
     if K == 0:
@@ -563,13 +684,48 @@ def select_levelaware_topK_indices(coeffs, dyadic, wpt, K: int):
 
 
 def reconstruct_from_selection(coeffs, indices, values, inv_wpt, output_type="spatial"):
-    """Make a sparse coeff vector and invert."""
+    """
+    Reconstruct from a sparse coefficient selection.
+
+    Parameters
+    ----------
+    coeffs : jnp.ndarray
+        Original flat coefficient vector used for shape and dtype.
+    indices : jnp.ndarray
+        Selected coefficient indices.
+    values : jnp.ndarray
+        Selected coefficient values.
+    inv_wpt : MSWPT
+        Transform object providing ``inverse``.
+    output_type : {"spatial", "fourier"}, default="spatial"
+        Output domain for reconstruction.
+
+    Returns
+    -------
+    jnp.ndarray
+        Reconstructed field.
+    """
     thr = jnp.zeros_like(coeffs)
     thr = thr.at[indices].set(values)
     return inv_wpt.inverse(thr, output_type=output_type)
 
 
 def rel_l2(a, b):
+    """
+    Compute relative L2 error between two arrays.
+
+    Parameters
+    ----------
+    a : array-like
+        Reference array.
+    b : array-like
+        Comparison array.
+
+    Returns
+    -------
+    float
+        ``||a - b||_2 / (||a||_2 + 1e-30)``.
+    """
     num = jnp.linalg.norm(a - b)
     den = jnp.linalg.norm(a) + 1e-30
     return float(num / den)
@@ -637,7 +793,21 @@ def find_min_K_for_target_error(
     abs_coeffs = jnp.abs(coeffs)
 
     def select_topK_simple(K):
-        """Top-K by magnitude, descending."""
+        """
+        Select top-K coefficients by descending magnitude.
+
+        Parameters
+        ----------
+        K : int
+            Number of coefficients to select.
+
+        Returns
+        -------
+        indices : jnp.ndarray
+            Selected coefficient indices.
+        values : jnp.ndarray
+            Selected coefficient values.
+        """
         K = min(int(K), total)
         if K < total:
             part = jnp.argpartition(abs_coeffs, total - K)[-K:]
@@ -647,6 +817,19 @@ def find_min_K_for_target_error(
         return order.astype(jnp.int32), coeffs[order]
 
     def test_K(K):
+        """
+        Evaluate reconstruction error for one top-K truncation.
+
+        Parameters
+        ----------
+        K : int
+            Number of coefficients to retain.
+
+        Returns
+        -------
+        float
+            Relative L2 reconstruction error.
+        """
         idx, vals = select_topK_simple(K)
         recon = reconstruct_from_selection(
             coeffs, idx, vals, inv_wpt, output_type="spatial"
@@ -730,12 +913,34 @@ def choose_K_by_tau(
     """
     Find minimal K s.t. rel-L2 <= tau using a geometric sweep.
 
-    coeffs: flattened coefficients (1D).
-    p0: original image (array).
-    inv_wpt: MSWPT instance with windowing="none" for clean inverse.
-    dyadic, wpt: decomposition objects.
-    tau: target relative L2 error.
-    beam_budget: optional cap on beams; real path ≈ 2 beams / coef → K ≤ floor(beam_budget/2).
+    Parameters
+    ----------
+    coeffs : jnp.ndarray
+        Flattened coefficient vector.
+    p0 : jnp.ndarray
+        Reference image or volume.
+    inv_wpt : MSWPT
+        Transform instance with clean inverse settings.
+    dyadic : DyadicDecomposition
+        Dyadic decomposition.
+    wpt : MSWPT
+        Wave-packet transform.
+    tau : float, default=0.02
+        Target relative L2 error.
+    Kmin : int, default=256
+        Lower bound for the coefficient sweep.
+    Kmax : int, optional
+        Upper bound for the coefficient sweep. Defaults to all coefficients.
+    num_steps : int, default=8
+        Number of geometrically spaced K values to test.
+    beam_budget : int, optional
+        Optional cap on beams. The real path uses approximately two beams per
+        coefficient, so ``K <= floor(beam_budget / 2)``.
+
+    Returns
+    -------
+    int
+        First tested ``K`` satisfying the target, or the maximum tested value.
     """
     total = int(coeffs.shape[0])
     if Kmax is None:
@@ -767,9 +972,23 @@ def add_centered_box_periodic(
     dest: jnp.ndarray, patch: jnp.ndarray, center_ndim: jnp.ndarray
 ) -> jnp.ndarray:
     """
-    Periodic scatter-add of a small 'patch' into full-size 'dest',
-    centered at integer 'center_ndim' given in Fourier index coords
-    (i.e. in [-N/2, N/2-1] like dyadic_decomp.centres_ndim).
+    Periodically scatter-add a small patch into a full-size array.
+
+    Parameters
+    ----------
+    dest : jnp.ndarray
+        Destination array.
+    patch : jnp.ndarray
+        Patch to add into ``dest``.
+    center_ndim : jnp.ndarray, shape (d,)
+        Integer centre in Fourier-index coordinates, i.e.
+        ``[-N/2, N/2 - 1]`` like ``dyadic_decomp.centres_ndim``.
+
+    Returns
+    -------
+    jnp.ndarray
+        Destination array with ``patch`` added periodically around
+        ``center_ndim``.
     """
     N = jnp.array(dest.shape)
     S = jnp.array(patch.shape)

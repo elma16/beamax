@@ -23,6 +23,17 @@ class FNONeuralOpsSolver(Solver):
     """
     A solver that uses a pre-trained FNO model from the neuralop library.
 
+    Parameters
+    ----------
+    save_folder : str
+        Directory containing model checkpoint files.
+    save_name : str
+        Base name of the model checkpoint files.
+    device : torch.device or str, optional
+        Device used for inference.
+
+    Notes
+    -----
     This class handles loading a model checkpoint from a GPU-trained state
     onto any device (CPU or GPU) and running inference.
     """
@@ -105,9 +116,45 @@ class FNONeuralOpsSolver(Solver):
     def time_reversal(
         self, data: Union[jnp.ndarray, np.ndarray]
     ) -> Union[jnp.ndarray, np.ndarray]:
+        """
+        Raise because neuralop FNO time reversal is not implemented.
+
+        Parameters
+        ----------
+        data : jnp.ndarray or np.ndarray
+            Sensor data or model output that would be inverted.
+
+        Returns
+        -------
+        jnp.ndarray or np.ndarray
+            This method never returns.
+
+        Raises
+        ------
+        NotImplementedError
+            Always raised for this solver.
+        """
         raise NotImplementedError("Time reversal is not implemented for FNOSolver.")
 
     def adjoint(
         self, data: Union[jnp.ndarray, np.ndarray]
     ) -> Union[jnp.ndarray, np.ndarray]:
+        """
+        Raise because neuralop FNO adjoint is not implemented.
+
+        Parameters
+        ----------
+        data : jnp.ndarray or np.ndarray
+            Sensor data or model output that would be used by an adjoint solve.
+
+        Returns
+        -------
+        jnp.ndarray or np.ndarray
+            This method never returns.
+
+        Raises
+        ------
+        NotImplementedError
+            Always raised for this solver.
+        """
         raise NotImplementedError("Adjoint is not implemented for FNOSolver.")
