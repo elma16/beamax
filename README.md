@@ -147,6 +147,65 @@ Related acoustic simulation projects:
 - [k-Wave-python](https://github.com/waltsims/k-wave-python) / [docs](https://k-wave-python.readthedocs.io/) — Python wrapper and NumPy/CuPy implementation; Beamax uses this through the optional `[kwave]` extra.
 - [j-Wave](https://github.com/ucl-bug/jwave) — differentiable acoustic simulations in JAX.
 
+## Troubleshooting
+
+### `ValueError: 0th dimension of all xs should be replicated`
+
+This typically means Python is importing an older `beamax` build from `site-packages` instead of your local `src/beamax` checkout.
+
+Fix:
+
+```bash
+pip uninstall -y beamax
+pip install -e . --no-build-isolation
+python -c "import beamax; print(beamax.__file__)"
+```
+
+The printed path should point into your repository (for example `.../python/beamax/src/beamax/__init__.py`).
+
+### k-Wave on macOS
+
+Beamax temporarily pins the `[kwave]` extra to a k-wave-python Git commit that includes upstream fixes for `binary_path` handling and the refreshed macOS OMP binary. Once those fixes are released on PyPI, this should move back to a normal `k-wave-python>=0.6.2` style requirement.
+
+The fixed macOS C++ binary is currently Apple Silicon (`arm64`) only. Intel Mac users should use `backend="python"` until upstream ships universal2 coverage.
+
+Older Darwin OMP binaries, especially `v0.3.0rc3`, can silently mishandle power-law absorption. `KWaveSolver` rejects that known-bad binary when absorption is enabled. The modern Darwin C++ path is also forced to `backend="python"` for absorbing media because k-wave-python's current `CppSimulation` path can still produce non-finite values there. To use a manually downloaded fixed binary for lossless runs, set `BEAMAX_KWAVE_BINARY_PATH` to either the `kspaceFirstOrder-OMP` file or the directory containing it.
+
+Some older k-Wave binaries are linked against `libhdf5.310` while newer Homebrew installs provide `libhdf5.320`. `KWaveSolver` includes a runtime compatibility shim for this mismatch. If errors persist:
+
+1. Ensure you are using this repo version (`python -c "import beamax; print(beamax.__file__)"`).
+2. Reinstall your editable package in the active venv.
+3. Confirm Homebrew HDF5 is installed (`ls /opt/homebrew/opt/hdf5/lib`).
+
+### k-Wave time-reversal / adjoint uses the Python backend
+
+The `KWaveSolver` uses the C++ binary for forward simulations (faster), but
+automatically falls back to the pure-Python backend for time-reversal and
+adjoint operations. This is due to missing source-term preprocessing in
+k-wave-python's `CppSimulation` path for time-varying pressure sources.
+This will be resolved in a future k-wave-python release.
+
+### Matplotlib cache/font warnings
+
+If you see cache permission warnings, set a writable config directory:
+
+```bash
+MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/forward-2d.py
+```
+
+## Development
+
+```bash
+pip install .[dev]
+pre-commit install
+pytest
+```
+
+Useful commands:
+
+- `ruff check src tests` for linting.
+- `pytest --cov=src/beamax --cov-report=term-missing` for coverage.
+
 ## License
 
 MIT; see `LICENSE`.

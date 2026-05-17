@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from typing import Union, Tuple
+from typing import Optional, Union, Tuple
+import hashlib
+import inspect
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from io import StringIO
 from pathlib import Path
 
@@ -25,6 +29,13 @@ from kwave.kspaceFirstOrder import kspaceFirstOrder
 from kwave.compat import options_to_kwargs
 
 
+_KWAVE_BINARY_ENV = "BEAMAX_KWAVE_BINARY_PATH"
+_OLD_DARWIN_OMP_VERSION = "v0.3.0rc3"
+_OLD_DARWIN_OMP_SHA256 = (
+    "d6bb759dd6addcfaaee9333be61b4d31793d5d6ed3c77d384d77217e5aaee32e"
+)
+
+
 def _patch_cpp_simulation_stale_hdf5():
     """
     Patch stale HDF5 handling in k-wave-python.
@@ -36,6 +47,9 @@ def _patch_cpp_simulation_stale_hdf5():
     reused.
     """
     from kwave.solvers.cpp_simulation import CppSimulation
+
+    if getattr(CppSimulation._write_hdf5, "_beamax_stale_hdf5_patch", False):
+        return
 
     _orig_write = CppSimulation._write_hdf5
 
@@ -54,39 +68,180 @@ def _patch_cpp_simulation_stale_hdf5():
             os.remove(filepath)
         _orig_write(self, filepath)
 
+    _patched_write._beamax_stale_hdf5_patch = True
     CppSimulation._write_hdf5 = _patched_write
 
 
-def _patch_kwave_binary_path():
-    """
-    Allow overriding the k-wave-python bundled binary path.
+def _binary_name(device: str) -> str:
+    name = "kspaceFirstOrder-CUDA" if device == "gpu" else "kspaceFirstOrder-OMP"
+    if sys.platform == "win32":
+        name += ".exe"
+    return name
 
-    Notes
-    -----
-    The override path is read from the ``BEAMAX_KWAVE_BINARY_PATH`` environment
-    variable.
 
-    The pip-installed darwin binary at ``kwave.BINARY_PATH/kspaceFirstOrder-OMP``
-    silently ignores ``alpha_coeff``/``alpha_power`` (no absorption applied).
-    A locally built binary from upstream k-wave-omp source applies absorption
-    correctly. ``cpp_simulation._execute`` (k-wave-python ≤ current) hardcodes
-    ``kwave.BINARY_PATH`` and ignores the ``binary_path`` option, so the only
-    way to redirect it from user code is to mutate ``kwave.BINARY_PATH`` at
-    import time. Should be removed once k-wave-python honours the option.
-    """
-    override = os.environ.get("BEAMAX_KWAVE_BINARY_PATH")
-    if not override:
-        return
-    override_path = Path(override)
-    if not (override_path / "kspaceFirstOrder-OMP").exists():
-        return
+def _kwave_supports_binary_path() -> bool:
+    try:
+        return "binary_path" in inspect.signature(kspaceFirstOrder).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_kwave_binary_path(path: Union[str, os.PathLike], *, device: str) -> Path:
+    candidate = Path(path).expanduser()
+    binary_name = _binary_name(device)
+
+    if candidate.is_dir():
+        candidate = candidate / binary_name
+
+    if not candidate.exists():
+        raise FileNotFoundError(
+            f"k-Wave binary override {candidate} does not exist. "
+            f"Pass a {binary_name!r} file or a directory containing it."
+        )
+    if not candidate.is_file():
+        raise FileNotFoundError(f"k-Wave binary override {candidate} is not a file.")
+
+    return candidate
+
+
+def _default_kwave_binary_path(device: str) -> Path:
     import kwave
 
-    kwave.BINARY_PATH = override_path
+    return Path(kwave.BINARY_PATH) / _binary_name(device)
+
+
+def _select_cpp_binary_path(kwargs: dict) -> tuple[Path, bool]:
+    """
+    Resolve the C++ binary path.
+
+    Returns `(binary_path, should_forward)` where `should_forward` means the
+    path came from Beamax/user configuration and must be passed to
+    k-wave-python or installed as a legacy kwave.BINARY_PATH override.
+    """
+    device = kwargs.get("device", "cpu")
+    explicit = kwargs.get("binary_path")
+    if explicit:
+        return _normalize_kwave_binary_path(explicit, device=device), True
+
+    env_override = os.environ.get(_KWAVE_BINARY_ENV)
+    if env_override:
+        return _normalize_kwave_binary_path(env_override, device=device), True
+
+    return _default_kwave_binary_path(device), False
+
+
+def _set_legacy_kwave_binary_path(binary_path: Path, *, device: str) -> None:
+    binary_name = _binary_name(device)
+    if binary_path.name != binary_name:
+        raise RuntimeError(
+            "This k-wave-python version does not support binary_path=... . "
+            f"Use a file named {binary_name!r} or upgrade k-wave-python."
+        )
+
+    import kwave
+
+    kwave.BINARY_PATH = binary_path.parent
+
+
+def _configure_cpp_binary_kwargs(kwargs: dict) -> Path:
+    binary_path, should_forward = _select_cpp_binary_path(kwargs)
+
+    if _kwave_supports_binary_path():
+        if should_forward:
+            kwargs["binary_path"] = str(binary_path)
+        else:
+            kwargs.pop("binary_path", None)
+    else:
+        kwargs.pop("binary_path", None)
+        if should_forward:
+            _set_legacy_kwave_binary_path(
+                binary_path, device=kwargs.get("device", "cpu")
+            )
+
+    return binary_path
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _metadata_marks_old_darwin_omp(binary_path: Path) -> bool:
+    metadata_path = binary_path.with_name(f"{binary_path.name}_metadata.json")
+    if not metadata_path.exists():
+        return False
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    version = str(metadata.get("version", ""))
+    url = str(metadata.get("url", ""))
+    return _OLD_DARWIN_OMP_VERSION in version or _OLD_DARWIN_OMP_VERSION in url
+
+
+def _domain_has_nonzero_absorption(domain: Domain) -> bool:
+    alpha_coeff = domain.alpha_coeff
+    if alpha_coeff is None:
+        return False
+    if callable(alpha_coeff):
+        alpha_coeff = domain._eval(alpha_coeff)
+
+    try:
+        return bool(np.any(np.asarray(alpha_coeff) != 0))
+    except (TypeError, ValueError):
+        return bool(alpha_coeff)
+
+
+def _reject_known_bad_darwin_absorption_binary(
+    binary_path: Path, domain: Domain
+) -> None:
+    if sys.platform != "darwin" or binary_path.name != "kspaceFirstOrder-OMP":
+        return
+    if not _domain_has_nonzero_absorption(domain):
+        return
+    if not binary_path.exists():
+        return
+
+    is_known_bad = _metadata_marks_old_darwin_omp(binary_path)
+    if not is_known_bad:
+        try:
+            is_known_bad = _file_sha256(binary_path) == _OLD_DARWIN_OMP_SHA256
+        except OSError:
+            is_known_bad = False
+
+    if not is_known_bad:
+        return
+
+    raise RuntimeError(
+        "The configured macOS k-Wave OMP binary is the known-bad "
+        f"{_OLD_DARWIN_OMP_VERSION} Darwin build, which silently mishandles "
+        "power-law absorption. Install the k-wave-python source pin used by "
+        "Beamax or point BEAMAX_KWAVE_BINARY_PATH at the k-wave-omp-darwin "
+        "v1.4.0 kspaceFirstOrder-OMP release asset."
+    )
+
+
+def _should_force_python_for_darwin_absorption(
+    binary_path: Path, domain: Domain
+) -> bool:
+    """
+    k-wave-python's modern CppSimulation path still produces non-finite
+    absorbing-medium output on Darwin OMP, even with the v1.4.0 binary.
+    Keep Beamax correct by using the Python backend for this case.
+    """
+    return (
+        sys.platform == "darwin"
+        and binary_path.name == "kspaceFirstOrder-OMP"
+        and _domain_has_nonzero_absorption(domain)
+    )
 
 
 _patch_cpp_simulation_stale_hdf5()
-_patch_kwave_binary_path()
 
 
 Array = Union[np.ndarray, jnp.ndarray]
@@ -123,6 +278,8 @@ class KWaveSolver(Solver):
       time-varying pressure sources.
     - On macOS the class transparently patches the ``libhdf5.310`` →
       ``libhdf5.320`` linkage mismatch so recent Homebrew HDF5 installs work.
+    - ``binary_path`` can be supplied directly or via
+      ``BEAMAX_KWAVE_BINARY_PATH``. Direct kwargs take precedence.
 
     Examples
     --------
@@ -133,7 +290,7 @@ class KWaveSolver(Solver):
     >>> solver = KWaveSolver(pml_size=10, device="cpu")  # doctest: +SKIP
     """
 
-    _hdf5_compat_done = False
+    _hdf5_compat_paths: set[str] = set()
 
     def __init__(
         self,
@@ -159,6 +316,12 @@ class KWaveSolver(Solver):
             self._solver_kwargs = options_to_kwargs(
                 simulation_options, execution_options
             )
+            legacy_binary_path = getattr(execution_options, "_binary_path", None)
+            if (
+                legacy_binary_path is not None
+                and "binary_path" not in self._solver_kwargs
+            ):
+                self._solver_kwargs["binary_path"] = legacy_binary_path
         elif kwargs:
             self._solver_kwargs = kwargs
         else:
@@ -172,7 +335,7 @@ class KWaveSolver(Solver):
             )
 
     @classmethod
-    def _ensure_macos_hdf5_compat(cls) -> None:
+    def _ensure_macos_hdf5_compat(cls, binary_path: Optional[Path] = None) -> None:
         """
         Create DYLD symlinks for macOS HDF5 version compatibility.
 
@@ -182,15 +345,19 @@ class KWaveSolver(Solver):
         system only ships ``libhdf5.320``. This method creates temporary
         compatibility symlinks when possible.
         """
-        if cls._hdf5_compat_done or sys.platform != "darwin":
-            cls._hdf5_compat_done = True
+        if sys.platform != "darwin":
             return
 
-        import kwave
-
-        binary_path = kwave.BINARY_PATH / "kspaceFirstOrder-OMP"
+        if binary_path is None:
+            binary_path = _default_kwave_binary_path("cpu")
         if not binary_path.exists():
-            cls._hdf5_compat_done = True
+            return
+
+        try:
+            cache_key = str(binary_path.resolve())
+        except OSError:
+            cache_key = str(binary_path)
+        if cache_key in cls._hdf5_compat_paths:
             return
 
         try:
@@ -201,14 +368,14 @@ class KWaveSolver(Solver):
                 text=True,
             ).stdout
         except (subprocess.SubprocessError, OSError):
-            cls._hdf5_compat_done = True
+            cls._hdf5_compat_paths.add(cache_key)
             return
 
         refs = re.findall(
             r"^\s+(/.*libhdf5(?:_hl)?\.310\.dylib)\s", out, flags=re.MULTILINE
         )
         if not refs:
-            cls._hdf5_compat_done = True
+            cls._hdf5_compat_paths.add(cache_key)
             return
 
         compat_links = {}
@@ -227,7 +394,7 @@ class KWaveSolver(Solver):
                     break
 
         if not compat_links:
-            cls._hdf5_compat_done = True
+            cls._hdf5_compat_paths.add(cache_key)
             return
 
         compat_dir = Path(tempfile.gettempdir()) / "beamax_kwave_hdf5_compat"
@@ -250,7 +417,7 @@ class KWaveSolver(Solver):
             os.environ["DYLD_LIBRARY_PATH"] = (
                 f"{compat_str}:{current}" if current else compat_str
             )
-        cls._hdf5_compat_done = True
+        cls._hdf5_compat_paths.add(cache_key)
 
     def _create_kgrid(self, domain: Domain, ts: np.ndarray) -> kWaveGrid:
         """
@@ -326,15 +493,27 @@ class KWaveSolver(Solver):
         if force_python:
             kwargs["backend"] = "python"
 
-        if kwargs.get("backend") == "cpp":
-            self._ensure_macos_hdf5_compat()
-
         medium = kWaveMedium(
             sound_speed=domain.sound_speed_array,
             density=domain.density_array,
             alpha_coeff=domain.alpha_coeff,
             alpha_power=domain.alpha_power,
         )
+
+        if kwargs.get("backend") == "cpp":
+            binary_path = _configure_cpp_binary_kwargs(kwargs)
+            self._ensure_macos_hdf5_compat(binary_path)
+            _reject_known_bad_darwin_absorption_binary(binary_path, domain)
+            if _should_force_python_for_darwin_absorption(binary_path, domain):
+                warnings.warn(
+                    "Darwin k-Wave OMP C++ absorption currently produces "
+                    "non-finite output through k-wave-python's modern "
+                    "CppSimulation path; using backend='python' for this run.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                kwargs["backend"] = "python"
+                kwargs.pop("binary_path", None)
 
         result = kspaceFirstOrder(
             kgrid,
@@ -383,6 +562,10 @@ class KWaveSolver(Solver):
         result = self._run_simulation(domain, ts, source, sensor)
 
         out = np.array(result[record])
+        nt = len(ts)
+        ns = int(np.count_nonzero(sensor_mask))
+        if out.ndim == 2 and out.shape == (ns, nt):
+            out = out.T
 
         return out
 

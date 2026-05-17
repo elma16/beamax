@@ -2,6 +2,7 @@ import jax.numpy as jnp
 import jax
 import os
 import pytest
+import json
 from pathlib import Path
 import sys
 import types
@@ -10,6 +11,7 @@ import numpy as np
 from beamax import geometry, utils
 
 try:
+    import beamax.solvers.kwave_solver as kwave_solver_module
     from beamax.solvers.kwave_solver import KWaveSolver, TimedKWaveSolver
 except Exception as exc:  # pragma: no cover - depends on optional k-wave stack.
     pytest.skip(
@@ -262,7 +264,8 @@ def test_kwave_adjoint_dot_product():
     solver = KWaveSolver(**{**_SOLVER_KWARGS, "backend": "python"})
 
     x = np.array(jax.random.normal(jax.random.PRNGKey(0), N, dtype=jnp.float32))
-    Ax = np.array(solver.forward(p0=x, domain=domain, sensors=sensor_mask, ts=ts))
+    Ax_nt_ns = np.array(solver.forward(p0=x, domain=domain, sensors=sensor_mask, ts=ts))
+    Ax = Ax_nt_ns.T
     y = np.array(jax.random.normal(jax.random.PRNGKey(1), Ax.shape, dtype=jnp.float32))
 
     Aty = np.array(
@@ -272,7 +275,7 @@ def test_kwave_adjoint_dot_product():
             sensors=sensors_all,
             sources=sensor_mask,
             ts=ts,
-            data_layout="auto",
+            data_layout="ns_nt",
         )
     )
     Aty = _match_image_shape(Aty, x.shape)
@@ -313,6 +316,207 @@ def test_default_solver_kwargs():
     solver = KWaveSolver()
     assert solver._solver_kwargs["backend"] == "cpp"
     assert solver._solver_kwargs["pml_inside"] is False
+
+
+def test_normalize_kwave_binary_path_accepts_file_and_directory(tmp_path):
+    binary = tmp_path / "kspaceFirstOrder-OMP"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    assert (
+        kwave_solver_module._normalize_kwave_binary_path(binary, device="cpu") == binary
+    )
+    assert (
+        kwave_solver_module._normalize_kwave_binary_path(tmp_path, device="cpu")
+        == binary
+    )
+
+
+def test_cpp_binary_path_prefers_explicit_over_env_with_native_support(
+    tmp_path, monkeypatch
+):
+    explicit_dir = tmp_path / "explicit"
+    env_dir = tmp_path / "env"
+    explicit_dir.mkdir()
+    env_dir.mkdir()
+    explicit_binary = explicit_dir / "kspaceFirstOrder-OMP"
+    env_binary = env_dir / "kspaceFirstOrder-OMP"
+    explicit_binary.write_text("", encoding="utf-8")
+    env_binary.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("BEAMAX_KWAVE_BINARY_PATH", str(env_dir))
+    monkeypatch.setattr(
+        kwave_solver_module, "_kwave_supports_binary_path", lambda: True
+    )
+    legacy_calls = []
+    monkeypatch.setattr(
+        kwave_solver_module,
+        "_set_legacy_kwave_binary_path",
+        lambda *args, **kwargs: legacy_calls.append((args, kwargs)),
+    )
+
+    kwargs = {"backend": "cpp", "device": "cpu", "binary_path": str(explicit_dir)}
+    selected = kwave_solver_module._configure_cpp_binary_kwargs(kwargs)
+
+    assert selected == explicit_binary
+    assert kwargs["binary_path"] == str(explicit_binary)
+    assert legacy_calls == []
+
+
+def test_cpp_binary_path_uses_env_when_no_explicit_path(tmp_path, monkeypatch):
+    env_binary = tmp_path / "kspaceFirstOrder-OMP"
+    env_binary.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("BEAMAX_KWAVE_BINARY_PATH", str(tmp_path))
+    monkeypatch.setattr(
+        kwave_solver_module, "_kwave_supports_binary_path", lambda: True
+    )
+
+    kwargs = {"backend": "cpp", "device": "cpu"}
+    selected = kwave_solver_module._configure_cpp_binary_kwargs(kwargs)
+
+    assert selected == env_binary
+    assert kwargs["binary_path"] == str(env_binary)
+
+
+def test_cpp_binary_path_legacy_support_mutates_kwave_path_only(tmp_path, monkeypatch):
+    binary = tmp_path / "kspaceFirstOrder-OMP"
+    binary.write_text("", encoding="utf-8")
+
+    monkeypatch.delenv("BEAMAX_KWAVE_BINARY_PATH", raising=False)
+    monkeypatch.setattr(
+        kwave_solver_module, "_kwave_supports_binary_path", lambda: False
+    )
+    legacy_calls = []
+    monkeypatch.setattr(
+        kwave_solver_module,
+        "_set_legacy_kwave_binary_path",
+        lambda path, *, device: legacy_calls.append((path, device)),
+    )
+
+    kwargs = {"backend": "cpp", "device": "cpu", "binary_path": str(binary)}
+    selected = kwave_solver_module._configure_cpp_binary_kwargs(kwargs)
+
+    assert selected == binary
+    assert "binary_path" not in kwargs
+    assert legacy_calls == [(binary, "cpu")]
+
+
+def test_old_darwin_absorption_binary_is_rejected_from_metadata(tmp_path, monkeypatch):
+    binary = tmp_path / "kspaceFirstOrder-OMP"
+    binary.write_text("", encoding="utf-8")
+    binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
+        json.dumps(
+            {
+                "version": "v0.3.0rc3",
+                "url": "https://github.com/waltsims/k-wave-omp-darwin/releases/download/v0.3.0rc3/kspaceFirstOrder-OMP",
+            }
+        ),
+        encoding="utf-8",
+    )
+    domain = geometry.Domain(
+        N=(4, 4),
+        dx=(1.0, 1.0),
+        c=1.0,
+        periodic=(True, True),
+        alpha_coeff=1.0,
+        alpha_power=1.5,
+    )
+
+    monkeypatch.setattr(kwave_solver_module.sys, "platform", "darwin")
+
+    with pytest.raises(RuntimeError, match="known-bad"):
+        kwave_solver_module._reject_known_bad_darwin_absorption_binary(binary, domain)
+
+
+def test_old_darwin_absorption_binary_guard_allows_lossless_domain(
+    tmp_path, monkeypatch
+):
+    binary = tmp_path / "kspaceFirstOrder-OMP"
+    binary.write_text("", encoding="utf-8")
+    binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
+        json.dumps({"version": "v0.3.0rc3"}),
+        encoding="utf-8",
+    )
+    domain = geometry.Domain(
+        N=(4, 4),
+        dx=(1.0, 1.0),
+        c=1.0,
+        periodic=(True, True),
+        alpha_coeff=0.0,
+        alpha_power=1.5,
+    )
+
+    monkeypatch.setattr(kwave_solver_module.sys, "platform", "darwin")
+
+    kwave_solver_module._reject_known_bad_darwin_absorption_binary(binary, domain)
+
+
+def test_cpp_backend_has_power_law_absorption_sensitivity():
+    import kwave
+
+    binary_path = Path(kwave.BINARY_PATH) / "kspaceFirstOrder-OMP"
+    if not binary_path.exists():
+        pytest.skip(f"C++ OMP binary is unavailable: {binary_path}")
+
+    N = (32, 32)
+    dx = (1e-4, 1e-4)
+    ts = jnp.arange(80) * 2e-8
+
+    x = np.arange(N[0])[:, None]
+    y = np.arange(N[1])[None, :]
+    p0 = np.exp(-((x - 16) ** 2 + (y - 16) ** 2) / (2 * 3**2)).astype(np.float32)
+
+    sensors = jnp.zeros(N, dtype=jnp.int32)
+    sensors = sensors.at[4, :].set(1)
+
+    def _domain(alpha_coeff):
+        return geometry.Domain(
+            N=N,
+            dx=dx,
+            c=1500.0,
+            density=1000.0,
+            periodic=(True, True),
+            alpha_coeff=alpha_coeff,
+            alpha_power=1.5,
+        )
+
+    solver_kwargs = {
+        **_SOLVER_KWARGS,
+        "pml_size": 4,
+        "pml_inside": True,
+        "num_threads": 1,
+    }
+    cpp_solver = KWaveSolver(**solver_kwargs)
+    py_solver = KWaveSolver(**{**solver_kwargs, "backend": "python"})
+
+    try:
+        cpp_lossless = np.asarray(
+            cpp_solver.forward(p0, _domain(0.0), sensors, ts), dtype=float
+        )
+        cpp_absorbing = np.asarray(
+            cpp_solver.forward(p0, _domain(50.0), sensors, ts), dtype=float
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        pytest.skip(f"C++ OMP binary could not run: {exc}")
+
+    py_lossless = np.asarray(
+        py_solver.forward(p0, _domain(0.0), sensors, ts), dtype=float
+    )
+    py_absorbing = np.asarray(
+        py_solver.forward(p0, _domain(50.0), sensors, ts), dtype=float
+    )
+
+    cpp_rel = np.linalg.norm(cpp_absorbing - cpp_lossless) / max(
+        np.linalg.norm(cpp_lossless), np.finfo(float).eps
+    )
+    py_rel = np.linalg.norm(py_absorbing - py_lossless) / max(
+        np.linalg.norm(py_lossless), np.finfo(float).eps
+    )
+
+    assert py_rel > 1e-2
+    assert cpp_rel > 1e-4
 
 
 def test_coerce_sensor_data_layout_accepts_nt_ns_and_ns_nt():
