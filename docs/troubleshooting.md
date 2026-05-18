@@ -21,11 +21,11 @@ Then re-run the import-path check and confirm it points to `src/beamax`.
 
 ## `k-wave-python` on macOS
 
-Beamax temporarily pins the `[kwave]` extra to a k-wave-python Git commit because the required `binary_path` fix and refreshed Darwin binary are not yet on PyPI. Once upstream releases these changes, replace the Git pin with a normal released version.
+Beamax's `[kwave]` extra requires `k-wave-python>=0.6.2`, which includes the `binary_path` fix and the `v1.4.1` macOS OMP binary.
 
-The fixed macOS C++ binary is Apple Silicon (`arm64`) only. Intel Mac users should use `backend="python"` until upstream ships universal2 coverage.
+The macOS C++ binary is Apple Silicon (`arm64`) only. Intel Mac users should use `backend="python"` until upstream ships universal2 coverage.
 
-Older Darwin OMP binaries, especially `v0.3.0rc3`, can silently mishandle power-law absorption. `beamax.solvers.KWaveSolver` rejects that known-bad binary when absorption is enabled. The modern Darwin C++ path is also forced to `backend="python"` for absorbing media because k-wave-python's current `CppSimulation` path can still produce non-finite values there. To use a manually downloaded fixed binary for lossless runs, set `BEAMAX_KWAVE_BINARY_PATH` to either the `kspaceFirstOrder-OMP` file or the directory containing it.
+Older Darwin OMP binaries, especially `v0.3.0rc3` and the bad `v1.4.0` release asset, can silently mishandle power-law absorption. `beamax.solvers.KWaveSolver` rejects those known-bad binaries when absorption is enabled. To test a custom binary, set `BEAMAX_KWAVE_BINARY_PATH` to either the `kspaceFirstOrder-OMP` file or the directory containing it.
 
 Some older k-Wave binaries are linked against `libhdf5.310`, while Homebrew now ships `libhdf5.320`. Beamax applies a compatibility shim at runtime for this mismatch. If you still see the error:
 

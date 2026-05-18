@@ -65,7 +65,7 @@ viz = [
   "pyvista",
 ]
 
-kwave = ["k-wave-python @ git+https://github.com/waltsims/k-wave-python.git@7f13647983913acdac791ac72d30845599ccee8d"]
+kwave = ["k-wave-python>=0.6.2"]
 
 fno = ["neuraloperator", "torch", "pdequinox"]
 

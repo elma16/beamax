@@ -16,6 +16,7 @@ import os
 import pytest
 import sys
 import warnings
+from pathlib import Path
 
 from beamax import geometry, utils, transforms
 from beamax.decomposition import DyadicDecomposition
@@ -45,12 +46,32 @@ requires_kwave = pytest.mark.skipif(
     reason=f"k-wave-python stack is unavailable: {KWAVE_IMPORT_ERROR}",
 )
 
+
+def _kwave_cpp_binary_available() -> bool:
+    if KWAVE_IMPORT_ERROR is not None:
+        return False
+
+    binary_name = (
+        "kspaceFirstOrder-OMP.exe"
+        if sys.platform == "win32"
+        else "kspaceFirstOrder-OMP"
+    )
+
+    override = os.environ.get("BEAMAX_KWAVE_BINARY_PATH")
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.is_dir():
+            candidate = candidate / binary_name
+        return candidate.exists()
+
+    import kwave
+
+    return (Path(kwave.BINARY_PATH) / binary_name).exists()
+
+
 requires_kwave_cpp_binary = pytest.mark.skipif(
-    sys.platform == "darwin" and not os.environ.get("BEAMAX_KWAVE_BINARY_PATH"),
-    reason=(
-        "k-wave-python's bundled macOS OMP binary is not stable on hosted macOS; "
-        "set BEAMAX_KWAVE_BINARY_PATH to test a known-good binary."
-    ),
+    not _kwave_cpp_binary_available(),
+    reason="k-wave-python C++ OMP binary is unavailable on this platform.",
 )
 
 

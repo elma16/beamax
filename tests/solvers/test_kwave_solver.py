@@ -1,10 +1,8 @@
 import jax.numpy as jnp
 import jax
-import os
 import pytest
 import json
 from pathlib import Path
-import sys
 import types
 import numpy as np
 
@@ -34,12 +32,18 @@ _SOLVER_KWARGS = dict(
     quiet=True,
 )
 
+
+def _kwave_cpp_binary_available() -> bool:
+    try:
+        binary_path, _ = kwave_solver_module._select_cpp_binary_path({"device": "cpu"})
+    except (OSError, FileNotFoundError):
+        return False
+    return binary_path.exists()
+
+
 requires_kwave_cpp_binary = pytest.mark.skipif(
-    sys.platform == "darwin" and not os.environ.get("BEAMAX_KWAVE_BINARY_PATH"),
-    reason=(
-        "k-wave-python's bundled macOS OMP binary is not stable on hosted macOS; "
-        "set BEAMAX_KWAVE_BINARY_PATH to test a known-good binary."
-    ),
+    not _kwave_cpp_binary_available(),
+    reason="k-wave-python C++ OMP binary is unavailable on this platform.",
 )
 
 
@@ -331,9 +335,7 @@ def test_normalize_kwave_binary_path_accepts_file_and_directory(tmp_path):
     )
 
 
-def test_cpp_binary_path_prefers_explicit_over_env_with_native_support(
-    tmp_path, monkeypatch
-):
+def test_cpp_binary_path_prefers_explicit_over_env(tmp_path, monkeypatch):
     explicit_dir = tmp_path / "explicit"
     env_dir = tmp_path / "env"
     explicit_dir.mkdir()
@@ -344,22 +346,12 @@ def test_cpp_binary_path_prefers_explicit_over_env_with_native_support(
     env_binary.write_text("", encoding="utf-8")
 
     monkeypatch.setenv("BEAMAX_KWAVE_BINARY_PATH", str(env_dir))
-    monkeypatch.setattr(
-        kwave_solver_module, "_kwave_supports_binary_path", lambda: True
-    )
-    legacy_calls = []
-    monkeypatch.setattr(
-        kwave_solver_module,
-        "_set_legacy_kwave_binary_path",
-        lambda *args, **kwargs: legacy_calls.append((args, kwargs)),
-    )
 
     kwargs = {"backend": "cpp", "device": "cpu", "binary_path": str(explicit_dir)}
     selected = kwave_solver_module._configure_cpp_binary_kwargs(kwargs)
 
     assert selected == explicit_binary
     assert kwargs["binary_path"] == str(explicit_binary)
-    assert legacy_calls == []
 
 
 def test_cpp_binary_path_uses_env_when_no_explicit_path(tmp_path, monkeypatch):
@@ -367,9 +359,6 @@ def test_cpp_binary_path_uses_env_when_no_explicit_path(tmp_path, monkeypatch):
     env_binary.write_text("", encoding="utf-8")
 
     monkeypatch.setenv("BEAMAX_KWAVE_BINARY_PATH", str(tmp_path))
-    monkeypatch.setattr(
-        kwave_solver_module, "_kwave_supports_binary_path", lambda: True
-    )
 
     kwargs = {"backend": "cpp", "device": "cpu"}
     selected = kwave_solver_module._configure_cpp_binary_kwargs(kwargs)
@@ -378,37 +367,32 @@ def test_cpp_binary_path_uses_env_when_no_explicit_path(tmp_path, monkeypatch):
     assert kwargs["binary_path"] == str(env_binary)
 
 
-def test_cpp_binary_path_legacy_support_mutates_kwave_path_only(tmp_path, monkeypatch):
-    binary = tmp_path / "kspaceFirstOrder-OMP"
-    binary.write_text("", encoding="utf-8")
-
+def test_cpp_binary_path_omits_default_binary_path(tmp_path, monkeypatch):
     monkeypatch.delenv("BEAMAX_KWAVE_BINARY_PATH", raising=False)
     monkeypatch.setattr(
-        kwave_solver_module, "_kwave_supports_binary_path", lambda: False
-    )
-    legacy_calls = []
-    monkeypatch.setattr(
         kwave_solver_module,
-        "_set_legacy_kwave_binary_path",
-        lambda path, *, device: legacy_calls.append((path, device)),
+        "_default_kwave_binary_path",
+        lambda device: tmp_path / "kspaceFirstOrder-OMP",
     )
 
-    kwargs = {"backend": "cpp", "device": "cpu", "binary_path": str(binary)}
+    kwargs = {"backend": "cpp", "device": "cpu"}
     selected = kwave_solver_module._configure_cpp_binary_kwargs(kwargs)
 
-    assert selected == binary
+    assert selected == tmp_path / "kspaceFirstOrder-OMP"
     assert "binary_path" not in kwargs
-    assert legacy_calls == [(binary, "cpu")]
 
 
-def test_old_darwin_absorption_binary_is_rejected_from_metadata(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bad_version", ["v0.3.0rc3", "v1.4.0"])
+def test_bad_darwin_absorption_binary_is_rejected_from_metadata(
+    tmp_path, monkeypatch, bad_version
+):
     binary = tmp_path / "kspaceFirstOrder-OMP"
     binary.write_text("", encoding="utf-8")
     binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
         json.dumps(
             {
-                "version": "v0.3.0rc3",
-                "url": "https://github.com/waltsims/k-wave-omp-darwin/releases/download/v0.3.0rc3/kspaceFirstOrder-OMP",
+                "version": bad_version,
+                "url": f"https://github.com/waltsims/k-wave-omp-darwin/releases/download/{bad_version}/kspaceFirstOrder-OMP",
             }
         ),
         encoding="utf-8",
@@ -426,6 +410,33 @@ def test_old_darwin_absorption_binary_is_rejected_from_metadata(tmp_path, monkey
 
     with pytest.raises(RuntimeError, match="known-bad"):
         kwave_solver_module._reject_known_bad_darwin_absorption_binary(binary, domain)
+
+
+def test_v141_darwin_absorption_binary_is_allowed_from_metadata(tmp_path, monkeypatch):
+    binary = tmp_path / "kspaceFirstOrder-OMP"
+    binary.write_text("", encoding="utf-8")
+    binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
+        json.dumps(
+            {
+                "version": "v1.4.1",
+                "url": "https://github.com/waltsims/k-wave-omp-darwin/releases/download/v1.4.1/kspaceFirstOrder-OMP",
+            }
+        ),
+        encoding="utf-8",
+    )
+    domain = geometry.Domain(
+        N=(4, 4),
+        dx=(1.0, 1.0),
+        c=1.0,
+        periodic=(True, True),
+        alpha_coeff=1.0,
+        alpha_power=1.5,
+    )
+
+    monkeypatch.setattr(kwave_solver_module.sys, "platform", "darwin")
+    monkeypatch.setattr(kwave_solver_module, "_file_sha256", lambda path: "not-bad")
+
+    kwave_solver_module._reject_known_bad_darwin_absorption_binary(binary, domain)
 
 
 def test_old_darwin_absorption_binary_guard_allows_lossless_domain(
