@@ -334,7 +334,6 @@ def test_none_windowing_frame_eq_GB(
                 solver_config,
             )
 
-            # TODO strange.
             if num_levels == 1:
                 atol_alt = 1e-7
             else:

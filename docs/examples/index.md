@@ -7,11 +7,8 @@ python examples/<category>/<file>.py
 ```
 
 Set `MPLBACKEND=Agg` when running headless (CI / remote shells).
-
-Research, profiling, comparison, and data-dependent scripts are preserved under
-`examples/private/`, but they are not part of the public docs or CI smoke suite.
 Some public examples are marked optional in their module docstring; these
-require `beamax[kwave,viz-mpl]` and are skipped by the default CI smoke suite.
+require `beamax[kwave,viz-mpl]` and are skipped by the default smoke suite.
 
 ## Run on Google Colab
 
@@ -42,6 +39,6 @@ Notebooks that ship alongside the public scripts carry an **Open in Colab** badg
 - [2D ray bending](rays.md#2d-ray-bending) — trace a fan of rays through a smooth speed field.
 - [Neural sound speed autofocus](rays.md#neural-sound-speed-autofocus) — optimize a neural `c(x)` field with autodiff through the ray ODE.
 
-### Single Gaussian beam diagnostics
+### Single Gaussian Beam Diagnostics
 
-- [Single Gaussian beam absorption](single-gaussian-beam.md#single-gaussian-beam-absorption) — optional absorbing-beam comparison.
+- [Single Gaussian beam absorption](single-gaussian-beam.md#single-gaussian-beam-absorption) — absorbing-beam comparison.

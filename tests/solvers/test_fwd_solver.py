@@ -50,6 +50,8 @@ requires_kwave = pytest.mark.skipif(
 def _kwave_cpp_binary_available() -> bool:
     if KWAVE_IMPORT_ERROR is not None:
         return False
+    if os.environ.get("CI") and os.environ.get("BEAMAX_RUN_KWAVE_CPP_TESTS") != "1":
+        return False
 
     binary_name = (
         "kspaceFirstOrder-OMP.exe"
@@ -71,7 +73,10 @@ def _kwave_cpp_binary_available() -> bool:
 
 requires_kwave_cpp_binary = pytest.mark.skipif(
     not _kwave_cpp_binary_available(),
-    reason="k-wave-python C++ OMP binary is unavailable on this platform.",
+    reason=(
+        "k-wave-python C++ OMP binary tests are disabled on CI unless "
+        "BEAMAX_RUN_KWAVE_CPP_TESTS=1 is set, or the binary is unavailable."
+    ),
 )
 
 
@@ -166,6 +171,30 @@ def create_test_signal(dyadic_decomp, wpt, box_indices=(34, 6), k_values=None):
     # Normalize
     signal = signal / jnp.max(jnp.abs(signal))
     return signal
+
+
+@pytest.mark.parametrize(
+    "override, message",
+    [
+        ({"thr_strat": "missing"}, "thr_strat"),
+        ({"input_type": "time"}, "input_type"),
+        ({"batch_size": 0}, "batch_size"),
+        ({"sum_method": "all"}, "sum_method"),
+    ],
+)
+def test_msgb_solver_validates_configuration(override, message):
+    kwargs = dict(
+        thr=10,
+        thr_strat="top_n",
+        batch_size=8,
+        input_type="spatial",
+        ode_solver=gb_solvers.solve_ODE_base,
+        sum_method="scan_real",
+    )
+    kwargs.update(override)
+
+    with pytest.raises(ValueError, match=message):
+        MSGBSolver(**kwargs)
 
 
 # ============================================================================
@@ -431,16 +460,13 @@ class TestHybridSolverBasics:
 
         wpt = MSWPT(dyadic_decomp_2d, 2, "rectangular_mirror")
 
-        # Setup sensors
         binary_mask = jnp.zeros(domain.N)
         binary_mask = binary_mask.at[0, :].set(1)
         sensors = geometry.Sensor(binary_mask=binary_mask, domain=domain)
 
-        # Create test initial condition
         p0 = jnp.zeros(domain.N)
         p0 = p0.at[30, 40].set(100.0)
 
-        # Create hybrid solver
         hybrid = HybridSolver(
             lf_solver=kwave_solver,
             hf_solver=kwave_solver,
@@ -450,13 +476,9 @@ class TestHybridSolverBasics:
             interp_method="fourier",
         )
 
-        # Solve
         kwave_result = kwave_solver.forward(p0, domain, binary_mask, ts)
         hybrid_result = hybrid.forward(p0, domain, sensors, ts, wpt)
 
-        # Compare
-        # Small platform/runtime differences in k-Wave I/O can introduce tiny
-        # perturbations while remaining numerically equivalent.
         assert jnp.allclose(kwave_result, hybrid_result, atol=3e-5), (
             f"Hybrid (downsample={downsample}, dt_oversample={dt_oversample}) "
             f"doesn't match k-Wave:\n"
@@ -620,7 +642,7 @@ class TestHybridSolverAdvanced:
 @requires_kwave_cpp_binary
 def test_hybrid_downsample():
     """
-    Testing that hybrid solver on periodic domain downsampled (with fourier interpolation) is close to non-downsampled.
+    Check that Fourier-interpolated downsampling preserves hybrid solver output.
     """
     d = 2
     N = (128,) * d
@@ -651,38 +673,30 @@ def test_hybrid_downsample():
     binary_mask = binary_mask.at[0, ...].set(1)
     sensors = geometry.Sensor(binary_mask=binary_mask, domain=domain)
 
-    KXY = dyadic_decomp.fourier_meshgrid
+    kxy = dyadic_decomp.fourier_meshgrid
 
     boxhf = 44
     boxlf = 10
     khf = jnp.array([10, 12])
     klf = jnp.array([10, 3])
     kerft_hf = transforms.compute_frames(
-        dyadic_decomp, boxhf, khf, KXY, redundancy, "none"
+        dyadic_decomp, boxhf, khf, kxy, redundancy, "none"
     )
     kerft_lf = transforms.compute_frames(
-        dyadic_decomp, boxlf, klf, KXY, redundancy, "none"
+        dyadic_decomp, boxlf, klf, kxy, redundancy, "none"
     )
     p0 = utils.unitary_ifft(kerft_hf) + utils.unitary_ifft(kerft_lf)
     p0 = p0 / jnp.max(jnp.abs(p0))
-    p0 = p0.T
-
-    p0 = p0.real
-
-    threshold = 1000
-    strategy = "top_n"
-    batch_size = 100
-    sum_method = "scan_real"
-    solver = gb_solvers.solve_ODE_base
+    p0 = p0.T.real
 
     msgb_solver = MSGBSolver(
-        thr=threshold,
-        thr_strat=strategy,
-        batch_size=batch_size,
+        thr=1000,
+        thr_strat="top_n",
+        batch_size=100,
         input_type=input_type,
-        ode_solver=solver,
+        ode_solver=gb_solvers.solve_ODE_base,
         tr_ode_solver=gb_solvers.solve_ODE_batch_t,
-        sum_method=sum_method,
+        sum_method="scan_real",
     )
 
     simulation_options = SimulationOptions(

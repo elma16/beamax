@@ -74,6 +74,23 @@ def test_domain_compute_max_freq():
     assert max_freq == 10.0
 
 
+def test_domain_material_arrays_include_absorption():
+    domain = Domain(
+        N=(4, 4),
+        dx=(0.1, 0.1),
+        c=2.0,
+        density=1.1,
+        alpha_coeff=0.01,
+        alpha_power=lambda x: 1.5 + 0.0 * x[..., 0],
+        periodic=(False, False),
+    )
+
+    assert domain.sound_speed_array.shape == domain.N
+    assert jnp.allclose(domain.density_array, 1.1)
+    assert jnp.allclose(domain.alpha_coeff_array, 0.01)
+    assert jnp.allclose(domain.alpha_power_array, 1.5)
+
+
 def test_sensor():
     N = (128, 128)
     dx = (1 / N[0], 1 / N[1])
@@ -101,6 +118,36 @@ def test_sensor():
 
     assert jnp.allclose(sensor.positions, x, atol=1e-16)
     assert jnp.allclose(sensor.binary_mask, guess_binary_mask, atol=1e-16)
+
+
+def test_sensor_validation_errors():
+    domain = Domain(N=(8, 8), dx=(0.1, 0.1), c=1.0, periodic=(False, False))
+
+    with pytest.raises(ValueError, match="Either positions"):
+        Sensor(domain)
+
+    with pytest.raises(ValueError, match="Cannot provide both"):
+        Sensor(domain, positions=jnp.array([0.1, 0.1]), binary_mask=jnp.ones(domain.N))
+
+    with pytest.raises(ValueError, match="shape"):
+        Sensor(domain, positions=jnp.array([0.1, 0.1, 0.1]))
+
+    with pytest.raises(ValueError, match="inside"):
+        Sensor(domain, positions=jnp.array([0.8, 0.1]))
+
+    with pytest.raises(ValueError, match="shape"):
+        Sensor(domain, binary_mask=jnp.ones((8,)))
+
+    with pytest.raises(ValueError, match="positive"):
+        Sensor(domain, binary_mask=jnp.zeros(domain.N))
+
+
+def test_sensor_positions_clip_to_grid_boundary():
+    domain = Domain(N=(8,), dx=(0.1,), c=1.0, periodic=(False,))
+    sensor = Sensor(domain, positions=jnp.array([0.79]))
+
+    expected = jnp.zeros(domain.N).at[7].set(1)
+    assert jnp.array_equal(sensor.binary_mask, expected)
 
 
 @pytest.mark.parametrize("d", [1, 2, 3])

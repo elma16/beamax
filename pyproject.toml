@@ -80,11 +80,16 @@ Issues = "https://github.com/elma16/beamax/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-beamax = ["_assets/*.mplstyle", "py.typed"]
+beamax = ["py.typed"]
 
 [tool.ruff]
 extend-include = ["*.ipynb"]
-extend-exclude = ["examples/private"]
+extend-exclude = [
+  "examples/private",
+  "examples/thesis",
+  "examples/learned",
+  "examples/benchmarks",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]

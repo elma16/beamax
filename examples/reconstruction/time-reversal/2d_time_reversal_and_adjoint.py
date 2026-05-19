@@ -50,8 +50,12 @@ def make_phantom(domain: Domain) -> jnp.ndarray:
         indexing="ij",
     )
     lx, ly = domain.grid_size
-    p0 = jnp.exp(-((x - 0.38 * lx) ** 2 + (y - 0.45 * ly) ** 2) / (2.0 * (0.08 * lx) ** 2))
-    p0 -= 0.7 * jnp.exp(-((x - 0.62 * lx) ** 2 + (y - 0.58 * ly) ** 2) / (2.0 * (0.09 * lx) ** 2))
+    p0 = jnp.exp(
+        -((x - 0.38 * lx) ** 2 + (y - 0.45 * ly) ** 2) / (2.0 * (0.08 * lx) ** 2)
+    )
+    p0 -= 0.7 * jnp.exp(
+        -((x - 0.62 * lx) ** 2 + (y - 0.58 * ly) ** 2) / (2.0 * (0.09 * lx) ** 2)
+    )
     p0 = p0 - jnp.mean(p0)
     return p0 / jnp.max(jnp.abs(p0))
 
@@ -66,11 +70,15 @@ def match_image_shape(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     return image.reshape(shape)
 
 
-def scaled_reconstruction(recon: np.ndarray, truth: np.ndarray) -> tuple[np.ndarray, float, float]:
+def scaled_reconstruction(
+    recon: np.ndarray, truth: np.ndarray
+) -> tuple[np.ndarray, float, float]:
     """Scale reconstruction to the truth and return ``(scaled, overlap, relative_l2)``."""
     recon_real = np.asarray(recon).real
     truth_real = np.asarray(truth).real
-    scale = float(np.vdot(recon_real, truth_real) / (np.vdot(recon_real, recon_real) + 1e-30))
+    scale = float(
+        np.vdot(recon_real, truth_real) / (np.vdot(recon_real, recon_real) + 1e-30)
+    )
     scaled = scale * recon_real
     overlap = float(
         abs(np.vdot(scaled, truth_real))
@@ -111,7 +119,7 @@ def main() -> None:
             sensors=image_mask,
             sources=sensor_mask,
             ts=ts,
-            data_layout="ns_nt",
+            data_layout="nt_ns",
         ),
         n,
     )
@@ -122,7 +130,7 @@ def main() -> None:
             sensors=image_mask,
             sources=sensor_mask,
             ts=ts,
-            data_layout="ns_nt",
+            data_layout="nt_ns",
         ),
         n,
     )

@@ -1,6 +1,6 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite Beamax and the relevant method/research papers listed below."
-title: "Beamax: Multiscale Gaussian Beams in JAX"
+message: "If you use this software, please cite beamax and the relevant method/research papers listed below."
+title: "beamax: Multiscale Gaussian Beams in JAX"
 type: software
 license: MIT
 url: "https://github.com/elma16/beamax"

@@ -1,10 +1,9 @@
 """
-Generic hybrid solver supporting forward, time_reversal, and adjoint.
+Hybrid solver for combining low- and high-frequency propagation backends.
 
-Key improvements:
-1. _solve_lf_component accepts **kwargs for solver-specific parameters
-2. Windowing/interpolation/time-extension are optional
-3. Unified pattern for all solver operations
+The high-frequency component is typically handled by MSGB, while the
+low-frequency component can be supplied by any object implementing the shared
+solver interface.
 """
 
 import warnings
@@ -195,10 +194,9 @@ class HybridSolver(eqx.Module):
 
     Splits the input pressure in frequency: a fast high-frequency solver
     (typically :class:`beamax.solvers.MSGBSolver`) handles the sparse, highly
-    oscillatory content, while a conventional low-frequency solver
-    (typically :class:`beamax.solvers.KWaveSolver`) handles the smooth
-    residual — optionally on a coarser grid. The two results are added back
-    together on the target grid.
+    oscillatory content, while a conventional low-frequency solver handles
+    the smooth residual, optionally on a coarser grid. The two results are
+    added back together on the target grid.
 
     Parameters
     ----------

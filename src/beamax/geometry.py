@@ -1,4 +1,5 @@
 from typing import Callable, Tuple, Optional, Union
+import numpy as np
 import jax.numpy as jnp
 import equinox as eqx
 
@@ -193,6 +194,28 @@ class Domain(eqx.Module):
         """
         return self._eval(self.density)
 
+    @property
+    def alpha_coeff_array(self) -> Optional[jnp.ndarray]:
+        """
+        Absorption prefactor evaluated on grid.
+
+        Returns
+        -------
+        jnp.ndarray | None
+        """
+        return self._eval(self.alpha_coeff)
+
+    @property
+    def alpha_power_array(self) -> Optional[jnp.ndarray]:
+        """
+        Absorption exponent evaluated on grid.
+
+        Returns
+        -------
+        jnp.ndarray | None
+        """
+        return self._eval(self.alpha_power)
+
     def compute_max_speed(self) -> jnp.ndarray:
         """
         Maximum sound speed on grid.
@@ -327,15 +350,80 @@ class Sensor(eqx.Module):
         self.domain = domain
 
         if positions is not None:
+            positions = self._normalize_positions(positions)
             self._positions = positions
             self._binary_mask = self._positions_to_mask(positions)
         else:
+            binary_mask = self._normalize_mask(binary_mask)
             self._binary_mask = binary_mask
             self._positions = self._mask_to_positions(binary_mask)
 
+    def _normalize_positions(self, positions: jnp.ndarray) -> jnp.ndarray:
+        """
+        Validate positions and coerce a single point to shape ``(1, d)``.
+
+        Parameters
+        ----------
+        positions : array-like
+            Physical sensor positions.
+
+        Returns
+        -------
+        jnp.ndarray, shape (Ns, d)
+
+        Raises
+        ------
+        ValueError
+            If the shape is invalid or any point falls outside the domain.
+        """
+        positions = jnp.asarray(positions)
+        if positions.ndim == 1:
+            positions = positions[None, :]
+        if positions.ndim != 2 or positions.shape[1] != self.domain.ndim:
+            raise ValueError(
+                "positions must have shape (Ns, ndim) or (ndim,), "
+                f"got {positions.shape} for ndim={self.domain.ndim}."
+            )
+
+        pos_np = np.asarray(positions)
+        lower = np.zeros(self.domain.ndim)
+        upper = np.asarray(self.domain.grid_size)
+        if np.any(pos_np < lower) or np.any(pos_np >= upper):
+            raise ValueError(
+                "positions must lie inside the half-open domain [0, N*dx)."
+            )
+        return positions
+
+    def _normalize_mask(self, mask: jnp.ndarray) -> jnp.ndarray:
+        """
+        Validate and coerce a binary mask.
+
+        Parameters
+        ----------
+        mask : array-like, shape (*domain.N,)
+
+        Returns
+        -------
+        jnp.ndarray
+
+        Raises
+        ------
+        ValueError
+            If the mask shape does not match ``domain.N`` or contains no
+            positive entries.
+        """
+        mask = jnp.asarray(mask)
+        if tuple(mask.shape) != tuple(self.domain.N):
+            raise ValueError(
+                f"binary_mask must have shape {self.domain.N}, got {mask.shape}."
+            )
+        if not bool(np.any(np.asarray(mask) > 0)):
+            raise ValueError("binary_mask must contain at least one positive entry.")
+        return mask
+
     def _positions_to_mask(self, positions: jnp.ndarray) -> jnp.ndarray:
         """
-        Convert positions (physical) → binary mask.
+        Convert physical positions to a binary mask.
 
         Parameters
         ----------
@@ -348,12 +436,14 @@ class Sensor(eqx.Module):
             1 at nearest grid indices (rounded), else 0.
         """
         sensor_indices = jnp.round(positions / jnp.array(self.domain.dx)).astype(int)
+        upper_indices = jnp.array(self.domain.N) - 1
+        sensor_indices = jnp.clip(sensor_indices, 0, upper_indices)
         mask = jnp.zeros(self.domain.N)
         return mask.at[tuple(sensor_indices.T)].set(1)
 
     def _mask_to_positions(self, mask: jnp.ndarray) -> jnp.ndarray:
         """
-        Convert binary mask → positions (physical).
+        Convert binary mask to physical positions.
 
         Parameters
         ----------

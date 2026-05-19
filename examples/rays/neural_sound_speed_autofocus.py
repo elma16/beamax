@@ -4,7 +4,7 @@ Optimize a neural sound-speed field so initially parallel rays focus.
 
 The source line and launch directions stay fixed. A tiny Equinox neural field
 represents `c(x)`, and a few explicit gradient steps update the field
-parameters through autodiff of the Gaussian-beam ray ODE.
+parameters through autodiff of the Gaussian beam ray ODE.
 """
 
 from pathlib import Path
@@ -110,8 +110,23 @@ def plot_panel(ax, c_map, xt, x0, focus, title, vmin, vmax):
     )
     for ray in np.asarray(xt):
         ax.plot(ray[:, 0], ray[:, 1], color="white", lw=1.2, alpha=0.75)
-    ax.scatter(np.asarray(x0[:, 0]), np.asarray(x0[:, 1]), s=28, color="#d7301f", edgecolor="black", zorder=3)
-    ax.scatter(float(focus[0]), float(focus[1]), s=110, marker="*", color="#d7301f", edgecolor="black", zorder=4)
+    ax.scatter(
+        np.asarray(x0[:, 0]),
+        np.asarray(x0[:, 1]),
+        s=28,
+        color="#d7301f",
+        edgecolor="black",
+        zorder=3,
+    )
+    ax.scatter(
+        float(focus[0]),
+        float(focus[1]),
+        s=110,
+        marker="*",
+        color="#d7301f",
+        edgecolor="black",
+        zorder=4,
+    )
     ax.set_title(title)
     ax.set_xticks([])
     ax.set_yticks([])
@@ -159,7 +174,9 @@ def main() -> None:
 
     print(f"Optimization steps: {len(loss_history) - 1}")
     print(f"Focusing loss: {initial_loss:.4e} -> {final_loss:.4e}")
-    print(f"Final speed range: [{float(final_c.min()):.3f}, {float(final_c.max()):.3f}]")
+    print(
+        f"Final speed range: [{float(final_c.min()):.3f}, {float(final_c.max()):.3f}]"
+    )
     print(f"Saved neural-speed autofocus plot to {out_path}")
 
 

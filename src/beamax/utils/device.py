@@ -114,40 +114,41 @@ def find_repo_root(start: Path, marker: str = "src/beamax") -> Path:
     Returns
     -------
     Path
-        Found root or `start` if not found.
+        Found root or the nearest directory containing ``start`` if not found.
     """
-    for parent in [start] + list(start.parents):
+    start = Path(start)
+    base = start if start.is_dir() else start.parent
+    for parent in [base] + list(base.parents):
         if (parent / marker).exists():
             return parent
-    return start  # fallback if marker not found
+    return base
 
 
 def detect_root() -> Path:
     """
-    Heuristics for locating the repository root.
+    Locate the repository root used by examples for output files.
 
     Priority
     --------
     1) `BEAMAX_ROOT` environment variable
-    2) Colab default path
-    3) Script location (`__file__`)
-    4) Current working directory upward search
+    2) Current working directory upward search
+    3) Package source location upward search
+    4) Current working directory
 
     Returns
     -------
     Path
     """
-    # 1. Env var override
     if "BEAMAX_ROOT" in os.environ:
         return Path(os.environ["BEAMAX_ROOT"]).expanduser()
 
-    # 2. Colab
-    if "COLAB_GPU" in os.environ:
-        return Path("/content/drive/MyDrive/beamax")
+    cwd_root = find_repo_root(Path.cwd())
+    if (cwd_root / "src/beamax").exists():
+        return cwd_root
 
-    # 3. Script
     if "__file__" in globals():
-        return find_repo_root(Path(__file__).resolve())
+        package_root = find_repo_root(Path(__file__).resolve())
+        if (package_root / "src/beamax").exists():
+            return package_root
 
-    # 4. Notebook / REPL → start from CWD
-    return find_repo_root(Path.cwd())
+    return Path.cwd()

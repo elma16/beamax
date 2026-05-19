@@ -8,7 +8,7 @@ Finalise the public example tree:
 3. For every existing public .ipynb without an Open-in-Colab badge, prepend the
    banner + install cell.
 
-Private examples are intentionally ignored by this tool.
+Local/private example directories are intentionally ignored by this tool.
 """
 
 from __future__ import annotations
@@ -21,10 +21,7 @@ from pathlib import Path
 GITHUB_REPO = "elma16/beamax"
 GITHUB_BRANCH = "main"
 PUBLIC_EXAMPLES_ROOT = Path("examples")
-
-# Examples that load the OA-Breast phantom from disk. Notebook gets a
-# data-download instructions banner.
-OABREAST_DEPENDENT: set[str] = set()
+PRIVATE_EXAMPLE_DIRS = {"private", "thesis", "learned", "benchmarks"}
 
 # Examples that need substantial RAM (gated behind BEAMAX_FULL_EXAMPLES,
 # 3D, or large grids). Notebook gets a memory-warning banner.
@@ -36,7 +33,7 @@ def is_public_example(path: Path) -> bool:
         rel = path.relative_to(PUBLIC_EXAMPLES_ROOT)
     except ValueError:
         return False
-    return "private" not in rel.parts
+    return not (PRIVATE_EXAMPLE_DIRS & set(rel.parts))
 
 
 def example_metadata_from_text(text: str) -> dict[str, str]:
@@ -61,13 +58,11 @@ def example_extras(text: str) -> list[str]:
     """Return install extras requested by example metadata or inferred imports."""
     metadata = example_metadata_from_text(text)
     extras = [
-        item.strip()
-        for item in metadata.get("extras", "").split(",")
-        if item.strip()
+        item.strip() for item in metadata.get("extras", "").split(",") if item.strip()
     ]
     if extras:
         return extras
-    return ["kwave", "viz-mpl"] if _needs_kwave(text) else ["viz-mpl"]
+    return ["viz-mpl"]
 
 
 def is_default_smoke_text(text: str) -> bool:
@@ -117,7 +112,7 @@ def heuristic_description(path: Path) -> str:
             return "Aliasing diagnostic for a 3D bowtie sensor configuration."
         return f"Bowtie sensor geometry test ({stem})."
     if "3d_replot" in s.replace(" ", "_"):
-        return "Replot saved 3D forward / TR / adjoint outputs (requires saved .npy outputs and OA-Breast phantom paths)."
+        return "Replot saved 3D forward, time-reversal, and adjoint outputs."
     return f"Example: {stem}."
 
 
@@ -155,7 +150,6 @@ def colab_url(rel_nb: str) -> str:
 def banner_md(
     rel_nb: str,
     title: str,
-    oabreast: bool,
     memory_heavy: bool,
     default_smoke: bool,
 ) -> list[str]:
@@ -176,11 +170,6 @@ def banner_md(
             "\n",
             "> **Note:** this example is memory-heavy. Run it on a machine with plenty of RAM (and / or a high-memory accelerator).\n",
         ]
-    if oabreast:
-        lines += [
-            "\n",
-            "> **Data download required.** This example loads the OA-Breast phantom from `data/NumericalBreastPhantoms-selected/hdf5/Neg_07_Left.h5`. Download it manually from the [OA-Breast database](https://anastasio.bioengineering.illinois.edu/downloadable-content/oa-breast-database/) (Illinois) and place it under `<repo-root>/data/`. The notebook will error at the load step until the file is present.\n",
-        ]
     return lines
 
 
@@ -191,10 +180,6 @@ def install_cell_source(extras: list[str]) -> list[str]:
         "%%capture\n",
         f'%pip install --quiet "beamax{extras_spec} @ git+https://github.com/{GITHUB_REPO}.git"\n',
     ]
-
-
-def _needs_kwave(text: str) -> bool:
-    return bool(re.search(r"\bfrom\s+kwave\b|\bimport\s+kwave\b|\bKWaveSolver\b", text))
 
 
 def title_from_path(path: Path) -> str:
@@ -223,14 +208,13 @@ def add_badge_to_existing_nb(path: Path) -> bool:
     )
     rel = str(path)
     title = title_from_path(path)
-    oabreast = rel in OABREAST_DEPENDENT
     memory_heavy = rel in MEMORY_HEAVY
     extras = example_extras(full_text)
     default_smoke = is_default_smoke_text(full_text)
     banner = {
         "cell_type": "markdown",
         "metadata": {},
-        "source": banner_md(rel, title, oabreast, memory_heavy, default_smoke),
+        "source": banner_md(rel, title, memory_heavy, default_smoke),
     }
     install = {
         "cell_type": "code",
@@ -251,7 +235,6 @@ def generate_nb_from_py(py_path: Path) -> bool:
     src = py_path.read_text()
     rel_nb = str(nb_path)
     title = title_from_path(py_path)
-    oabreast = str(py_path) in OABREAST_DEPENDENT
     memory_heavy = str(py_path) in MEMORY_HEAVY
     extras = example_extras(src)
     default_smoke = is_default_smoke_text(src)
@@ -262,9 +245,7 @@ def generate_nb_from_py(py_path: Path) -> bool:
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": banner_md(
-                    rel_nb, title, oabreast, memory_heavy, default_smoke
-                ),
+                "source": banner_md(rel_nb, title, memory_heavy, default_smoke),
             },
             {
                 "cell_type": "code",

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import types
 import numpy as np
+import os
 
 from beamax import geometry, utils
 
@@ -34,6 +35,8 @@ _SOLVER_KWARGS = dict(
 
 
 def _kwave_cpp_binary_available() -> bool:
+    if os.environ.get("CI") and os.environ.get("BEAMAX_RUN_KWAVE_CPP_TESTS") != "1":
+        return False
     try:
         binary_path, _ = kwave_solver_module._select_cpp_binary_path({"device": "cpu"})
     except (OSError, FileNotFoundError):
@@ -43,7 +46,10 @@ def _kwave_cpp_binary_available() -> bool:
 
 requires_kwave_cpp_binary = pytest.mark.skipif(
     not _kwave_cpp_binary_available(),
-    reason="k-wave-python C++ OMP binary is unavailable on this platform.",
+    reason=(
+        "k-wave-python C++ OMP binary tests are disabled on CI unless "
+        "BEAMAX_RUN_KWAVE_CPP_TESTS=1 is set, or the binary is unavailable."
+    ),
 )
 
 

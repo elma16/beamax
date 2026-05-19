@@ -2,8 +2,8 @@
 """
 Regenerate examples/README.md as the public example index.
 
-Private examples under examples/private are preserved as unsupported archived
-material and are intentionally omitted from the gallery.
+Local/private example directories are intentionally omitted from the public
+gallery.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 GITHUB_REPO = "elma16/beamax"
 GITHUB_BRANCH = "main"
 PUBLIC_EXAMPLES_ROOT = Path("examples")
+PRIVATE_EXAMPLE_DIRS = {"private", "thesis", "learned", "benchmarks"}
 
 # Friendly section titles, ordered
 GROUPS = [
@@ -99,7 +100,7 @@ def is_public_example(py_path: Path) -> bool:
         rel = py_path.relative_to(PUBLIC_EXAMPLES_ROOT)
     except ValueError:
         return False
-    return "private" not in rel.parts
+    return not (PRIVATE_EXAMPLE_DIRS & set(rel.parts))
 
 
 def main() -> None:
@@ -158,13 +159,6 @@ def main() -> None:
 
 This directory holds the supported beamax example gallery. Base examples are
 small, documented, paired with notebooks, linted, and smoke-tested in CI.
-Examples marked optional require extra dependencies and are skipped by default
-smoke runs.
-
-`private/` preserves research, profiling, comparison, and diagnostic scripts.
-They may require extra data, optional solver backends, large memory, or local
-hardware assumptions, and are not part of the public docs or CI smoke suite.
-
 Every public script has a matching notebook with an **Open in Colab** badge.
 The public examples are small enough to run on a standard CPU Colab runtime.
 
@@ -175,12 +169,6 @@ Each notebook installs beamax from this repository in its first code cell:
 ```
 
 When running locally from a checkout, that cell can be skipped.
-
-## Style
-
-Examples that customise matplotlib import `use_beamax_style` from
-`beamax.plotter` — the style file is bundled inside the installed package, so
-it resolves identically in a checkout, an installed wheel, or on Colab.
 
 ## Gallery
 
@@ -195,8 +183,8 @@ it resolves identically in a checkout, an installed wheel, or on Colab.
 2. Run `python tools/finalize_examples.py` (or hand-edit a notebook) so a
    paired `.ipynb` exists with the Open-in-Colab badge + install cell pattern.
 3. Add a bullet to the section above (or rerun the regeneration script).
-4. Keep public examples self-contained and fast. Move research/profiling/data-
-   dependent material to `examples/private`.
+4. Keep public examples self-contained and fast. Keep research/profiling/data-
+   dependent material outside the tracked public gallery.
 """
     Path("examples/README.md").write_text(output)
     print("wrote examples/README.md")

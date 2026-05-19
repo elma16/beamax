@@ -109,7 +109,7 @@ def _select_cpp_binary_path(kwargs: dict) -> tuple[Path, bool]:
     Resolve the C++ binary path.
 
     Returns `(binary_path, should_forward)` where `should_forward` means the
-    path came from Beamax/user configuration and must be passed to
+    path came from beamax/user configuration and must be passed to
     k-wave-python.
     """
     device = kwargs.get("device", "cpu")
@@ -237,8 +237,6 @@ class KWaveSolver(Solver):
       adjoint currently fall back to the pure-Python backend until the
       upstream ``CppSimulation`` path ships source preprocessing for
       time-varying pressure sources.
-    - On macOS the class transparently patches the ``libhdf5.310`` →
-      ``libhdf5.320`` linkage mismatch so recent Homebrew HDF5 installs work.
     - ``binary_path`` can be supplied directly or via
       ``BEAMAX_KWAVE_BINARY_PATH``. Direct kwargs take precedence.
 

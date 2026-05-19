@@ -233,7 +233,7 @@ def compute_TR_parameters(
     ats : jnp.ndarray, shape (B, 1)
         Beam amplitude scale at the final time.
     signum : jnp.ndarray, shape (B, 1)
-        Gaussian-beam mode sign.
+        Gaussian beam mode sign.
     ts : jnp.ndarray, shape (B, 2)
         Per-beam time interval.
     """
@@ -410,7 +410,7 @@ def compute_TR_parameters(
     )
 
     # -------------------------------------------------------------------------
-    # 5. Grazing handling: kill contributions, keep dummy placeholders
+    # 5. Grazing handling: zero contributions and keep numerically safe values
     # -------------------------------------------------------------------------
     is_grazing_final = jnp.abs(jnp.take(pts, normal_axis, axis=1)) == 0.0
     is_grazing_final = rearrange(is_grazing_final, "b -> b 1")

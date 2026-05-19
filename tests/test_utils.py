@@ -9,6 +9,7 @@ import h5py
 import numpy as np
 import tempfile
 import os
+import beamax.utils.device as device_utils
 from beamax.utils.oabreast import (
     load_oabreast_p0_c,
     _effective_spacing_after_shape_resample,
@@ -316,6 +317,24 @@ def test_detect_root_env_takes_priority(monkeypatch, tmp_path):
     monkeypatch.setenv("BEAMAX_ROOT", str(tmp_path))
     root = detect_root()
     assert str(root) == str(tmp_path)
+
+
+def test_find_repo_root_accepts_file_paths(tmp_path):
+    (tmp_path / "src" / "beamax").mkdir(parents=True)
+    file_path = tmp_path / "scripts" / "example.py"
+    assert device_utils.find_repo_root(file_path) == tmp_path
+
+
+def test_detect_root_falls_back_to_cwd_for_installed_layout(monkeypatch, tmp_path):
+    monkeypatch.delenv("BEAMAX_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        device_utils,
+        "__file__",
+        str(tmp_path / "site-packages" / "beamax" / "utils" / "device.py"),
+    )
+
+    assert detect_root() == tmp_path
 
 
 def test_pad_zero_and_edge():

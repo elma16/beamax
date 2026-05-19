@@ -2,13 +2,6 @@
 
 This directory holds the supported beamax example gallery. Base examples are
 small, documented, paired with notebooks, linted, and smoke-tested in CI.
-Examples marked optional require extra dependencies and are skipped by default
-smoke runs.
-
-`private/` preserves research, profiling, comparison, and diagnostic scripts.
-They may require extra data, optional solver backends, large memory, or local
-hardware assumptions, and are not part of the public docs or CI smoke suite.
-
 Every public script has a matching notebook with an **Open in Colab** badge.
 The public examples are small enough to run on a standard CPU Colab runtime.
 
@@ -19,12 +12,6 @@ Each notebook installs beamax from this repository in its first code cell:
 ```
 
 When running locally from a checkout, that cell can be skipped.
-
-## Style
-
-Examples that customise matplotlib import `use_beamax_style` from
-`beamax.plotter` — the style file is bundled inside the installed package, so
-it resolves identically in a checkout, an installed wheel, or on Colab.
 
 ## Gallery
 
@@ -53,7 +40,7 @@ it resolves identically in a checkout, an installed wheel, or on Colab.
 
 ### Single Gaussian beam diagnostics
 
-- [`single_gaussian_beam_absorption.py`](single-gaussian-beam/single_gaussian_beam_absorption.py) — Compare lossless and absorbing single-Gaussian-beam propagation with k-Wave. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/single-gaussian-beam/single_gaussian_beam_absorption.ipynb)
+- [`single_gaussian_beam_absorption.py`](single-gaussian-beam/single_gaussian_beam_absorption.py) — Compare lossless and absorbing single Gaussian beam propagation. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/single-gaussian-beam/single_gaussian_beam_absorption.ipynb)
 
 
 ## Contributing a new example
@@ -65,5 +52,5 @@ it resolves identically in a checkout, an installed wheel, or on Colab.
 2. Run `python tools/finalize_examples.py` (or hand-edit a notebook) so a
    paired `.ipynb` exists with the Open-in-Colab badge + install cell pattern.
 3. Add a bullet to the section above (or rerun the regeneration script).
-4. Keep public examples self-contained and fast. Move research/profiling/data-
-   dependent material to `examples/private`.
+4. Keep public examples self-contained and fast. Keep research/profiling/data-
+   dependent material outside the tracked public gallery.

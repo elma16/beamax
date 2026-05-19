@@ -2,7 +2,7 @@
 """
 Trace a small fan of 2D rays through a smooth speed field.
 
-The Gaussian-beam ray equations bend trajectories toward gradients in the
+The Gaussian beam ray equations bend trajectories toward gradients in the
 Hamiltonian `G(x, p) = c(x) |p|`. This example solves those ODEs for a few
 parallel rays, overlays the paths on the speed map, and reports compact
 diagnostics for the amount of bending.
@@ -91,8 +91,22 @@ def main() -> None:
     ray_color = "#d94801"
     for ray in np.asarray(xt):
         ax.plot(ray[:, 0], ray[:, 1], color=ray_color, lw=1.6, alpha=0.88)
-    ax.scatter(np.asarray(x0[:, 0]), np.asarray(x0[:, 1]), s=26, color="white", edgecolor="black", zorder=3)
-    ax.scatter(np.asarray(final[:, 0]), np.asarray(final[:, 1]), s=24, color=ray_color, edgecolor="black", zorder=3)
+    ax.scatter(
+        np.asarray(x0[:, 0]),
+        np.asarray(x0[:, 1]),
+        s=26,
+        color="white",
+        edgecolor="black",
+        zorder=3,
+    )
+    ax.scatter(
+        np.asarray(final[:, 0]),
+        np.asarray(final[:, 1]),
+        s=24,
+        color=ray_color,
+        edgecolor="black",
+        zorder=3,
+    )
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.set_xlabel("x")
@@ -107,7 +121,9 @@ def main() -> None:
     mean_lateral_shift = float(jnp.mean(jnp.abs(final[:, 1] - x0[:, 1])))
     max_angle_change = float(jnp.max(jnp.abs(direction_angles - initial_angles)))
     print(f"Rays solved: {xt.shape[0]}, time samples: {ts.shape[0]}")
-    print(f"Speed range on plot grid: [{float(c_values.min()):.3f}, {float(c_values.max()):.3f}]")
+    print(
+        f"Speed range on plot grid: [{float(c_values.min()):.3f}, {float(c_values.max()):.3f}]"
+    )
     print(f"Mean lateral displacement: {mean_lateral_shift:.3f}")
     print(f"Max direction change: {max_angle_change:.3f} rad")
     print(f"Saved ray-bending plot to {out_path}")

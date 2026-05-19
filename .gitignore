@@ -21,6 +21,9 @@ coverage.json
 
 # Local output directories
 examples/private/
+examples/thesis/
+examples/learned/
+examples/benchmarks/
 plots/
 plots_focusing/
 outputs/

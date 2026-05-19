@@ -12,7 +12,7 @@ from beamax.solvers.msgb_solvers.forward_solver_utils import (
     compute_forward_result,
 )
 from beamax.solvers.msgb_solvers.tr_solver_utils import (
-    compute_TR_result,  # New unified function
+    compute_TR_result,
     compute_TR_parameters,
 )
 from beamax.geometry import Domain, Sensor
@@ -260,9 +260,9 @@ class MSGBSolver(eqx.Module):
         Threshold value for coefficient selection. Semantics depend on
         ``thr_strat`` (e.g. absolute magnitude, percentile, top-k count).
     thr_strat : str
-        Thresholding strategy; one of ``"top_k"``, ``"percentile"``,
-        ``"magnitude"``, or another value understood by
-        :func:`threshold_coefficients`.
+        Thresholding strategy; one of ``"hard"``, ``"top_n"``,
+        ``"percentile"``, ``"hard_reassign"``, ``"bao_energy"``, or
+        ``"perc_max_abs"``.
     batch_size : int
         Batch size along the beam axis for ODE integration. Tune to fit
         device memory; larger values amortise kernel launches.
@@ -272,10 +272,9 @@ class MSGBSolver(eqx.Module):
         Forward-time ODE integrator for beam dynamics (typically one of
         :mod:`beamax.gb.gb_solvers`).
     sum_method : str
-        Method for summing beam contributions. Recognised substrings include
-        ``"real"`` (use real-valued beam paths), ``"scan"`` (use
-        :func:`jax.lax.scan` over the beam dimension) and ``"vmap"``
-        (use :func:`jax.vmap`).
+        Method for summing beam contributions. One of ``"all_real"``,
+        ``"scan_real"``, ``"vmap_real"``, ``"all_complex"``,
+        ``"scan_complex"``, or ``"vmap_complex"``.
     tr_ode_solver : SolverFn, optional
         ODE integrator for the time-reversal dynamics. Falls back to
         ``ode_solver`` when ``None``.
@@ -325,8 +324,8 @@ class MSGBSolver(eqx.Module):
         ode_solver : SolverFn
             Forward ODE solver.
         sum_method : str
-            Aggregation mode string. Recognized substrings are ``"real"``,
-            ``"scan"``, and ``"vmap"``.
+            Aggregation mode string. Must be one of the values listed in the
+            class-level parameter documentation.
         tr_ode_solver : SolverFn, optional
             ODE solver for time reversal. Defaults to ``ode_solver``.
         sharding : ShardingStrategy, optional
@@ -335,6 +334,38 @@ class MSGBSolver(eqx.Module):
             Numerical ODE solver configuration. Defaults to
             ``SolverConfig.from_precision()``.
         """
+        valid_thresholds = {
+            "hard",
+            "top_n",
+            "percentile",
+            "hard_reassign",
+            "bao_energy",
+            "perc_max_abs",
+        }
+        if thr_strat not in valid_thresholds:
+            allowed = ", ".join(sorted(valid_thresholds))
+            raise ValueError(f"thr_strat must be one of {allowed}; got {thr_strat!r}.")
+        if input_type not in {"spatial", "fourier"}:
+            raise ValueError(
+                "input_type must be 'spatial' or 'fourier'; " f"got {input_type!r}."
+            )
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive; got {batch_size}.")
+
+        valid_sum_methods = {
+            "all_real",
+            "scan_real",
+            "vmap_real",
+            "all_complex",
+            "scan_complex",
+            "vmap_complex",
+        }
+        if sum_method not in valid_sum_methods:
+            allowed = ", ".join(sorted(valid_sum_methods))
+            raise ValueError(
+                f"sum_method must be one of {allowed}; got {sum_method!r}."
+            )
+
         self.thr = thr
         self.thr_strat = thr_strat
         self.batch_size = batch_size
@@ -715,8 +746,8 @@ class MSGBSolver(eqx.Module):
         Returns
         -------
         p0_recon : jnp.ndarray, shape (*N,)
-            Reconstructed initial pressure. Scaled by 2 to match the k-Wave
-            time-reversal convention.
+            Reconstructed initial pressure. Scaled by 2 to match the
+            standard full-field time-reversal convention.
         params : tuple of jnp.ndarray
             Beam parameters used in the solve, exposed for diagnostics.
 

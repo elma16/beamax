@@ -5,6 +5,8 @@ import argparse
 import os
 import ast
 
+PRIVATE_EXAMPLE_DIRS = {"private", "thesis", "learned", "benchmarks"}
+
 
 def example_metadata(file_path: Path) -> dict[str, str]:
     """Read ``Example key: value`` metadata from a module docstring."""
@@ -40,7 +42,9 @@ def run_python_files(
 
     # Use pathlib to recursively find all Python files.
     for file_path in sorted(Path(directory).rglob("*.py")):
-        if "__pycache__" in file_path.parts or "private" in file_path.parts:
+        if "__pycache__" in file_path.parts or (
+            PRIVATE_EXAMPLE_DIRS & set(file_path.parts)
+        ):
             continue
         if not include_optional and not is_default_smoke_example(file_path):
             continue
@@ -50,6 +54,12 @@ def run_python_files(
         env = os.environ.copy()
         if silent_figures:
             env["MPLBACKEND"] = "Agg"  # Use non-interactive matplotlib backend
+            if "MPLCONFIGDIR" not in env:
+                mpl_config_dir = (
+                    Path(os.environ.get("TMPDIR", "/tmp")) / "beamax-mplconfig"
+                )
+                mpl_config_dir.mkdir(parents=True, exist_ok=True)
+                env["MPLCONFIGDIR"] = str(mpl_config_dir)
 
         try:
             result = subprocess.run(

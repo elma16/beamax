@@ -25,7 +25,7 @@ __all__ = [
 
 class SolverFn(Protocol):
     """
-    Protocol for Gaussian-beam ODE integrators.
+    Protocol for Gaussian beam ODE integrators.
 
     Implementations integrate beam initial data and return beam positions,
     momenta, Hessians, and amplitudes over time.
@@ -57,7 +57,7 @@ class SolverFn(Protocol):
         **kwargs,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
-        Integrate Gaussian-beam ODE state over the requested times.
+        Integrate Gaussian beam ODE state over the requested times.
 
         Parameters
         ----------

@@ -518,7 +518,6 @@ def load_oabreast_p0_c(
     slice_axis: int = 0,  # 2D: axis to slice or MIP along
     slice_idx: Optional[int] = None,  # 2D: explicit index if not using policy
     slice_policy: Literal["middle", "max_variance", None] = "middle",
-    # NEW: vessel-only p0 and vessel-exclusion in c
     vessel_only_p0: bool = True,
     c_exclude_vessels: bool = True,
     c_fill_strategy: Literal[
@@ -526,7 +525,7 @@ def load_oabreast_p0_c(
     ] = "nearest_along_axis",
     c_fill_axis: int = 0,  # line direction for 'nearest_along_axis' (2D/3D)
     background_speed: float = DEFAULT_SOS[0],
-    # NEW: 2D option – use MIP along slice_axis for p0 vessels
+    # 2D option: use a maximum-intensity projection along slice_axis for p0.
     vessels_mip_2d: bool = False,
     # Optical parameters
     label_to_sos: Optional[Dict[int, float]] = None,
@@ -537,10 +536,15 @@ def load_oabreast_p0_c(
     return_labels: bool = False,
 ):
     """
-    Load OA-BREAST HDF5 and map labels → (p0, c). Supports:
+    Load a user-supplied OA-Breast HDF5 label volume and map labels to ``(p0, c)``.
+
+    beamax does not ship OA-Breast phantom data. Download the dataset separately
+    and pass the local HDF5 path here.
+
+    Supports:
       - p0 from vessels only (default),
-      - c(x) from all tissues EXCEPT vessels (default),
-      - optional 2D vessel MIP for p0 along `slice_axis`.
+      - c(x) from all tissues except vessels (default),
+      - optional 2D vessel MIP for p0 along ``slice_axis``.
 
     Parameters
     ----------
@@ -681,7 +685,7 @@ def load_oabreast_p0_c(
     # ------------------------------- 2D path ------------------------------- #
 
     if source_spacing_mm is None:
-        spacing_zyx = (1.0, 1.0, 1.0)  # placeholder if units don't matter
+        spacing_zyx = (1.0, 1.0, 1.0)  # unit spacing when physical spacing is unknown
     else:
         spacing_zyx = source_spacing_mm
 

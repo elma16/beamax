@@ -20,8 +20,12 @@ pytest tests/test_gb.py # single file
 pytest -k "test_name"   # single test by name
 ```
 
-Some tests require optional dependencies (`k-wave-python`, `h5py`). These are
+Some tests require optional dependencies such as k-Wave and the FNO stack. These are
 skipped automatically if the packages are not installed.
+The k-Wave C++ OMP binary tests are skipped on CI by default because hosted
+runners do not execute the bundled binaries reliably. Set
+`BEAMAX_RUN_KWAVE_CPP_TESTS=1` to opt into those tests on a runner where the
+binary has been validated.
 
 ## Code style
 
@@ -41,8 +45,9 @@ skipped automatically if the packages are not installed.
 ## Examples
 
 - Add supported, documented, self-contained examples under `examples/`.
-- Preserve research, profiling, data-dependent, or dependency-heavy material under
-  `examples/private/`; private examples are not linted, documented, or smoke-tested.
+- Keep research, profiling, data-dependent, or dependency-heavy material outside
+  the tracked public gallery; local/private example directories are skipped by
+  the example tooling.
 - Public scripts should have a module docstring, a `main()` guard, small default
   problem sizes, concise printed metrics, and a paired notebook.
 - Run `python tools/finalize_examples.py` and `python tools/gen_examples_readme.py`

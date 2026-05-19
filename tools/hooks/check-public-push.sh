@@ -5,7 +5,7 @@ remote_name="${1:-}"
 remote_url="${2:-}"
 
 blocked_ref='refs/heads/private/'
-blocked_paths='(^|/)(examples/thesis|examples/learned|examples/private|data|checkpoints|outputs|plots|plots_focusing|wandb|cache|profiler|htmlcov|tests/test-data)(/|$)'
+blocked_paths='(^|/)(examples/thesis|examples/learned|examples/private|examples/benchmarks|data|checkpoints|outputs|plots|plots_focusing|wandb|cache|profiler|htmlcov|tests/test-data)(/|$)'
 zero_sha='0000000000000000000000000000000000000000'
 current_ref="$(git symbolic-ref --quiet HEAD 2>/dev/null || true)"
 current_branch="${current_ref#refs/heads/}"

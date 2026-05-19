@@ -7,8 +7,6 @@ views. Most functions accept NumPy/JAX arrays and are intended for diagnostics
 rather than production rendering.
 """
 
-from importlib.resources import files
-
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -33,19 +31,27 @@ from beamax.geometry import Domain
 
 def use_beamax_style() -> None:
     """
-    Apply the bundled matplotlib style used by the beamax example gallery.
-
-    The style is packaged inside ``beamax/_assets/beamax.mplstyle`` and loaded
-    via :mod:`importlib.resources`, so this works identically in an editable
-    checkout, an installed wheel, a Colab notebook, or any other environment
-    where ``beamax`` is importable.
+    Apply a lightweight matplotlib style for example figures.
 
     Notes
     -----
-    Safe to call multiple times; ``matplotlib.style.use`` is idempotent.
+    This function updates a small set of ``rcParams`` directly so examples
+    remain portable in editable checkouts, wheels, and notebooks.
     """
-    style_path = files("beamax") / "_assets" / "beamax.mplstyle"
-    plt.style.use(str(style_path))
+    plt.rcParams.update(
+        {
+            "figure.dpi": 120,
+            "savefig.dpi": 180,
+            "axes.grid": True,
+            "grid.alpha": 0.25,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.titlesize": "medium",
+            "axes.labelsize": "medium",
+            "legend.frameon": False,
+            "image.cmap": "viridis",
+        }
+    )
 
 
 class PlotHelper:
@@ -1221,7 +1227,7 @@ def animate_wavefield_2d(data, skip_frames=1, cmap="viridis", label="", timestep
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(label)
 
-    # Set the title placeholder
+    # Keep a title artist for frame updates.
     title = ax.set_title("")
 
     def update_plot(frame):
@@ -1310,7 +1316,7 @@ def animate_wavefield(data, skip_frames=1, cmap="viridis"):
 
 
 def plot_wavefields_interactive(
-    p0_kwave_all,
+    reference_all,
     p0_msgb_all,
     ts,
     domain: Domain,
@@ -1319,12 +1325,12 @@ def plot_wavefields_interactive(
     fixed_diff_colorbar=False,
 ):
     """
-    Interactive comparison between K-Wave and MSGB wavefields.
+    Interactive comparison between Reference and MSGB wavefields.
 
     Parameters
     ----------
-    p0_kwave_all : jnp.ndarray
-        Wavefield sequence from the K-Wave solver `(Nt, ...)`.
+    reference_all : jnp.ndarray
+        Wavefield sequence from the Reference solver `(Nt, ...)`.
     p0_msgb_all : jnp.ndarray
         Wavefield sequence from the MSGB solver `(Nt, ...)`.
     ts : jnp.ndarray
@@ -1340,22 +1346,24 @@ def plot_wavefields_interactive(
     """
     fig = plt.figure(figsize=(18, 12))
 
-    if len(p0_kwave_all.shape) == 2:
+    if len(reference_all.shape) == 2:
         X = domain.generate_meshgrid()[0][0]
     else:
         X, Y = domain.generate_meshgrid()[0]
     time_index = 0
-    difference = p0_kwave_all[time_index] - p0_msgb_all[time_index]
+    difference = reference_all[time_index] - p0_msgb_all[time_index]
 
     # Calculate global min and max for the differences across all time points if fixed_diff_colorbar is True
     if fixed_diff_colorbar:
-        global_min_diff = jnp.min(p0_kwave_all - p0_msgb_all)
-        global_max_diff = jnp.max(p0_kwave_all - p0_msgb_all)
+        global_min_diff = jnp.min(reference_all - p0_msgb_all)
+        global_max_diff = jnp.max(reference_all - p0_msgb_all)
 
-    if len(p0_kwave_all.shape) == 2:
+    if len(reference_all.shape) == 2:
         axs = [fig.add_subplot(1, 3, i + 1) for i in range(3)]
 
-        (im_kwave,) = axs[0].plot(X.flatten(), p0_kwave_all[time_index], color="blue")
+        (im_reference,) = axs[0].plot(
+            X.flatten(), reference_all[time_index], color="blue"
+        )
         (im_msgb,) = axs[1].plot(X.flatten(), p0_msgb_all[time_index], color="orange")
         (im_diff,) = axs[2].plot(X.flatten(), difference, color="red")
 
@@ -1366,10 +1374,10 @@ def plot_wavefields_interactive(
             axs = [fig.add_subplot(1, 3, i + 1) for i in range(3)]
 
         if plot_type == "imshow":
-            im_kwave = axs[0].imshow(
-                p0_kwave_all[time_index], extent=[X.min(), X.max(), Y.min(), Y.max()]
+            im_reference = axs[0].imshow(
+                reference_all[time_index], extent=[X.min(), X.max(), Y.min(), Y.max()]
             )
-            plt.colorbar(im_kwave, ax=axs[0], orientation="horizontal", pad=0.15)
+            plt.colorbar(im_reference, ax=axs[0], orientation="horizontal", pad=0.15)
 
             im_msgb = axs[1].imshow(
                 p0_msgb_all[time_index], extent=[X.min(), X.max(), Y.min(), Y.max()]
@@ -1387,10 +1395,10 @@ def plot_wavefields_interactive(
                 im_diff.set_clim(vmin=global_min_diff, vmax=global_max_diff)
 
         else:
-            surf_kwave = axs[0].plot_surface(
-                X, Y, p0_kwave_all[time_index], cmap="viridis"
+            surf_reference = axs[0].plot_surface(
+                X, Y, reference_all[time_index], cmap="viridis"
             )
-            fig.colorbar(surf_kwave, ax=axs[0], orientation="horizontal", pad=0.15)
+            fig.colorbar(surf_reference, ax=axs[0], orientation="horizontal", pad=0.15)
 
             surf_msgb = axs[1].plot_surface(
                 X, Y, p0_msgb_all[time_index], cmap="viridis"
@@ -1406,7 +1414,7 @@ def plot_wavefields_interactive(
                 surf_diff.set_clim(vmin=global_min_diff, vmax=global_max_diff)
                 diff_colorbar.update_normal(surf_diff)
 
-        axs[0].set_title(f"K-Wave Solution at t={ts[time_index]:.2e}s")
+        axs[0].set_title(f"Reference Solution at t={ts[time_index]:.2e}s")
         axs[1].set_title(f"MSGB Solution at t={ts[time_index]:.2e}s")
         axs[2].set_title(f"Difference\nat t={ts[time_index]:.2e}s")
 
@@ -1446,14 +1454,14 @@ def plot_wavefields_interactive(
         time_index : int
             Index into ``ts`` and both wavefield sequences.
         """
-        difference = p0_kwave_all[time_index] - p0_msgb_all[time_index]
-        if len(p0_kwave_all.shape) == 2:  # Handle 1D data
-            im_kwave.set_ydata(p0_kwave_all[time_index])
+        difference = reference_all[time_index] - p0_msgb_all[time_index]
+        if len(reference_all.shape) == 2:  # Handle 1D data
+            im_reference.set_ydata(reference_all[time_index])
             im_msgb.set_ydata(p0_msgb_all[time_index])
             im_diff.set_ydata(difference)
 
             axs[0].set_ylim(
-                p0_kwave_all[time_index].min(), p0_kwave_all[time_index].max()
+                reference_all[time_index].min(), reference_all[time_index].max()
             )
             axs[1].set_ylim(
                 p0_msgb_all[time_index].min(), p0_msgb_all[time_index].max()
@@ -1464,7 +1472,7 @@ def plot_wavefields_interactive(
                 axs[2].set_ylim(difference.min(), difference.max())
 
         elif plot_type == "imshow":
-            im_kwave.set_data(p0_kwave_all[time_index])
+            im_reference.set_data(reference_all[time_index])
             im_msgb.set_data(p0_msgb_all[time_index])
 
             im_diff.set_data(difference)
@@ -1478,7 +1486,7 @@ def plot_wavefields_interactive(
             axs[1].clear()
             axs[2].clear()
 
-            axs[0].plot_surface(X, Y, p0_kwave_all[time_index], cmap="viridis")
+            axs[0].plot_surface(X, Y, reference_all[time_index], cmap="viridis")
             axs[1].plot_surface(X, Y, p0_msgb_all[time_index], cmap="viridis")
 
             surf_diff = axs[2].plot_surface(X, Y, difference, cmap="coolwarm")
@@ -1490,7 +1498,7 @@ def plot_wavefields_interactive(
             else:
                 axs[2].set_zlim(difference.min(), difference.max())
 
-        axs[0].set_title(f"K-Wave Solution\nat t={ts[time_index]:.2e}s")
+        axs[0].set_title(f"Reference Solution\nat t={ts[time_index]:.2e}s")
         axs[1].set_title(f"MSGB Solution\nat t={ts[time_index]:.2e}s")
         axs[2].set_title(f"Difference\nat t={ts[time_index]:.2e}s")
 
@@ -1534,7 +1542,7 @@ def plot_wavefields_interactive(
 
 
 def plot_wavefields_interactive_wpt(
-    p0_kwave_all,
+    reference_all,
     p0_msgb_all,
     ts,
     domain: Domain,
@@ -1549,8 +1557,8 @@ def plot_wavefields_interactive_wpt(
 
     Parameters
     ----------
-    p0_kwave_all : jnp.ndarray
-        Wavefield sequence from the K-Wave solver `(Nt, ...)`.
+    reference_all : jnp.ndarray
+        Wavefield sequence from the Reference solver `(Nt, ...)`.
     p0_msgb_all : jnp.ndarray
         Wavefield sequence from the MSGB solver `(Nt, ...)`.
     ts : jnp.ndarray
@@ -1568,37 +1576,37 @@ def plot_wavefields_interactive_wpt(
     """
     fig = plt.figure(figsize=(18, 12))
 
-    # Create subplots for wavefields (kwave, msgb, difference, wpt coefficients)
-    ax_wavefield_kwave = fig.add_subplot(2, 3, 1)
+    # Create subplots for wavefields (reference, msgb, difference, wpt coefficients)
+    ax_wavefield_reference = fig.add_subplot(2, 3, 1)
     ax_wavefield_msgb = fig.add_subplot(2, 3, 2)
     ax_wavefield_wpt = fig.add_subplot(2, 3, 3)
 
-    if len(p0_kwave_all.shape) == 2:
+    if len(reference_all.shape) == 2:
         X = domain.generate_meshgrid()[0][0]
     else:
         X, Y = domain.generate_meshgrid()[0]
     time_index = 0
 
-    if len(p0_kwave_all.shape) == 2:  # 1D case
-        im_kwave = ax_wavefield_kwave.plot(
-            X.flatten(), p0_kwave_all[time_index], color="blue"
+    if len(reference_all.shape) == 2:  # 1D case
+        im_reference = ax_wavefield_reference.plot(
+            X.flatten(), reference_all[time_index], color="blue"
         )[0]
         im_msgb = ax_wavefield_msgb.plot(
             X.flatten(), p0_msgb_all[time_index], color="orange"
         )[0]
     else:  # 2D case
-        im_kwave = ax_wavefield_kwave.imshow(
-            p0_kwave_all[time_index], extent=[X.min(), X.max(), Y.min(), Y.max()]
+        im_reference = ax_wavefield_reference.imshow(
+            reference_all[time_index], extent=[X.min(), X.max(), Y.min(), Y.max()]
         )
         im_msgb = ax_wavefield_msgb.imshow(
             p0_msgb_all[time_index], extent=[X.min(), X.max(), Y.min(), Y.max()]
         )
 
-        plt.colorbar(im_kwave, ax=ax_wavefield_kwave)
+        plt.colorbar(im_reference, ax=ax_wavefield_reference)
         plt.colorbar(im_msgb, ax=ax_wavefield_msgb)
 
     # Set titles for wavefield plots
-    ax_wavefield_kwave.set_title(f"K-Wave Solution at t={ts[time_index]:.2e}s")
+    ax_wavefield_reference.set_title(f"Reference Solution at t={ts[time_index]:.2e}s")
     ax_wavefield_msgb.set_title(f"MSGB Solution at t={ts[time_index]:.2e}s")
     ax_wavefield_wpt.set_title(f"MSWPT Coefficients at t={ts[time_index]:.2e}s")
 
@@ -1634,11 +1642,11 @@ def plot_wavefields_interactive_wpt(
         time_index : int
             Index into ``ts`` and both wavefield sequences.
         """
-        if len(p0_kwave_all.shape) == 2:  # 1D case
-            im_kwave.set_ydata(p0_kwave_all[time_index])
+        if len(reference_all.shape) == 2:  # 1D case
+            im_reference.set_ydata(reference_all[time_index])
             im_msgb.set_ydata(p0_msgb_all[time_index])
         else:  # 2D case
-            im_kwave.set_data(p0_kwave_all[time_index])
+            im_reference.set_data(reference_all[time_index])
             im_msgb.set_data(p0_msgb_all[time_index])
 
     def next_step(event):
