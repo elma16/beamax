@@ -6,7 +6,7 @@ Examples illustrating beamax's dyadic frequency tilings and the multiscale wave-
 
 ## Wave packet frame atoms
 
-Render the MSWPT frame atoms for a given dyadic decomposition, illustrating the multiscale tiling.
+Render the MSWPT frame atoms for a given dyadic decomposition, illustrating the dyadic multiscale tiling.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomposition/wave_packet_frame_atoms.ipynb)
 
