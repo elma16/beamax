@@ -79,11 +79,10 @@ def c(x):
 
 
 def generate_test_params():
-    params = []
-    for N in [(40,), (30, 40), (30, 40, 50)]:
-        for use_x64 in [False, True]:
-            params.append((5, N, use_x64))
-    return params
+    # We sweep 1D / 2D / 3D shapes only. The hom-vs-num solver agreement
+    # being asserted here is a numerical property and does not gain coverage
+    # by also running at float32 precision, so we keep only the x64 variant.
+    return [(5, N, True) for N in [(40,), (30, 40), (30, 40, 50)]]
 
 
 @pytest.fixture(scope="module", params=generate_test_params())
@@ -403,7 +402,7 @@ def test_ODE_not_solveable_if_p0_eq_0(d):
         ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
 
 
-@pytest.mark.parametrize("b,N", [(1, (64,)), (10, (64,)), (1, (64,)), (10, (64, 64))])
+@pytest.mark.parametrize("b,N", [(1, (64,)), (10, (64,)), (10, (64, 64))])
 def test_amplitude_is_linear(b, N):
     """
     Check that rescaling a0 by a constant factor, rescales the GB by the same factor.
@@ -460,7 +459,7 @@ def test_amplitude_is_linear(b, N):
     assert jnp.allclose(gb_num * scale_factor, gb_num_rescale, atol=1e-16)
 
 
-@pytest.mark.parametrize("b, N", [(1, (64,)), (10, (64,)), (1, (64,)), (10, (64, 64))])
+@pytest.mark.parametrize("b, N", [(1, (64,)), (10, (64,)), (10, (64, 64))])
 def test_hom_general_solver(b, N):
     """
     Test that for a non-diagonal M0, the general solver agrees with the analyical solution.

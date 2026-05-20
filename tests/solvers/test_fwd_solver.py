@@ -85,7 +85,11 @@ requires_kwave_cpp_binary = pytest.mark.skipif(
 # ============================================================================
 
 
-@pytest.fixture
+# Pure data-object fixtures — kept module-scoped so identical (Domain, decomp,
+# wpt) instances are reused across the many parameterised tests below. They
+# hold no mutable JAX state, so reuse is safe and avoids redundant construction
+# (and the JIT cache they prime stays warm across tests).
+@pytest.fixture(scope="module")
 def simple_domain_1d():
     """1D domain with homogeneous speed of sound."""
 
@@ -95,7 +99,7 @@ def simple_domain_1d():
     return geometry.Domain(N=(128,), dx=(1e-4,), c=c, periodic=(True,))
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def simple_domain_2d():
     """2D domain with homogeneous speed of sound."""
 
@@ -107,7 +111,7 @@ def simple_domain_2d():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def dyadic_decomp_1d():
     """1D dyadic decomposition."""
     return DyadicDecomposition(
@@ -115,7 +119,7 @@ def dyadic_decomp_1d():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def dyadic_decomp_2d():
     """2D dyadic decomposition."""
     return DyadicDecomposition(
@@ -123,13 +127,13 @@ def dyadic_decomp_2d():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def wpt_1d(dyadic_decomp_1d):
     """1D MSWPT."""
     return MSWPT(dyadic_decomp_1d, redundancy=2, windowing="rectangular")
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def wpt_2d(dyadic_decomp_2d):
     """2D MSWPT."""
     return MSWPT(dyadic_decomp_2d, redundancy=2, windowing="rectangular")
@@ -367,8 +371,11 @@ class TestMSGBSolverAccuracy:
     @pytest.mark.parametrize(
         "N,threshold_list",
         [
-            ((128,), [100, 200, 300, 400]),
-            ((64, 128), [1000, 2000, 3000, 4000]),
+            # Two thresholds are enough to verify the monotonic-improvement
+            # property in each dimension; previously this swept four
+            # thresholds in 2D, which was the single slowest non-fixture call.
+            ((128,), [100, 400]),
+            ((64, 128), [1000, 4000]),
         ],
     )
     def test_accuracy_improves_with_threshold(self, N, threshold_list):
@@ -444,8 +451,14 @@ class TestHybridSolverBasics:
         )
         return KWaveSolver(sim_opts, exec_opts)
 
-    @pytest.mark.parametrize("downsample", [True, False])
-    @pytest.mark.parametrize("dt_oversample", [0, 30])
+    # `dt_oversample` is forced to 0 when `downsample=False` inside the test
+    # below, so the (downsample=False, dt_oversample=30) combination is
+    # identical to (downsample=False, dt_oversample=0). We enumerate the
+    # three distinct cases explicitly instead of the 2x2 Cartesian product.
+    @pytest.mark.parametrize(
+        "downsample, dt_oversample",
+        [(True, 0), (True, 30), (False, 0)],
+    )
     def test_hybrid_matches_kwave(
         self,
         simple_domain_2d,

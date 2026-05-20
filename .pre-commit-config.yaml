@@ -39,7 +39,7 @@ repos:
           tests/test_transforms.py
           tests/solvers/test_fwd_solver.py::TestMSGBSolverFrameEquivalence::test_frame_reconstruction_matches_gb_solver
           tests/solvers/test_fwd_solver.py::test_hybrid_downsample
-          tests/solvers/test_tr_solver.py::test_msgb_forward_then_time_reversal_1d
+          tests/solvers/test_sharding.py::test_msgb_forward_then_time_reversal_1d
           tests/solvers/test_kwave_solver.py::test_kwave_matches_matlab_reference
           tests/solvers/test_kwave_solver.py::test_kwave_adjoint_dot_product
         language: system
