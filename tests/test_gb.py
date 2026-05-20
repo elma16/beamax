@@ -840,5 +840,198 @@ def test_riccati_2d_linear_c_matches_textbook_form():
     )
 
 
+# ============================================================================
+# Tests for surface-event ODE solvers and the (Q, P) variant
+# ============================================================================
+
+
+def _constant_c(_x):
+    """Homogeneous c=1 sound speed used by the surface tests."""
+    return jnp.array(1.0)
+
+
+def test_compute_amp_hom_diag_dispatch_rejects_d_ge_4():
+    """compute_amp_hom_diag must error out for spatial dimension >= 4."""
+    b = 2
+    d = 4
+    p0 = jnp.ones((b, d))
+    normp = jnp.linalg.norm(p0, axis=-1, keepdims=True)
+    alpha0 = jnp.ones((b, d), dtype=jnp.complex128) * 1j
+    c0 = jnp.ones((b, 1))
+    ts = jnp.linspace(0.0, 0.1, 5)
+    a0 = jnp.ones((b,), dtype=jnp.complex128)
+
+    with pytest.raises(ValueError, match="1D, 2D and 3D"):
+        gb_solvers.compute_amp_hom_diag(p0, normp, alpha0, c0, ts, a0)
+
+
+def test_solve_ODE_intersection_planar_surface_1d():
+    """In 1D with c=1 and a planar surface x=L, the beam should intersect at t=L/c.
+
+    `solve_ODE_intersection` is vmapped over the beam axis, so all per-beam
+    inputs must carry a leading batch dimension.
+    """
+    b, d = 1, 1
+    L = 0.5
+    x0 = jnp.array([[0.0]], dtype=jnp.float64)
+    p0 = jnp.array([[1.0]], dtype=jnp.float64)  # heading +x with c=1
+    M0 = jnp.array([[[0.1j]]], dtype=jnp.complex128)
+    a0 = jnp.array([[1.0 + 0.0j]], dtype=jnp.complex128)  # (b, 1)
+    mode = jnp.ones((b,), dtype=jnp.float64)
+    ts = jnp.linspace(0.0, 1.0, 64)
+
+    def surface(x):
+        return x[0] - L
+
+    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
+    xt, pt, Mt, At, t_int = gb_solvers.solve_ODE_intersection(
+        x0, p0, M0, a0, mode, ts, _constant_c, 0.0, surface, cfg
+    )
+
+    # With c=1 and |p|=1 the ray speed is c=1 so hit time is L.
+    assert jnp.all(jnp.isfinite(t_int))
+    assert float(jnp.abs(t_int[0] - L)) < 1e-4
+    assert xt.shape == (b, len(ts), d)
+
+
+def test_solve_ODE_intersection_no_hit_returns_inf():
+    """If the surface is unreachable in [t0, t1], t_int should be inf, not a fake hit."""
+    b = 1
+    x0 = jnp.array([[0.0]], dtype=jnp.float64)
+    p0 = jnp.array([[1.0]], dtype=jnp.float64)
+    M0 = jnp.array([[[0.1j]]], dtype=jnp.complex128)
+    a0 = jnp.array([[1.0 + 0.0j]], dtype=jnp.complex128)
+    mode = jnp.ones((b,), dtype=jnp.float64)
+    # Time window 0..0.1 — ray only reaches x=0.1 but surface is at x=5.0
+    ts = jnp.linspace(0.0, 0.1, 32)
+
+    def surface(x):
+        return x[0] - 5.0
+
+    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
+    _, _, _, _, t_int = gb_solvers.solve_ODE_intersection(
+        x0, p0, M0, a0, mode, ts, _constant_c, 0.0, surface, cfg
+    )
+    # Either inf (failed root solve) or at least beyond the chosen window.
+    assert jnp.isinf(t_int[0]) or float(t_int[0]) >= ts[-1] - 1e-6
+
+
+def test_solve_ODE_first_hit_planar_event_1d():
+    """1D ray with c=1 should trigger the event when it hits the planar surface."""
+    L = 0.4
+    x0 = jnp.array([[0.0]], dtype=jnp.float64)
+    p0 = jnp.array([[1.0]], dtype=jnp.float64)
+    M0 = jnp.array([[[0.1j]]], dtype=jnp.complex128)
+    a0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
+    mode = jnp.array([1], dtype=jnp.float64)
+    ts = jnp.linspace(0.0, 1.0, 64)
+
+    def surface(x):
+        return x[0] - L
+
+    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
+    xt, pt, Mt, At, t_hit, hit = gb_solvers.solve_ODE_first_hit(
+        x0[0], p0[0], M0[0], a0[0:1], mode[0], ts, _constant_c, 0.0, surface, cfg
+    )
+
+    assert bool(hit) is True
+    assert float(jnp.abs(t_hit - L)) < 1e-3
+    # Final-state-only output shape: (1 beam, 1 time, d)
+    assert xt.shape[-1] == 1
+    assert Mt.shape[-2:] == (1, 1)
+
+
+def test_solve_ODE_first_hit_no_event_returns_endpoint():
+    """When the ray never reaches the surface, the integrator should run to t1."""
+    L = 5.0
+    x0 = jnp.array([[0.0]], dtype=jnp.float64)
+    p0 = jnp.array([[1.0]], dtype=jnp.float64)
+    M0 = jnp.array([[[0.1j]]], dtype=jnp.complex128)
+    a0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
+    mode = jnp.array([1], dtype=jnp.float64)
+    ts = jnp.linspace(0.0, 0.1, 32)
+
+    def surface(x):
+        return x[0] - L
+
+    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
+    _, _, _, _, t_hit, hit = gb_solvers.solve_ODE_first_hit(
+        x0[0], p0[0], M0[0], a0[0:1], mode[0], ts, _constant_c, 0.0, surface, cfg
+    )
+    assert bool(hit) is False
+    assert float(jnp.abs(t_hit - ts[-1])) < 1e-9
+
+
+def test_solve_ODE_QP_base_matches_M_base_1d_homogeneous():
+    """In a homogeneous 1D medium, the QP-form solver should reproduce the M-form solver.
+
+    This is a strong cross-check on the (Q, P) ODE construction: with M = P Q⁻¹
+    and Q(0)=I, P(0)=M0, the (Q,P) propagation must yield the same M trajectory.
+    """
+    b = 1
+    ts = jnp.linspace(0.0, 0.5, 64)
+    x0 = jnp.array([[0.05]], dtype=jnp.float64)
+    p0 = jnp.array([[1.0]], dtype=jnp.float64)
+    M0 = jnp.array([[[0.2j]]], dtype=jnp.complex128)
+    A0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
+    mode = jnp.ones((b,), dtype=jnp.int32)
+    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
+
+    xt_M, pt_M, Mt_M, At_M = gb_solvers.solve_ODE_base(
+        x0, p0, M0, A0, mode, ts, _constant_c, 0.0, cfg
+    )
+    xt_Q, pt_Q, Mt_Q, At_Q = gb_solvers.solve_ODE_QP_base(
+        x0, p0, M0, A0, mode, ts, _constant_c, 0.0, cfg
+    )
+
+    # Positions and momenta must agree to high precision.
+    assert jnp.allclose(xt_M, xt_Q, atol=1e-8, rtol=1e-6)
+    assert jnp.allclose(pt_M, pt_Q, atol=1e-8, rtol=1e-6)
+    # M may have some numerical drift in QP form; allow a looser tolerance.
+    assert jnp.allclose(Mt_M, Mt_Q, atol=1e-6, rtol=1e-4)
+
+
+def test_solve_ODE_QP_base_2d_homogeneous_diagonal_M0():
+    """In 2D homogeneous c=1, QP-form should preserve diagonal Hessian structure."""
+    b, d = 1, 2
+    ts = jnp.linspace(0.0, 0.1, 32)
+    x0 = jnp.array([[0.05, 0.0]], dtype=jnp.float64)
+    p0 = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
+    M0 = jnp.array([[[0.2j, 0.0j], [0.0j, 0.5j]]], dtype=jnp.complex128)
+    A0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
+    mode = jnp.ones((b,), dtype=jnp.int32)
+    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
+
+    xt, pt, Mt, At = gb_solvers.solve_ODE_QP_base(
+        x0, p0, M0, A0, mode, ts, _constant_c, 0.0, cfg
+    )
+
+    assert xt.shape == (b, len(ts), d)
+    assert Mt.shape == (b, len(ts), d, d)
+    # Initial condition recovered exactly at t=0.
+    assert jnp.allclose(Mt[0, 0], M0[0], atol=1e-10)
+
+
+def test_solver_config_dt0_override():
+    """SolverConfig.dt0 should override the time-grid-derived dt0 inside solvers."""
+    b, d = 1, 1
+    ts = jnp.linspace(0.0, 0.1, 16)
+    x0 = jnp.array([[0.05]], dtype=jnp.float64)
+    p0 = jnp.array([[1.0]], dtype=jnp.float64)
+    M0 = jnp.array([[[0.2j]]], dtype=jnp.complex128)
+    A0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
+    mode = jnp.ones((b,), dtype=jnp.int32)
+
+    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True, dt0=1e-4)
+    assert cfg.dt0 == 1e-4
+
+    # Solver should still run and produce a sane trajectory with a fixed dt0.
+    xt, _, _, _ = gb_solvers.solve_ODE_base(
+        x0, p0, M0, A0, mode, ts, _constant_c, 0.0, cfg
+    )
+    assert xt.shape == (b, len(ts), d)
+    assert jnp.all(jnp.isfinite(xt))
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

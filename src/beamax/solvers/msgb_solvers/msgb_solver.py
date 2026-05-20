@@ -987,9 +987,12 @@ class MSGBSolver(eqx.Module):
         # ------------------------------------------------------------------
 
         # data is r(t, x_s) on [0, T]; we construct F(t, x_s) ≈ ∂_t r(T - t, x_s)
-        # using a simple finite-difference in time.
+        # using a simple finite-difference in time. The c(x_s) prefactor is
+        # evaluated at the source/acquisition geometry (not the reconstruction
+        # eval grid), and broadcasts across the time axis of `data`.
         dt = float(data_domain.dx[0])
-        r = data * domain.c_fn(sensor_positions)[0, :]
+        c_at_sources = domain.c_fn(sources.positions)
+        r = data * c_at_sources
         source = jnp.gradient(r, dt, axis=0)
 
         # ------------------------------------------------------------------

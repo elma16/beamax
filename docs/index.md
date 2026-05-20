@@ -16,7 +16,7 @@ Simulating the acoustic wave equation on large, smoothly varying media is expens
 - **`beamax.gb`** — low-level Gaussian beam kernels and ODE solvers for ray trajectories and amplitude evolution.
 - **`beamax.solvers`** — high-level solver classes (`MSGBSolver`, `HybridSolver`, optional `KWaveSolver` and FNO adapters) sharing a common interface for forward, adjoint, and time-reversal operations.
 - **`beamax.plotter`** — matplotlib / pyvista helpers for wavefields, beam trajectories, and MSWPT coefficients.
-- **`beamax.utils`** — FFT/interpolation primitives, device placement, profiling, OA-Breast phantom loader.
+- **`beamax.utils`** — FFT/interpolation primitives, device placement, and coefficient-indexing helpers.
 
 ## Start here
 

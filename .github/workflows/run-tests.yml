@@ -43,6 +43,7 @@ jobs:
         with:
           files: ./coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
+          flags: main
           fail_ci_if_error: false
 
       - name: Run example smoke tests
@@ -66,4 +67,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,fno]"
       - name: Run FNO smoke tests
-        run: pytest -q tests/solvers/test_fno_solver.py
+        run: pytest --cov=src/beamax --cov-report=xml -q tests/solvers/test_fno_solver.py
+
+      - name: Upload FNO coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: fno
+          fail_ci_if_error: false

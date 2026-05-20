@@ -106,4 +106,5 @@ branch = true
 [tool.coverage.report]
 omit = [
   "src/beamax/solvers/solverbase.py",
+  "src/beamax/plotter.py",
 ]

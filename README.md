@@ -135,7 +135,6 @@ Each notebook in `examples/` carries an **Open in Colab** badge. The public gall
 Other optional environment variables:
 
 - `BEAMAX_ROOT` — override the detected repository root (used by examples to locate `plots/`).
-- `BEAMAX_PROFILE=1` — enable timing/memory instrumentation in `beamax.utils.profiling`.
 
 ## Documentation
 

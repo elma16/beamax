@@ -5,34 +5,18 @@ from beamax import utils
 from beamax.utils.interp import make_c_function_from_grid, Interpolator
 from beamax.geometry import Domain
 from beamax.decomposition import DyadicDecomposition
-import h5py
-import numpy as np
-import tempfile
-import os
 import beamax.utils.device as device_utils
-from beamax.utils.oabreast import (
-    load_oabreast_p0_c,
-    _effective_spacing_after_shape_resample,
-    _ensure_axis_order_zyx,
-)
 from beamax.utils.device import memory_estimate, array_str, detect_root
-from beamax.utils.misc import (
+from beamax.utils.arrays import (
     pad_zero,
     pad_edge,
-    ellipsoid_superposition,
-    find_closest_center_indices,
+    pad_array,
     rel_l2,
-    choose_K_by_tau,
-    select_levelaware_topK_indices,
-    reconstruct_from_selection,
-)
-from beamax.transforms import MSWPT
-from beamax.utils.misc import (
     _center_slices,
-    _rand_rot,
     crop_centered,
     interpolate_fourier,
 )
+from beamax.transforms import MSWPT
 
 jax.config.update("jax_enable_x64", True)
 
@@ -93,52 +77,6 @@ def test_crop_centered_behaviour():
     small = jnp.arange(12).reshape(3, 4)
     no_op = crop_centered(small, (4, 4))
     assert no_op.shape == small.shape and jnp.all(no_op == small)
-
-
-# --------------------------- _rand_rot ----------------------------
-
-
-def test_rand_rot_returns_rotations_d1_d2_d3():
-    key = jax.random.PRNGKey(0)
-
-    # d=1 → identity for any K
-    R1 = _rand_rot(key, d=1, K=3)
-    assert R1.shape == (3, 1, 1)
-    assert jnp.allclose(R1, jnp.ones_like(R1))
-
-    # d=2 → orthogonal, det ~ +1
-    R2 = _rand_rot(key, d=2, K=5)
-    assert R2.shape == (5, 2, 2)
-    I2 = jnp.einsum("bij,bjk->bik", jnp.swapaxes(R2, -1, -2), R2)
-    assert jnp.allclose(I2, jnp.eye(2)[None, :, :], atol=1e-6)
-    det2 = jnp.linalg.det(R2)
-    assert jnp.all(det2 > 0.0)
-
-    # d=3 → orthogonal, det ~ +1
-    R3 = _rand_rot(key, d=3, K=4)
-    assert R3.shape == (4, 3, 3)
-    I3 = jnp.einsum("bij,bjk->bik", jnp.swapaxes(R3, -1, -2), R3)
-    assert jnp.allclose(I3, jnp.eye(3)[None, :, :], atol=1e-6)
-    det3 = jnp.linalg.det(R3)
-    assert jnp.all(det3 > 0.0)
-
-
-def test_ellipsoid_superposition_gaussian_and_indicator():
-    key = jax.random.PRNGKey(123)
-
-    # 2D gaussian
-    f2_gauss, meta2 = ellipsoid_superposition(
-        key, (16, 16), n_ellipses=3, profile="gaussian", nonnegative=True
-    )
-    assert f2_gauss.shape == (16, 16)
-    assert jnp.all(f2_gauss >= 0)
-
-    # 1D indicator
-    f1_ind, meta1 = ellipsoid_superposition(
-        key, (32,), n_ellipses=2, profile="indicator", nonnegative=True
-    )
-    assert f1_ind.shape == (32,)
-    assert jnp.all((f1_ind == 0) | (f1_ind > 0))
 
 
 # ----------------------- interpolate_fourier ---------------------
@@ -285,27 +223,6 @@ def test_make_c_function_from_grid_and_derivs():
     assert Fb.shape == (2,)
 
 
-def test_load_oabreast_2d_variants(tmp_path):
-    # build tiny 3D labels with values {0,3,4}
-    lbl = np.zeros((4, 4, 4), dtype=np.uint8)
-    lbl[1:3, 1:3, 1:3] = 3
-    lbl[2, 2, 2] = 4
-    f = tmp_path / "ph.h5"
-    with h5py.File(f, "w") as h:
-        h.create_dataset("MergedPhantom", data=lbl)
-    p0, c, meta = load_oabreast_p0_c(
-        f,
-        dim="2d",
-        axis_order="ZYX",
-        slice_axis=0,
-        slice_policy="max_variance",
-        target_shape=(8, 8),
-        return_labels=False,
-    )
-    assert p0.shape == c.shape == (8, 8)
-    assert set(meta["label_set"]).issubset({0, 3, 4})
-
-
 def test_memory_helpers_and_array_str():
     x = jnp.zeros((2, 3), dtype=jnp.float32)
     s = memory_estimate(jnp.array(x.shape), x.dtype)
@@ -344,47 +261,8 @@ def test_pad_zero_and_edge():
     assert z.shape == (4, 5) and e.shape == (4, 5)
 
 
-def test_ellipsoid_superposition_shapes():
-    key = jnp.array([0, 1], dtype=jnp.uint32)  # fake PRNGKey
-    f2, _ = ellipsoid_superposition(key, (16, 16), n_ellipses=3, profile="gaussian")
-    assert f2.shape == (16, 16)
-    f1, _ = ellipsoid_superposition(key, (16,), n_ellipses=2, profile="indicator")
-    assert f1.shape == (16,)
-
-
-def test_find_closest_center_indices():
-    centers = jnp.array([[0, 0], [1, 0], [0, 1], [1, 1]])
-    idxs = find_closest_center_indices(centers, index=0, k=2)
-    assert set(map(int, idxs)) <= {0, 1, 2}
-
-
-def test_axis_order_and_spacing_helpers_and_label_checks(tmp_path):
-    A = np.arange(2 * 3 * 4, dtype=np.uint8).reshape(2, 3, 4)
-    zyx = _ensure_axis_order_zyx(A, "ZYX")
-    xyz = _ensure_axis_order_zyx(A, "XYZ")
-    assert zyx.shape == (2, 3, 4) and xyz.shape == (4, 3, 2)
-    sp = _effective_spacing_after_shape_resample((1, 1, 1), (2, 3, 4), (4, 6, 8))
-    assert sp == (0.5, 0.5, 0.5)
-
-    good = np.zeros((2, 2, 2), dtype=np.uint8)
-    good[0] = 3
-    bad = np.ones((2, 2, 2), dtype=np.uint8) * 9
-    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as f:
-        with h5py.File(f.name, "w") as h:
-            h.create_dataset("MergedPhantom", data=good)
-        p0, c, meta = load_oabreast_p0_c(f.name, dim="3d")
-        assert p0.shape == c.shape == good.shape
-    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as g:
-        with h5py.File(g.name, "w") as h:
-            h.create_dataset("MergedPhantom", data=bad)
-        with pytest.raises(ValueError):
-            load_oabreast_p0_c(g.name, dim="3d")
-    os.unlink(f.name)
-    os.unlink(g.name)
-
-
 # ============================================================================
-# Test level-aware coefficient selection
+# Shared fixtures
 # ============================================================================
 @pytest.fixture
 def simple_dyadic_decomp():
@@ -418,49 +296,6 @@ def simple_wpt(simple_dyadic_decomp):
     )
 
 
-class TestLevelAwareSelection:
-    def test_select_topk_basic(self, simple_dyadic_decomp, simple_wpt):
-        """Test basic top-K selection."""
-        # Create random coefficients
-        total_coeffs = simple_wpt.total_coeffs
-        coeffs = jax.random.normal(jax.random.PRNGKey(42), (total_coeffs,))
-
-        K = 100
-        indices, values = select_levelaware_topK_indices(
-            coeffs, simple_dyadic_decomp, simple_wpt, K
-        )
-
-        assert indices.shape[0] <= K
-        assert values.shape[0] == indices.shape[0]
-
-    def test_select_topk_zero(self, simple_dyadic_decomp, simple_wpt):
-        """Test K=0 returns empty arrays."""
-        total_coeffs = simple_wpt.total_coeffs
-        coeffs = jax.random.normal(jax.random.PRNGKey(42), (total_coeffs,))
-
-        indices, values = select_levelaware_topK_indices(
-            coeffs, simple_dyadic_decomp, simple_wpt, 0
-        )
-
-        assert indices.shape[0] == 0
-        assert values.shape[0] == 0
-
-    def test_reconstruct_from_selection(self, simple_wpt):
-        """Test reconstruction from selected coefficients."""
-        total_coeffs = simple_wpt.total_coeffs
-        coeffs = jax.random.normal(jax.random.PRNGKey(42), (total_coeffs,))
-
-        # Select some indices
-        indices = jnp.array([0, 10, 20])
-        values = coeffs[indices]
-
-        result = reconstruct_from_selection(
-            coeffs, indices, values, simple_wpt, output_type="spatial"
-        )
-
-        assert result.shape == simple_wpt.dyadic_decomp.N
-
-
 # ============================================================================
 # Test rel_l2
 # ============================================================================
@@ -492,58 +327,41 @@ class TestRelL2:
 
 
 # ============================================================================
-# Test choose_K_by_tau
+# Test small error paths in array helpers
 # ============================================================================
 
 
-class TestChooseKByTau:
-    def test_basic_search(self, simple_wpt, simple_domain):
-        """Test basic K search."""
-        # Create a simple test signal
-        p0 = jnp.ones(simple_domain.N)
-        coeffs = simple_wpt.forward(p0, "spatial")
+def test_pad_array_unsupported_mode_raises():
+    """pad_array must reject unknown modes."""
+    arr = jnp.zeros((4, 4))
+    with pytest.raises(ValueError, match="Unsupported pad mode"):
+        pad_array(arr, (6, 6), mode="reflect")
 
-        # Create inverse WPT with windowing="none"
-        inv_wpt = MSWPT(
-            simple_wpt.dyadic_decomp, redundancy=simple_wpt.redundancy, windowing="none"
-        )
 
-        K = choose_K_by_tau(
-            coeffs,
-            p0,
-            inv_wpt,
-            simple_wpt.dyadic_decomp,
-            simple_wpt,
-            tau=0.1,
-            Kmin=10,
-            Kmax=500,
-            num_steps=5,
-        )
+def test_pad_array_edge_mode():
+    """edge mode must replicate the boundary values."""
+    arr = jnp.array([1.0, 2.0, 3.0])
+    out = pad_array(arr, (5,), mode="edge")
+    assert out.shape == (5,)
+    # Centered pad: one element left, one right; both pick up the boundary value.
+    assert float(out[0]) == 1.0
+    assert float(out[-1]) == 3.0
 
-        assert 10 <= K <= 500
 
-    def test_beam_budget(self, simple_wpt, simple_domain):
-        """Test K search with beam budget."""
-        p0 = jnp.ones(simple_domain.N)
-        coeffs = simple_wpt.forward(p0, "spatial")
+def test_interpolate_fourier_invalid_input_type_raises():
+    """interpolate_fourier rejects unrecognized domain strings."""
+    arr = jnp.zeros((8, 8))
+    with pytest.raises(ValueError, match="input_type/output_type"):
+        interpolate_fourier(arr, (16, 16), input_type="time", output_type="spatial")
+    with pytest.raises(ValueError, match="input_type/output_type"):
+        interpolate_fourier(arr, (16, 16), input_type="spatial", output_type="time")
 
-        inv_wpt = MSWPT(
-            simple_wpt.dyadic_decomp, redundancy=simple_wpt.redundancy, windowing="none"
-        )
 
-        beam_budget = 100
-        K = choose_K_by_tau(
-            coeffs,
-            p0,
-            inv_wpt,
-            simple_wpt.dyadic_decomp,
-            simple_wpt,
-            tau=0.1,
-            beam_budget=beam_budget,
-        )
-
-        # K should respect beam budget
-        assert K <= beam_budget // 2
+def test_interpolate_fourier_roundtrip_spatial_to_fourier():
+    """Real-input upsample in fourier output should match plain unitary FFT padding."""
+    arr = jnp.ones((4,))
+    out = interpolate_fourier(arr, (8,), input_type="spatial", output_type="fourier")
+    assert out.shape == (8,)
 
 
 if __name__ == "__main__":
