@@ -67,7 +67,7 @@ def memory_estimate(dims: jnp.ndarray, dtype: jnp.dtype) -> str:
         Estimated memory usage.
     """
     mem = jnp.prod(dims) * jnp.dtype(dtype).itemsize
-    return _format_bytes(mem)
+    return _format_bytes(int(mem))
 
 
 def memory_str(x: jnp.ndarray) -> str:

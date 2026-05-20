@@ -108,7 +108,7 @@ print(sensor_data.shape)  # (len(ts), 128)
 The printed shape is `(number_of_time_samples, number_of_sensors)`. Because the
 sensor mask is all ones, this example records every grid point at every time.
 
-For the complete version with non-zero initial velocity and a spectral reference check, run `examples/forward/1d_forward_solve.py`.
+For a complete example that compares the MSGB forward solve against a k-Wave reference, install `beamax[kwave,viz-mpl]` and run `examples/forward/1d_forward_kwave_reference.py`.
 
 ## Running examples
 
@@ -119,13 +119,13 @@ Examples marked optional in their module docstring require additional extras
 such as `beamax[kwave,viz-mpl]` and are skipped by the default smoke suite.
 
 ```bash
-python examples/forward/1d_forward_solve.py
+python examples/forward/1d_forward_kwave_reference.py
 ```
 
 If you are running headless (CI/remote shell), disable interactive plotting:
 
 ```bash
-MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/1d_forward_solve.py
+MPLBACKEND=Agg MPLCONFIGDIR=/tmp/mplconfig python examples/forward/1d_forward_kwave_reference.py
 ```
 
 ### Google Colab

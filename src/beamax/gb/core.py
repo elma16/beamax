@@ -1,8 +1,11 @@
-import jax
-import jax.numpy as jnp
 import warnings
 from typing import Callable, Optional
-from beamax.gb.gb_solvers import SolverFn, SolverConfig
+
+import jax
+import jax.numpy as jnp
+from jaxtyping import Array, Bool, Complex, Float, Num
+
+from beamax.gb.gb_solvers import SolverConfig, SolverFn
 
 warnings.filterwarnings("ignore", module="equinox")
 
@@ -14,8 +17,10 @@ __all__ = [
 
 
 def wrap_position(
-    position: jnp.ndarray, domain_size: jnp.ndarray, periodic: jnp.ndarray
-) -> jnp.ndarray:
+    position: Float[Array, "b t d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
+) -> Float[Array, "b t d"]:
     """
     Apply periodic wrapping selectively per axis.
 
@@ -35,13 +40,13 @@ def wrap_position(
 
 
 def compute_phase(
-    xt: jnp.ndarray,
-    pt: jnp.ndarray,
-    mt: jnp.ndarray,
-    sensors: jnp.ndarray,
-    domain_size: jnp.ndarray,
-    periodic: jnp.ndarray,
-) -> jnp.ndarray:
+    xt: Float[Array, "b t d"],
+    pt: Float[Array, "b t d"],
+    mt: Complex[Array, "b t d d"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
+) -> Complex[Array, "b t *S"]:
     """
     GB phase at sensors: `(p · Δx) + 0.5 Δxᵀ M Δx`.
 
@@ -72,11 +77,11 @@ def compute_phase(
 
 
 def compute_diff(
-    xt: jnp.ndarray,
-    sensors: jnp.ndarray,
-    domain_size: jnp.ndarray,
-    periodic: jnp.ndarray,
-) -> jnp.ndarray:
+    xt: Float[Array, "b t d"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
+) -> Float[Array, "b t *S d"]:
     """
     Sensor–ray displacement with periodic wrap.
 
@@ -101,21 +106,21 @@ def compute_diff(
 
 
 def compute_gaussian_beam(
-    x0: jnp.ndarray,
-    p0: jnp.ndarray,
-    M0: jnp.ndarray,
-    a0: jnp.ndarray,
-    omega0: jnp.ndarray,
-    mode: jnp.ndarray,
-    c: Callable,
+    x0: Float[Array, "b d"],
+    p0: Float[Array, "b d"],
+    M0: Complex[Array, "b d d"],
+    a0: Complex[Array, " b"],
+    omega0: Float[Array, " b"],
+    mode: Num[Array, " b"],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
     lam: float,
-    ts: jnp.ndarray,
-    sensors: jnp.ndarray,
-    domain_size: jnp.ndarray,
-    periodic: jnp.ndarray,
+    ts: Float[Array, " Nt"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
     ode_solver: SolverFn,
     solver_config: Optional[SolverConfig] = None,
-) -> jnp.ndarray:
+) -> Complex[Array, "Nt *S b"]:
     """
     Complex GB field at sensors, keeping beam axis.
 
@@ -190,21 +195,21 @@ def safe_angle_eps(z, eps=1e-12):
 
 
 def compute_gaussian_beam_real(
-    x0,
-    p0,
-    M0,
-    a0,
-    omega0,
-    mode,
-    c,
-    lam,
-    ts,
-    sensors,
-    domain_size,
-    periodic,
-    ode_solver,
-    solver_config=None,
-):
+    x0: Float[Array, "b d"],
+    p0: Float[Array, "b d"],
+    M0: Complex[Array, "b d d"],
+    a0: Complex[Array, " b"],
+    omega0: Float[Array, " b"],
+    mode: Num[Array, " b"],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
+    lam: float,
+    ts: Float[Array, " Nt"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
+    ode_solver: SolverFn,
+    solver_config: Optional[SolverConfig] = None,
+) -> Float[Array, "Nt *S"]:
     """
     Real-valued streaming GB: scan over beams, vmap over time.
 
@@ -328,21 +333,21 @@ def compute_gaussian_beam_real(
 
 
 def compute_gaussian_beam_real_TR(
-    x0: jnp.ndarray,
-    p0: jnp.ndarray,
-    M0: jnp.ndarray,
-    a0: jnp.ndarray,
-    omega0: jnp.ndarray,
-    mode: jnp.ndarray,
-    c: Callable,
+    x0: Float[Array, "b d"],
+    p0: Float[Array, "b d"],
+    M0: Complex[Array, "b d d"],
+    a0: Complex[Array, " b"],
+    omega0: Float[Array, " b"],
+    mode: Num[Array, " b"],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
     lam: float,
-    ts: jnp.ndarray,
-    sensors: jnp.ndarray,
-    domain_size: jnp.ndarray,
-    periodic: jnp.ndarray,
+    ts: Float[Array, "b Nt"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
     ode_solver: SolverFn,
     solver_config: Optional[SolverConfig] = None,
-) -> jnp.ndarray:
+) -> Float[Array, "Nt *S b"]:
     """
     Compute a collection of Gaussian Beams in n-dimensions, assuming the resulting field is real.
 

@@ -1,8 +1,10 @@
-from jax import grad, jit, vmap
-import jax.numpy as jnp
-from typing import Optional, Callable
-from functools import partial
 import warnings
+from functools import partial
+from typing import Callable, Optional
+
+import jax.numpy as jnp
+from jax import grad, jit, vmap
+from jaxtyping import Array, Complex, Float, Num
 
 warnings.filterwarnings("ignore", module="equinox")
 
@@ -10,7 +12,12 @@ __all__ = ["G", "Gx", "Gp", "check_M0", "prepare_M0", "is_diagonal"]
 
 
 @partial(jit, static_argnames="c")
-def G(x: jnp.ndarray, p: jnp.ndarray, mode: jnp.ndarray, c: Callable) -> jnp.ndarray:
+def G(
+    x: Float[Array, "... d"],
+    p: Float[Array, "... d"],
+    mode: Num[Array, "..."],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
+) -> Float[Array, "..."]:
     """
     Hamiltonian for acoustics: `G(x,p) = mode * c(x) * ||p||`.
 
@@ -41,7 +48,12 @@ vmap_g = vmap(G, in_axes=(0, 0, 0, None))
 
 
 @partial(jit, static_argnames="c")
-def Gx(x: jnp.ndarray, p: jnp.ndarray, mode: jnp.ndarray, c: Callable) -> jnp.ndarray:
+def Gx(
+    x: Float[Array, "... d"],
+    p: Float[Array, "... d"],
+    mode: Num[Array, "..."],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
+) -> Float[Array, "... d"]:
     """
     ∂G/∂x for `G(x,p) = mode * c(x) * ||p||`.
 
@@ -65,7 +77,12 @@ vmap_gx = vmap(Gx, in_axes=(0, 0, 0, None))
 
 
 @partial(jit, static_argnames="c")
-def Gp(x: jnp.ndarray, p: jnp.ndarray, mode: jnp.ndarray, c: Callable) -> jnp.ndarray:
+def Gp(
+    x: Float[Array, "... d"],
+    p: Float[Array, "... d"],
+    mode: Num[Array, "..."],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
+) -> Float[Array, "... d"]:
     """
     ∂G/∂p for `G(x,p) = mode * c(x) * ||p||`.
 
@@ -88,7 +105,7 @@ def Gp(x: jnp.ndarray, p: jnp.ndarray, mode: jnp.ndarray, c: Callable) -> jnp.nd
 vmap_gp = vmap(Gp, in_axes=(0, 0, 0, None))
 
 
-def check_M0(M0: jnp.ndarray) -> None:
+def check_M0(M0: Complex[Array, "b d d"]) -> None:
     """
     Validate initial Hessian `M0`: symmetric and Im(M0) ≻ 0.
 
@@ -108,7 +125,10 @@ def check_M0(M0: jnp.ndarray) -> None:
         raise ValueError("Imaginary part of M0 must be positive definite.")
 
 
-def prepare_M0(alpha0: Optional[jnp.ndarray], M0: Optional[jnp.ndarray]) -> jnp.ndarray:
+def prepare_M0(
+    alpha0: Optional[Complex[Array, "b d"]],
+    M0: Optional[Complex[Array, "b d d"]],
+) -> Complex[Array, "b d d"]:
     """
     Construct/validate initial Hessian.
 
@@ -133,6 +153,7 @@ def prepare_M0(alpha0: Optional[jnp.ndarray], M0: Optional[jnp.ndarray]) -> jnp.
         raise ValueError("Provide either alpha0 or M0, but not both.")
 
     if M0 is None:
+        assert alpha0 is not None  # exclusive-or guarded above
         d = alpha0.shape[-1]
         # assert jnp.all(alpha0.imag > 0), "Imaginary part of alpha0 must be positive."
         M0 = jnp.einsum("bd,dj->bdj", alpha0, jnp.eye(d))
@@ -141,7 +162,7 @@ def prepare_M0(alpha0: Optional[jnp.ndarray], M0: Optional[jnp.ndarray]) -> jnp.
     return M0
 
 
-def is_diagonal(M0: jnp.ndarray) -> bool:
+def is_diagonal(M0: Num[Array, "b d d"]) -> Num[Array, ""]:
     """
     Test whether `M0` is diagonal (per batch).
 
@@ -151,7 +172,8 @@ def is_diagonal(M0: jnp.ndarray) -> bool:
 
     Returns
     -------
-    bool
+    jnp.ndarray
+        0-D boolean array — ``True`` when ``M0`` is diagonal.
     """
     d = M0.shape[-1]
     diag_elements = jnp.diagonal(M0, axis1=1, axis2=2)

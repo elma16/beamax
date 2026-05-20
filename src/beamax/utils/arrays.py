@@ -44,7 +44,7 @@ def interpolate_nearest(array: jnp.ndarray, new_shape: Tuple) -> jnp.ndarray:
     zoom_factors = tuple(
         [new_dim / old_dim for new_dim, old_dim in zip(new_shape, array.shape)]
     )
-    return zoom(array, zoom_factors, order=0)
+    return jnp.asarray(zoom(array, zoom_factors, order=0))
 
 
 def pad_zero(array: jnp.ndarray, desired_size: Tuple) -> jnp.ndarray:

@@ -1,23 +1,35 @@
-import jax
-from jax import vmap, lax
-from jax.lax import fori_loop
-import jax.numpy as jnp
+# Pyright otherwise flags the MSWPT eqx.Module init-set fields that follow a
+# field with a default; equinox supports this pattern at runtime via its custom
+# __init__, but pyright applies plain dataclass ordering rules.
+# pyright: reportGeneralTypeIssues=false
 import equinox as eqx
-from typing import Tuple, List
+import jax
+import jax.numpy as jnp
+from jax import lax, vmap
+from jax.lax import fori_loop
+from jaxtyping import Array, Float, Int, Num
+from typing import List, Tuple, Union
 
 from beamax import utils
 from beamax.decomposition import DyadicDecomposition
 
 
+# Per-axis grid lengths can arrive as either a (d,) array or a plain tuple of
+# ints. The function ``jnp.array(...)``s its argument anyway, so we accept both.
+DomainLength = Union[Int[Array, " d"], Tuple[int, ...]]
+
+
 def compute_windowed_gaussian(
-    centre: jnp.ndarray,
-    meshgrid: jnp.ndarray,
-    box_length: int,
-    box_aspect_ratio: jnp.ndarray,
-    domain_length: int,
+    centre: Int[Array, " d"],
+    meshgrid: Int[Array, "*N d"],
+    # Plain int when called directly; scalar Array when indexed from a vmap'd
+    # box_lengths buffer.
+    box_length,
+    box_aspect_ratio: Union[Int[Array, " d"], Tuple[int, ...]],
+    domain_length: DomainLength,
     redundancy: int,
     windowing: str,
-) -> jnp.ndarray:
+) -> Float[Array, "*N"]:
     """
     Windowed N-D Gaussian in Fourier index space.
 
@@ -69,12 +81,13 @@ def compute_windowed_gaussian(
 
 
 def single_filter_idx(
-    centre_idx: int,
-    meshgrid: jnp.ndarray,
+    # Accepts a plain int or an int array (the vmap'd call passes an array).
+    centre_idx,
+    meshgrid: Int[Array, "*N d"],
     dyadic_decomp: DyadicDecomposition,
     redundancy: int,
     windowing: str = "rectangular",
-) -> jnp.ndarray:
+) -> Float[Array, "*N"]:
     """
     Filter for a single tile (by global box index).
 
@@ -113,13 +126,13 @@ vmap_filter_idx = vmap(single_filter_idx, in_axes=(0, None, None, None, None))
 
 
 def single_filter_coord(
-    centre: jnp.ndarray,
+    centre: Int[Array, " d"],
     level: int,
-    meshgrid: jnp.ndarray,
+    meshgrid: Int[Array, "*N d"],
     dyadic_decomp: DyadicDecomposition,
     redundancy: int,
     windowing: str = "rectangular",
-) -> jnp.ndarray:
+) -> Float[Array, "*N"]:
     """
     Filter for a single tile (by `(centre, level)` pair).
 
@@ -165,7 +178,7 @@ def compute_sum_gsquare(
     dyadic_decomp: DyadicDecomposition,
     redundancy: int,
     windowing: str = "rectangular",
-) -> jnp.ndarray:
+) -> Float[Array, "*N"]:
     """
     Sum of squares of all tile filters.
 
@@ -201,7 +214,7 @@ def compute_gh_filters(
     dyadic_decomp: DyadicDecomposition,
     redundancy: int,
     windowing: str = "rectangular",
-) -> jnp.ndarray:
+) -> Tuple[Float[Array, "B *N"], Float[Array, "B *N"]]:
     """
     Compute `g` tiles and their dual `h = g / Σ g^2`.
 
@@ -234,11 +247,11 @@ def compute_gh_filters(
 def compute_frames(
     dyadic_decomp: DyadicDecomposition,
     boxidx: int,
-    k: jnp.ndarray,
-    fourier_space: jnp.ndarray,
+    k: Int[Array, " d"],
+    fourier_space: Num[Array, "*N d"],
     redundancy: int,
     windowing: str = "rectangular",
-) -> jnp.ndarray:
+) -> Num[Array, "*N"]:
     """
     Frame atom for box `boxidx` with plane-wave modulation.
 
@@ -366,7 +379,10 @@ class MSWPT(eqx.Module):
         self.redundancy = redundancy
         self.windowing = windowing
         self.sum_gsquare = self._compute_sum_gsquare()
-        self.complex_dtype = jnp.complex128 if jax.config.x64_enabled else jnp.complex64
+        # `jax.config.x64_enabled` is a dynamically-attached attribute that
+        # pyright cannot see; access it via getattr to keep the type-checker happy.
+        x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
+        self.complex_dtype = jnp.complex128 if x64_enabled else jnp.complex64
         boxes_cumsum_arr = jnp.concatenate(
             [jnp.array([0]), self.dyadic_decomp.num_boxes_ndim_cumsum]
         )
@@ -499,7 +515,9 @@ class MSWPT(eqx.Module):
 
         return packs
 
-    def _compute_coeffs(self, ft_sum_sq: jnp.ndarray) -> jnp.ndarray:
+    def _compute_coeffs(
+        self, ft_sum_sq: Num[Array, "*N"]
+    ) -> Num[Array, " total_coeffs"]:
         """
         Compute flat MSWPT coefficients level-by-level from `ft_sum_sq`.
 
@@ -597,7 +615,9 @@ class MSWPT(eqx.Module):
         return all_coeffs
 
     @eqx.filter_jit(donate="all")
-    def forward(self, data: jnp.ndarray, input_type: str) -> jnp.ndarray:
+    def forward(
+        self, data: Num[Array, "*N"], input_type: str
+    ) -> Num[Array, " total_coeffs"]:
         """
         Forward MSWPT.
 
@@ -625,7 +645,9 @@ class MSWPT(eqx.Module):
         return coeffs
 
     @eqx.filter_jit(donate="all")
-    def inverse(self, coeffs: jnp.ndarray, output_type: str) -> jnp.ndarray:
+    def inverse(
+        self, coeffs: Num[Array, " total_coeffs"], output_type: str
+    ) -> Num[Array, "*N"]:
         """
         Fast, *exact* inverse MSWPT.
 
@@ -732,7 +754,7 @@ class MSWPT(eqx.Module):
         # back to requested domain
         return utils.convert_space(ft_out, "fourier", output_type)
 
-    def convert_to_array(self, coeffs: jnp.ndarray) -> jnp.ndarray:
+    def convert_to_array(self, coeffs: Num[Array, " total_coeffs"]) -> Num[Array, "*M"]:
         """
         Reshape flat coefficients into a dense tensor arranged by spatial support.
 

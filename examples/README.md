@@ -23,8 +23,6 @@ When running locally from a checkout, that cell can be skipped.
 
 ### Forward propagation
 
-- [`1d_forward_solve.py`](forward/1d_forward_solve.py) — Forward solve with non-zero initial velocity (v0) compared to a spectral ground truth. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/1d_forward_solve.ipynb)
-- [`2d_forward_solve.py`](forward/2d_forward_solve.py) — 2D forward solve with non-zero initial velocity, compared to a spectral ground truth. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/2d_forward_solve.ipynb)
 - [`1d_forward_kwave_reference.py`](forward/1d_forward_kwave_reference.py) — Compare a compact 1D MSGB forward solve with a k-Wave strip reference. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/1d_forward_kwave_reference.ipynb)
 - [`2d_forward_kwave_reference.py`](forward/2d_forward_kwave_reference.py) — Compare a small 2D MSGB forward solve with a k-Wave boundary-sensor reference. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/2d_forward_kwave_reference.ipynb)
 

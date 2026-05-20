@@ -612,7 +612,10 @@ class SolverConfig:
 
     @classmethod
     def from_precision(
-        cls, use_x64: bool = None, solver: diffrax.AbstractSolver = None, **overrides
+        cls,
+        use_x64: Optional[bool] = None,
+        solver: Optional[diffrax.AbstractSolver] = None,
+        **overrides,
     ):
         """
         Create config with precision-appropriate tolerances.
@@ -653,7 +656,8 @@ class SolverConfig:
         """
 
         if use_x64 is None:
-            use_x64 = jax.config.x64_enabled
+            # ``jax.config.x64_enabled`` is set dynamically; pyright cannot see it.
+            use_x64 = bool(getattr(jax.config, "x64_enabled", False))
 
         # Precision-appropriate defaults
         if use_x64:
@@ -684,9 +688,11 @@ class SolverConfig:
 def ode_solver_setup(
     coupled_rhs: Callable,
     y0: jnp.ndarray,
-    t0: float,
-    t1: float,
-    dt0: float,
+    # t0 / t1 / dt0 are normally Python floats but inside a vmap over `ts` they
+    # arrive as 0-D JAX scalars; both work in diffrax.diffeqsolve.
+    t0,
+    t1,
+    dt0,
     ts: jnp.ndarray,
     args: Tuple,
     config: Optional[SolverConfig] = None,
@@ -998,7 +1004,7 @@ def solve_ODE_batch_t(
     mode: jnp.ndarray,
     ts: jnp.ndarray,
     c: Callable,
-    lam: float = None,
+    lam: Optional[float] = None,
     solver_config: Optional[SolverConfig] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
@@ -1295,6 +1301,9 @@ def solve_ODE_first_hit(
         event=event,
     )
 
+    # `sol.ts` is Optional in diffrax's type stubs but always populated for
+    # this configuration; assert to satisfy pyright without runtime change.
+    assert sol.ts is not None
     t_hit = sol.ts[-1]
     hit = bool(t_hit < t1 - 1e-9)
 

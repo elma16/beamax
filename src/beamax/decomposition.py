@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Tuple, List, Optional
+from typing import List, Optional, Tuple
 
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+from jaxtyping import Array, Float, Int
 
 
 def _all_even(N: Tuple[int, ...]) -> bool:
@@ -236,8 +237,8 @@ class DyadicDecomposition(eqx.Module):
     box_aspect_ratio: Tuple[int, ...] = eqx.field(static=True)
     boxes_per_dim_levels: Optional[Tuple[Tuple[int, ...], ...]] = eqx.field(static=True)
 
-    num_boxes_ndim: jnp.ndarray
-    centres_ndim: jnp.ndarray
+    num_boxes_ndim: Int[Array, " num_levels"]
+    centres_ndim: Int[Array, "B d"]
     total_num_boxes: int = eqx.field(static=True)
 
     def __init__(
@@ -292,12 +293,12 @@ class DyadicDecomposition(eqx.Module):
         return len(self.N)
 
     @property
-    def num_boxes_ndim_cumsum(self) -> jnp.ndarray:
+    def num_boxes_ndim_cumsum(self) -> Int[Array, " num_levels"]:
         """Cumulative ``num_boxes_ndim``; useful for indexing per-level slices of ``centres_ndim``."""
         return jnp.cumsum(self.num_boxes_ndim)
 
     @property
-    def fourier_meshgrid(self) -> jnp.ndarray:
+    def fourier_meshgrid(self) -> Int[Array, "*N d"]:
         """
         Zero-centred Fourier-index meshgrid.
 
@@ -310,7 +311,7 @@ class DyadicDecomposition(eqx.Module):
         return jnp.stack(jnp.meshgrid(*axes, indexing="ij"), axis=-1)
 
     @property
-    def scaling(self) -> jnp.ndarray:
+    def scaling(self) -> Float[Array, " d"]:
         """
         Per-axis scaling factor that maps the domain aspect ratio onto the box aspect ratio.
 
@@ -324,7 +325,7 @@ class DyadicDecomposition(eqx.Module):
         return domain_aspect / jnp.asarray(self.box_aspect_ratio)
 
     @property
-    def box_lengths(self) -> jnp.ndarray:
+    def box_lengths(self) -> Int[Array, " num_levels"]:
         """
         Box side length (in Fourier indices, along the smallest axis) at each level.
 

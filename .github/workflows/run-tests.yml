@@ -34,6 +34,12 @@ jobs:
       - name: Lint with ruff
         run: ruff check src tests tools examples
 
+      - name: Type-check with pyright
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          python -m pip install pyright
+          pyright
+
       - name: Test with pytest
         run: pytest --cov=src/beamax --cov-report=term-missing --cov-report=xml -q
 

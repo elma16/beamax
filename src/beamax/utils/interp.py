@@ -34,8 +34,8 @@ def make_c_function_from_grid(
     d = c_map.ndim
     shp = jnp.array(c_map.shape)
 
-    spacing = jnp.array(spacing if spacing is not None else (1.0,) * d)
-    origin = jnp.array(origin if origin is not None else (0.0,) * d)
+    spacing_arr = jnp.array(spacing if spacing is not None else (1.0,) * d)
+    origin_arr = jnp.array(origin if origin is not None else (0.0,) * d)
 
     def c_fun(coords: jnp.ndarray) -> jnp.ndarray:
         """
@@ -52,7 +52,7 @@ def make_c_function_from_grid(
             Interpolated grid values.
         """
         # coords: (..., d) in physical units
-        x = (coords - origin) / spacing  # (..., d) in index space
+        x = (coords - origin_arr) / spacing_arr  # (..., d) in index space
         i0 = jnp.floor(x).astype(jnp.int32)
         t = jnp.clip(x - i0, 0.0, 1.0)  # (..., d)
         i0 = jnp.clip(i0, 0, shp - 1)

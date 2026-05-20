@@ -185,7 +185,7 @@ class ZoomInterpolation(InterpolationStrategy):
             Resized array from :func:`scipy.ndimage.zoom`.
         """
         zoom_factors = tuple(o / i for o, i in zip(target_shape, data.shape))
-        return zoom(data, zoom_factors, order=self.order)
+        return jnp.asarray(zoom(data, zoom_factors, order=self.order))
 
 
 class HybridSolver(eqx.Module):
@@ -613,7 +613,7 @@ class HybridSolver(eqx.Module):
         """
         self._validate_configuration(domain)
 
-        mask = sensors.binary_mask if hasattr(sensors, "binary_mask") else sensors
+        mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors
 
         # Split into HF/LF
         p0_HF, p0_LF, ds_mask, ds_domain = self._split_frequencies(
@@ -696,7 +696,7 @@ class HybridSolver(eqx.Module):
         """
         self._validate_configuration(domain)
 
-        mask = sensors.binary_mask if hasattr(sensors, "binary_mask") else sensors
+        mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors
 
         # Split recorded data into HF/LF
         data_HF, data_LF, ds_mask, ds_domain = self._split_frequencies(
@@ -704,7 +704,10 @@ class HybridSolver(eqx.Module):
         )
         data_HF, data_LF = data_HF.real, data_LF.real
 
-        # Solve HF (in reconstruction domain)
+        # Solve HF (in reconstruction domain). MSGBSolver.time_reversal only
+        # takes the data-side wpt; `img_wpt` is unused by that path and was
+        # being passed as a stray 8th positional argument that would raise
+        # TypeError at runtime.
         if isinstance(self.hf_solver, MSGBSolver):
             hf_result = self.hf_solver.time_reversal(
                 data_HF,
@@ -714,7 +717,6 @@ class HybridSolver(eqx.Module):
                 ts,
                 data_domain,
                 data_wpt,
-                img_wpt,
             )[0]
         else:
             hf_result = self.hf_solver.time_reversal(
@@ -734,7 +736,7 @@ class HybridSolver(eqx.Module):
             sources=sources,  # Pass TR-specific parameter
         )
 
-        return hf_result + lf_result
+        return jnp.asarray(hf_result + lf_result)
 
     def adjoint(
         self,
@@ -778,7 +780,7 @@ class HybridSolver(eqx.Module):
         """
         self._validate_configuration(domain)
 
-        mask = sensors.binary_mask if hasattr(sensors, "binary_mask") else sensors
+        mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors
 
         # Split recorded data into HF/LF
         data_HF, data_LF, ds_mask, ds_domain = self._split_frequencies(

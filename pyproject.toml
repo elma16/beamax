@@ -54,6 +54,7 @@ dev = [
   "pytest-cov",
   "ruff",
   "pre-commit",
+  "pyright",
   "mkdocs",
   "mkdocs-material",
   "mkdocstrings-python",
@@ -93,7 +94,10 @@ extend-exclude = [
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
-ignore = ["E501", "E402"]
+# F722/F821: ruff/pyflakes can't parse jaxtyping shape strings like
+# ``Float[Array, "b d"]`` as Python expressions, so they're false-positives in
+# every annotated module. Per the jaxtyping docs.
+ignore = ["E501", "E402", "F722", "F821"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

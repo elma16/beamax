@@ -552,17 +552,23 @@ class MSGBSolver(eqx.Module):
 
         ats = ats * max_coeffs[:, None]
 
-        pts, Mts, xts, ωts, ats, signum, ts = utils.batch_data(
-            pts,
-            Mts,
-            xts,
-            ωts,
-            ats,
-            signum,
-            ts,
-            batch_size=self.batch_size,
-            zero_padded_args=(4,),
-        )
+        # Only reshape into (num_batches, batch_size, ...) when the downstream
+        # aggregator expects that layout. The "all" aggregator passes params
+        # straight to `solve_ODE_batch_t` whose internal vmap strips one batch
+        # axis; if we pre-batch here, that axis is mis-stripped and shapes
+        # collide inside `coupled_rhs` for d > 1.
+        if self.aggregate_method in ["scan", "vmap"]:
+            pts, Mts, xts, ωts, ats, signum, ts = utils.batch_data(
+                pts,
+                Mts,
+                xts,
+                ωts,
+                ats,
+                signum,
+                ts,
+                batch_size=self.batch_size,
+                zero_padded_args=(4,),
+            )
         return pts, Mts, xts, ωts, ats, signum, ts
 
     def _infer_planar_surface(self, sensor_positions: jnp.ndarray, eps: float = 1e-9):
@@ -681,6 +687,7 @@ class MSGBSolver(eqx.Module):
 
         # Shard across devices if sharding strategy provided
         if use_sharding:
+            assert self.sharding is not None  # implied by `use_sharding`
             params = self.sharding.shard_beam_params(*params)
 
         # Compute forward solution
@@ -785,6 +792,7 @@ class MSGBSolver(eqx.Module):
         params = self._prepare_tr_params(data, data_domain, data_wpt, sources)
 
         if use_sharding:
+            assert self.sharding is not None  # implied by `use_sharding`
             params = self.sharding.shard_tr_params(*params)
 
         p0_recon = compute_TR_result(
@@ -993,7 +1001,10 @@ class MSGBSolver(eqx.Module):
         dt = float(data_domain.dx[0])
         c_at_sources = domain.c_fn(sources.positions)
         r = data * c_at_sources
+        # `jnp.gradient(..., axis=int)` returns a single Array even though the
+        # static type is `Array | list[Array]`; assert for pyright.
         source = jnp.gradient(r, dt, axis=0)
+        assert isinstance(source, jnp.ndarray)
 
         # ------------------------------------------------------------------
         # 2. Prepare adjoint (B^{-1}F) beams using the MSWPT + symbol logic.

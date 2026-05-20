@@ -13,6 +13,7 @@ from typing import Tuple
 
 import jax.numpy as jnp
 from jax import jit, vmap
+from jaxtyping import Array, Int
 
 from beamax.decomposition import DyadicDecomposition
 
@@ -67,7 +68,7 @@ def batch_data(*args, batch_size, zero_padded_args=()):
     return tuple(batched_args)
 
 
-def find_level(dyadic_decomp: DyadicDecomposition, box_num: int) -> int:
+def find_level(dyadic_decomp: DyadicDecomposition, box_num: int) -> Int[Array, ""]:
     """
     Map global box index → dyadic level.
 
@@ -78,8 +79,10 @@ def find_level(dyadic_decomp: DyadicDecomposition, box_num: int) -> int:
 
     Returns
     -------
-    int
-        Level `ℓ` such that cumulative boxes up to `ℓ` exceed `box_num`.
+    jnp.ndarray
+        Scalar (0-D) array with the level ``ℓ`` such that cumulative boxes up
+        to ``ℓ`` exceed ``box_num``. JAX traces it as an integer scalar inside
+        JIT.
     """
     return jnp.searchsorted(dyadic_decomp.num_boxes_ndim_cumsum, box_num, side="right")
 
@@ -125,7 +128,11 @@ def find_tensor_and_multiindex(
 
 @partial(vmap, in_axes=(None, None, 0))
 def compute_coeff_shapes(
-    dyadic_decomp: DyadicDecomposition, redundancy: int, level: int
+    dyadic_decomp: DyadicDecomposition,
+    redundancy: int,
+    # `level` is the *inner* signature before vmap; callers pass an Int[Array,
+    # " L"] of level indices and the decorator strips the leading axis.
+    level,
 ) -> jnp.ndarray:
     """
     Per-level coefficient tensor shapes.
