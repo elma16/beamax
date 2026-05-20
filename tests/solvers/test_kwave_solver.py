@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 import jax
 import pytest
-import json
 from pathlib import Path
 import types
 import numpy as np
@@ -388,84 +387,10 @@ def test_cpp_binary_path_omits_default_binary_path(tmp_path, monkeypatch):
     assert "binary_path" not in kwargs
 
 
-@pytest.mark.parametrize("bad_version", ["v0.3.0rc3", "v1.4.0"])
-def test_bad_darwin_absorption_binary_is_rejected_from_metadata(
-    tmp_path, monkeypatch, bad_version
-):
-    binary = tmp_path / "kspaceFirstOrder-OMP"
-    binary.write_text("", encoding="utf-8")
-    binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
-        json.dumps(
-            {
-                "version": bad_version,
-                "url": f"https://github.com/waltsims/k-wave-omp-darwin/releases/download/{bad_version}/kspaceFirstOrder-OMP",
-            }
-        ),
-        encoding="utf-8",
-    )
-    domain = geometry.Domain(
-        N=(4, 4),
-        dx=(1.0, 1.0),
-        c=1.0,
-        periodic=(True, True),
-        alpha_coeff=1.0,
-        alpha_power=1.5,
-    )
-
-    monkeypatch.setattr(kwave_solver_module.sys, "platform", "darwin")
-
-    with pytest.raises(RuntimeError, match="known-bad"):
-        kwave_solver_module._reject_known_bad_darwin_absorption_binary(binary, domain)
-
-
-def test_v141_darwin_absorption_binary_is_allowed_from_metadata(tmp_path, monkeypatch):
-    binary = tmp_path / "kspaceFirstOrder-OMP"
-    binary.write_text("", encoding="utf-8")
-    binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
-        json.dumps(
-            {
-                "version": "v1.4.1",
-                "url": "https://github.com/waltsims/k-wave-omp-darwin/releases/download/v1.4.1/kspaceFirstOrder-OMP",
-            }
-        ),
-        encoding="utf-8",
-    )
-    domain = geometry.Domain(
-        N=(4, 4),
-        dx=(1.0, 1.0),
-        c=1.0,
-        periodic=(True, True),
-        alpha_coeff=1.0,
-        alpha_power=1.5,
-    )
-
-    monkeypatch.setattr(kwave_solver_module.sys, "platform", "darwin")
-    monkeypatch.setattr(kwave_solver_module, "_file_sha256", lambda path: "not-bad")
-
-    kwave_solver_module._reject_known_bad_darwin_absorption_binary(binary, domain)
-
-
-def test_old_darwin_absorption_binary_guard_allows_lossless_domain(
-    tmp_path, monkeypatch
-):
-    binary = tmp_path / "kspaceFirstOrder-OMP"
-    binary.write_text("", encoding="utf-8")
-    binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
-        json.dumps({"version": "v0.3.0rc3"}),
-        encoding="utf-8",
-    )
-    domain = geometry.Domain(
-        N=(4, 4),
-        dx=(1.0, 1.0),
-        c=1.0,
-        periodic=(True, True),
-        alpha_coeff=0.0,
-        alpha_power=1.5,
-    )
-
-    monkeypatch.setattr(kwave_solver_module.sys, "platform", "darwin")
-
-    kwave_solver_module._reject_known_bad_darwin_absorption_binary(binary, domain)
+# The bad-Darwin-OMP guards (and the v0.3.0rc3 / v1.4.0 SHA / metadata reject
+# helpers) were removed when k-wave-python was pinned to >=0.6.2, which no
+# longer ships those broken binaries. The corresponding regression tests are
+# removed with them.
 
 
 def test_cpp_backend_has_power_law_absorption_sensitivity():

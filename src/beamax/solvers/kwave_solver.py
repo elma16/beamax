@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional, Union, Tuple
-import hashlib
-import json
+from typing import Union, Tuple
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import time
 from io import StringIO
 from pathlib import Path
@@ -28,24 +24,22 @@ from kwave.compat import options_to_kwargs
 
 
 _KWAVE_BINARY_ENV = "BEAMAX_KWAVE_BINARY_PATH"
-_BAD_DARWIN_OMP_VERSIONS = ("v0.3.0rc3", "v1.4.0")
-_BAD_DARWIN_OMP_SHA256 = {
-    # v0.3.0rc3: old Darwin OMP build silently mishandles absorption.
-    "d6bb759dd6addcfaaee9333be61b4d31793d5d6ed3c77d384d77217e5aaee32e",
-    # v1.4.0: CMake release asset was built with fast-math before the v1.4.1 fix.
-    "fcc5adc84266379be4d4a576640197fdfcd8c308f058abc8a89a5b81d06078fb",
-}
 
 
-def _patch_cpp_simulation_stale_hdf5():
+def _patch_cpp_simulation_stale_hdf5() -> None:
     """
     Patch stale HDF5 handling in k-wave-python.
 
     Notes
     -----
-    Some k-wave-python versions do not remove stale HDF5 files before
-    writing, causing "name already exists" errors when the same temp path is
-    reused.
+    Even at k-wave-python>=0.6.2, ``CppSimulation._write_hdf5`` doesn't remove
+    a pre-existing file before writing. Reusing the same temp path across
+    multiple forward calls — which happens whenever a single ``KWaveSolver``
+    runs forward twice in a process, e.g. inside ``HybridSolver`` — then
+    fails with "name already exists". This wrapper deletes the stale file
+    first and delegates otherwise.
+
+    Idempotent: a guard attribute prevents re-patching the same class twice.
     """
     from kwave.solvers.cpp_simulation import CppSimulation
 
@@ -55,22 +49,16 @@ def _patch_cpp_simulation_stale_hdf5():
     _orig_write = CppSimulation._write_hdf5
 
     def _patched_write(self, filepath):
-        """
-        Remove an existing HDF5 file before delegating to k-Wave.
-
-        Parameters
-        ----------
-        self : kwave.solvers.cpp_simulation.CppSimulation
-            Simulation instance.
-        filepath : str or path-like
-            HDF5 output path.
-        """
+        """Remove an existing HDF5 file before delegating to k-Wave."""
         if os.path.exists(filepath):
             os.remove(filepath)
         _orig_write(self, filepath)
 
     _patched_write._beamax_stale_hdf5_patch = True
     CppSimulation._write_hdf5 = _patched_write
+
+
+_patch_cpp_simulation_stale_hdf5()
 
 
 def _binary_name(device: str) -> str:
@@ -135,76 +123,6 @@ def _configure_cpp_binary_kwargs(kwargs: dict) -> Path:
     return binary_path
 
 
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _metadata_marks_bad_darwin_omp(binary_path: Path) -> bool:
-    metadata_path = binary_path.with_name(f"{binary_path.name}_metadata.json")
-    if not metadata_path.exists():
-        return False
-
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-
-    version = str(metadata.get("version", ""))
-    url = str(metadata.get("url", ""))
-    return any(
-        bad_version in version or bad_version in url
-        for bad_version in _BAD_DARWIN_OMP_VERSIONS
-    )
-
-
-def _domain_has_nonzero_absorption(domain: Domain) -> bool:
-    alpha_coeff = domain.alpha_coeff
-    if alpha_coeff is None:
-        return False
-    if callable(alpha_coeff):
-        alpha_coeff = domain._eval(alpha_coeff)
-
-    try:
-        return bool(np.any(np.asarray(alpha_coeff) != 0))
-    except (TypeError, ValueError):
-        return bool(alpha_coeff)
-
-
-def _reject_known_bad_darwin_absorption_binary(
-    binary_path: Path, domain: Domain
-) -> None:
-    if sys.platform != "darwin" or binary_path.name != "kspaceFirstOrder-OMP":
-        return
-    if not _domain_has_nonzero_absorption(domain):
-        return
-    if not binary_path.exists():
-        return
-
-    is_known_bad = _metadata_marks_bad_darwin_omp(binary_path)
-    if not is_known_bad:
-        try:
-            is_known_bad = _file_sha256(binary_path) in _BAD_DARWIN_OMP_SHA256
-        except OSError:
-            is_known_bad = False
-
-    if not is_known_bad:
-        return
-
-    raise RuntimeError(
-        "The configured macOS k-Wave OMP binary is a known-bad Darwin build "
-        "for power-law absorption. Install beamax[kwave] with "
-        "k-wave-python>=0.6.2, or point BEAMAX_KWAVE_BINARY_PATH at the "
-        "k-wave-omp-darwin v1.4.1 kspaceFirstOrder-OMP release asset."
-    )
-
-
-_patch_cpp_simulation_stale_hdf5()
-
-
 Array = Union[np.ndarray, jnp.ndarray]
 
 
@@ -249,8 +167,6 @@ class KWaveSolver(Solver):
     >>> solver = KWaveSolver(pml_size=10, device="cpu")  # doctest: +SKIP
     """
 
-    _hdf5_compat_paths: set[str] = set()
-
     def __init__(
         self,
         simulation_options=None,
@@ -286,91 +202,6 @@ class KWaveSolver(Solver):
                 device="cpu",
                 debug=True,
             )
-
-    @classmethod
-    def _ensure_macos_hdf5_compat(cls, binary_path: Optional[Path] = None) -> None:
-        """
-        Create DYLD symlinks for macOS HDF5 version compatibility.
-
-        Notes
-        -----
-        The k-Wave OMP binary may be linked against ``libhdf5.310`` while a
-        system only ships ``libhdf5.320``. This method creates temporary
-        compatibility symlinks when possible.
-        """
-        if sys.platform != "darwin":
-            return
-
-        if binary_path is None:
-            binary_path = _default_kwave_binary_path("cpu")
-        if not binary_path.exists():
-            return
-
-        try:
-            cache_key = str(binary_path.resolve())
-        except OSError:
-            cache_key = str(binary_path)
-        if cache_key in cls._hdf5_compat_paths:
-            return
-
-        try:
-            out = subprocess.run(
-                ["otool", "-L", str(binary_path)],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
-        except (subprocess.SubprocessError, OSError):
-            cls._hdf5_compat_paths.add(cache_key)
-            return
-
-        refs = re.findall(
-            r"^\s+(/.*libhdf5(?:_hl)?\.310\.dylib)\s", out, flags=re.MULTILINE
-        )
-        if not refs:
-            cls._hdf5_compat_paths.add(cache_key)
-            return
-
-        compat_links = {}
-        for ref in refs:
-            ref_path = Path(ref)
-            if ref_path.exists():
-                continue
-            # Try .320 first, then unversioned
-            for replacement in [
-                ref_path.name.replace(".310.", ".320."),
-                ref_path.name.replace(".310", ""),
-            ]:
-                candidate = ref_path.with_name(replacement)
-                if candidate.exists():
-                    compat_links[ref_path.name] = candidate
-                    break
-
-        if not compat_links:
-            cls._hdf5_compat_paths.add(cache_key)
-            return
-
-        compat_dir = Path(tempfile.gettempdir()) / "beamax_kwave_hdf5_compat"
-        compat_dir.mkdir(parents=True, exist_ok=True)
-
-        for link_name, target in compat_links.items():
-            link_path = compat_dir / link_name
-            if link_path.is_symlink() or link_path.exists():
-                try:
-                    if link_path.resolve() == target.resolve():
-                        continue
-                except OSError:
-                    pass
-                link_path.unlink()
-            link_path.symlink_to(target)
-
-        current = os.environ.get("DYLD_LIBRARY_PATH", "")
-        compat_str = str(compat_dir)
-        if compat_str not in current.split(":"):
-            os.environ["DYLD_LIBRARY_PATH"] = (
-                f"{compat_str}:{current}" if current else compat_str
-            )
-        cls._hdf5_compat_paths.add(cache_key)
 
     def _create_kgrid(self, domain: Domain, ts: np.ndarray) -> kWaveGrid:
         """
@@ -454,9 +285,7 @@ class KWaveSolver(Solver):
         )
 
         if kwargs.get("backend") == "cpp":
-            binary_path = _configure_cpp_binary_kwargs(kwargs)
-            self._ensure_macos_hdf5_compat(binary_path)
-            _reject_known_bad_darwin_absorption_binary(binary_path, domain)
+            _configure_cpp_binary_kwargs(kwargs)
 
         result = kspaceFirstOrder(
             kgrid,

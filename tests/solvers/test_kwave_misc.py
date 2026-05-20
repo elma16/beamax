@@ -3,8 +3,6 @@ Unit tests for thin validation / dispatch paths in ``kwave_solver`` that the
 existing integration tests don't reach. Pure-Python, no k-Wave required.
 """
 
-import json
-import types
 
 import numpy as np
 import pytest
@@ -33,74 +31,9 @@ def test_normalize_binary_path_nonexistent_file_raises(tmp_path):
         kwave_solver_module._normalize_kwave_binary_path(bogus, device="cpu")
 
 
-# ---------------------------------------------------------------------------
-# _metadata_marks_bad_darwin_omp
-# ---------------------------------------------------------------------------
-
-
-def test_metadata_marks_bad_omp_returns_false_when_no_metadata(tmp_path):
-    """No metadata file -> returns False (don't reject the binary)."""
-    binary = tmp_path / "kspaceFirstOrder-OMP"
-    binary.write_text("", encoding="utf-8")
-    assert kwave_solver_module._metadata_marks_bad_darwin_omp(binary) is False
-
-
-def test_metadata_marks_bad_omp_returns_false_on_bad_json(tmp_path):
-    """Malformed metadata JSON -> returns False (don't crash)."""
-    binary = tmp_path / "kspaceFirstOrder-OMP"
-    binary.write_text("", encoding="utf-8")
-    binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
-        "{not: valid json",
-        encoding="utf-8",
-    )
-    assert kwave_solver_module._metadata_marks_bad_darwin_omp(binary) is False
-
-
-def test_metadata_marks_bad_omp_returns_false_for_good_version(tmp_path):
-    """A metadata file pointing at a known-good version is not flagged."""
-    binary = tmp_path / "kspaceFirstOrder-OMP"
-    binary.write_text("", encoding="utf-8")
-    binary.with_name("kspaceFirstOrder-OMP_metadata.json").write_text(
-        json.dumps({"version": "v1.4.1", "url": "https://example/x"}),
-        encoding="utf-8",
-    )
-    assert kwave_solver_module._metadata_marks_bad_darwin_omp(binary) is False
-
-
-# ---------------------------------------------------------------------------
-# _domain_has_nonzero_absorption
-# ---------------------------------------------------------------------------
-
-
-def test_domain_has_nonzero_absorption_none():
-    """alpha_coeff = None → no absorption."""
-    domain = types.SimpleNamespace(alpha_coeff=None)
-    assert kwave_solver_module._domain_has_nonzero_absorption(domain) is False
-
-
-def test_domain_has_nonzero_absorption_scalar_zero():
-    """alpha_coeff = 0.0 (scalar) → no absorption."""
-    domain = types.SimpleNamespace(alpha_coeff=0.0)
-    assert kwave_solver_module._domain_has_nonzero_absorption(domain) is False
-
-
-def test_domain_has_nonzero_absorption_scalar_nonzero():
-    """alpha_coeff = 0.5 (scalar) → absorption present."""
-    domain = types.SimpleNamespace(alpha_coeff=0.5)
-    assert kwave_solver_module._domain_has_nonzero_absorption(domain) is True
-
-
-def test_domain_has_nonzero_absorption_callable():
-    """A callable alpha_coeff is evaluated on the domain grid."""
-
-    def alpha(x):
-        return 0.5
-
-    def _eval(_):
-        return np.array([0.5])
-
-    domain = types.SimpleNamespace(alpha_coeff=alpha, _eval=_eval)
-    assert kwave_solver_module._domain_has_nonzero_absorption(domain) is True
+# The _metadata_marks_bad_darwin_omp and _domain_has_nonzero_absorption tests
+# were removed along with the bad-Darwin-OMP guards once k-wave-python was
+# pinned to >=0.6.2.
 
 
 # ---------------------------------------------------------------------------
