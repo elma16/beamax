@@ -237,7 +237,7 @@ def test_detect_root_env_takes_priority(monkeypatch, tmp_path):
 
 
 def test_find_repo_root_accepts_file_paths(tmp_path):
-    (tmp_path / "src" / "beamax").mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text("")
     file_path = tmp_path / "scripts" / "example.py"
     assert device_utils.find_repo_root(file_path) == tmp_path
 

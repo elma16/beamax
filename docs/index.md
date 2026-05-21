@@ -35,4 +35,4 @@ pip install -e .[dev]
 mkdocs serve  # http://127.0.0.1:8000
 ```
 
-Docstring changes in `src/beamax` are picked up on save.
+Docstring changes in `beamax` are picked up on save.

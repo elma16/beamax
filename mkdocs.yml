@@ -56,7 +56,7 @@ plugins:
       default_handler: python
       handlers:
         python:
-          paths: [src]
+          paths: [.]
           options:
             docstring_style: numpy
             show_root_heading: true
@@ -105,4 +105,4 @@ nav:
             - api/solvers/msgb_solvers/tr_solver_utils.md
 
 watch:
-  - src/beamax
+  - beamax

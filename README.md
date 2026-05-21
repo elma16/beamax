@@ -12,7 +12,7 @@ Implementation of the fast multiscale Gaussian wavepacket transform and multisca
 - JAX kernels for dyadic frequency tilings and a multiscale wave-packet transform (MSWPT).
 - Gaussian beam solvers and utilities for hybrid MSGB / low-frequency solvers.
 - Optional integrations (k-Wave, FNO) and plotting helpers (matplotlib/pyvista).
-- MkDocs + mkdocstrings documentation powered by the docstrings in `src/beamax`.
+- MkDocs + mkdocstrings documentation powered by the docstrings in `beamax`.
 
 ## Installation
 
@@ -144,7 +144,7 @@ The API docs are generated from docstrings via MkDocs. After installing `.[dev]`
 mkdocs serve   # live preview at http://127.0.0.1:8000
 ```
 
-The navigation in `mkdocs.yml` mirrors the modules in `src/beamax` (decomposition, transforms, geometry, plotter, utils, gb, solvers, …).
+The navigation in `mkdocs.yml` mirrors the modules in `beamax` (decomposition, transforms, geometry, plotter, utils, gb, solvers, …).
 
 ## References and related projects
 
@@ -168,8 +168,8 @@ pytest
 
 Useful commands:
 
-- `ruff check src tests` for linting.
-- `pytest --cov=src/beamax --cov-report=term-missing` for coverage.
+- `ruff check beamax tests tools examples` for linting.
+- `pytest --cov=beamax --cov-report=term-missing` for coverage.
 
 ## License
 

@@ -32,7 +32,7 @@ jobs:
           python -m pip install -e ".[dev,kwave,viz]"
 
       - name: Lint with ruff
-        run: ruff check src tests tools examples
+        run: ruff check beamax tests tools examples
 
       - name: Type-check with pyright
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
@@ -41,7 +41,7 @@ jobs:
           pyright
 
       - name: Test with pytest
-        run: pytest --cov=src/beamax --cov-report=term-missing --cov-report=xml -q
+        run: pytest --cov=beamax --cov-report=term-missing --cov-report=xml -q
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
@@ -73,7 +73,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,fno]"
       - name: Run FNO smoke tests
-        run: pytest --cov=src/beamax --cov-report=xml -q tests/solvers/test_fno_solver.py
+        run: pytest --cov=beamax --cov-report=xml -q tests/solvers/test_fno_solver.py
 
       - name: Upload FNO coverage to Codecov
         uses: codecov/codecov-action@v5

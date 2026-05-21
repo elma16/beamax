@@ -78,7 +78,7 @@ Documentation = "https://elma16.github.io/beamax/"
 Issues = "https://github.com/elma16/beamax/issues"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["beamax*"]
 
 [tool.setuptools.package-data]
 beamax = ["py.typed"]
@@ -100,15 +100,15 @@ select = ["E", "F", "W"]
 ignore = ["E501", "E402", "F722", "F821"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["."]
 filterwarnings = "ignore"
 
 [tool.coverage.run]
-source = ["src/beamax"]
+source = ["beamax"]
 branch = true
 
 [tool.coverage.report]
 omit = [
-  "src/beamax/solvers/solverbase.py",
-  "src/beamax/plotter.py",
+  "beamax/solvers/solverbase.py",
+  "beamax/plotter.py",
 ]

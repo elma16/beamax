@@ -101,7 +101,7 @@ def array_str(x: Union[jnp.ndarray, None]) -> Union[str, None]:
     return None if x is None else f"Array {x.dtype} {tuple(x.shape)} | {memory_str(x)}"
 
 
-def find_repo_root(start: Path, marker: str = "src/beamax") -> Path:
+def find_repo_root(start: Path, marker: str = "pyproject.toml") -> Path:
     """
     Climb parent dirs until a directory containing `marker` exists.
 
@@ -109,7 +109,9 @@ def find_repo_root(start: Path, marker: str = "src/beamax") -> Path:
     ----------
     start : Path
     marker : str
-        Relative path to test for existence.
+        Relative path to test for existence. Defaults to ``pyproject.toml``
+        which lives at the beamax repo root and is absent from site-packages
+        installs, so this doubles as a "are we in a source checkout?" probe.
 
     Returns
     -------
@@ -143,12 +145,12 @@ def detect_root() -> Path:
         return Path(os.environ["BEAMAX_ROOT"]).expanduser()
 
     cwd_root = find_repo_root(Path.cwd())
-    if (cwd_root / "src/beamax").exists():
+    if (cwd_root / "pyproject.toml").exists():
         return cwd_root
 
     if "__file__" in globals():
         package_root = find_repo_root(Path(__file__).resolve())
-        if (package_root / "src/beamax").exists():
+        if (package_root / "pyproject.toml").exists():
             return package_root
 
     return Path.cwd()

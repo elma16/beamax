@@ -14,8 +14,8 @@ repos:
         stages: [pre-commit]
         types_or: [python, pyi, jupyter]
       - id: ruff
-        name: ruff check (full src/tests/tools/examples)
-        args: [src, tests, tools, examples]
+        name: ruff check (full beamax/tests/tools/examples)
+        args: [beamax, tests, tools, examples]
         pass_filenames: false
         stages: [pre-push]
 

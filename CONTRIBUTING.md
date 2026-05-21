@@ -39,7 +39,7 @@ binary has been validated.
 
 1. Create a feature branch from `main`.
 2. Make your changes and add tests where appropriate.
-3. Run `ruff check src tests tools examples` and `pytest` locally.
+3. Run `ruff check beamax tests tools examples` and `pytest` locally.
 4. Open a PR against `main`. CI will run the full test suite.
 
 ## Examples

@@ -24,8 +24,6 @@ Notebooks that ship alongside the public scripts carry an **Open in Colab** badg
 
 ### Forward propagation
 
-- [1D forward solve](forward.md#1d-forward-solve) — MSGB vs. spectral ground truth.
-- [2D forward solve](forward.md#2d-forward-solve) — trigonometric initial data with error maps.
 - [1D forward k-Wave reference](forward.md#1d-forward-k-wave-reference) — optional k-Wave reference comparison.
 - [2D forward k-Wave reference](forward.md#2d-forward-k-wave-reference) — optional k-Wave boundary-sensor comparison.
 
