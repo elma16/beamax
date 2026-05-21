@@ -68,8 +68,9 @@ viz = [
 ]
 
 kwave = ["k-wave-python>=0.6.2"]
+autodiff = ["optax>=0.2"]
 
-all = ["beamax[dev,viz,kwave]"]
+all = ["beamax[dev,viz,kwave,autodiff]"]
 
 [project.urls]
 Homepage = "https://github.com/elma16/beamax"

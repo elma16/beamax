@@ -23,7 +23,8 @@ direction change.
 
 Port the thesis ray-focusing example: represent `c(x)` with a small neural
 field, optimize it with autodiff through the Gaussian beam ray ODE, and save
-the before/after rays, loss curve, and $\Delta c$ panels.
+the before/after rays, loss curve, and $\Delta c$ panels. This optional
+example requires `beamax[viz-mpl,autodiff]` for Optax.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/2d_rays_autodiff.ipynb)
 

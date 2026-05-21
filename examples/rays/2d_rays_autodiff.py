@@ -5,12 +5,28 @@ Differentiate through 2D Gaussian beam rays.
 This example ports the thesis ray-focusing setup to the public gallery. A
 small neural field represents `c(x)`, and autodiff through the Gaussian beam
 ray ODE optimizes the medium so a fan of rays focuses at a target point.
+
+Example category: Rays and autodiff
+Example extras: viz-mpl,autodiff
+Example smoke: false
+
+Requires Optax. Install with `pip install "beamax[viz-mpl,autodiff]"`, or
+from a checkout with `pip install -e ".[viz-mpl,autodiff]"`.
 """
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+
+try:
+    import optax
+except ModuleNotFoundError as exc:
+    print(
+        "Skipping optional example: Optax is not installed "
+        '(`pip install "beamax[viz-mpl,autodiff]"`).'
+    )
+    raise SystemExit(0) from exc
 
 from beamax import utils
 from beamax.gb import gb_solvers
@@ -119,48 +135,6 @@ def focusing_loss(
         "smooth": smooth_loss,
         "xt": xt,
     }
-
-
-def tree_global_norm(tree) -> jnp.ndarray:
-    leaves = jax.tree_util.tree_leaves(tree)
-    return jnp.sqrt(sum(jnp.sum(leaf**2) for leaf in leaves))
-
-
-def clip_by_global_norm(tree, max_norm: float):
-    norm = tree_global_norm(tree)
-    scale = jnp.minimum(1.0, max_norm / (norm + 1.0e-12))
-    return jax.tree_util.tree_map(lambda leaf: leaf * scale, tree)
-
-
-def adam_step(params, grads, state, step: int, learning_rate: float):
-    """Minimal Adam update so the example does not depend on Optax."""
-    beta1 = 0.9
-    beta2 = 0.999
-    eps = 1.0e-8
-    grads = clip_by_global_norm(grads, max_norm=1.0)
-    m, v = state
-    m = jax.tree_util.tree_map(
-        lambda m_leaf, g: beta1 * m_leaf + (1 - beta1) * g, m, grads
-    )
-    v = jax.tree_util.tree_map(
-        lambda v_leaf, g: beta2 * v_leaf + (1 - beta2) * (g**2),
-        v,
-        grads,
-    )
-    bias_step = step + 1
-    m_hat = jax.tree_util.tree_map(lambda m_leaf: m_leaf / (1 - beta1**bias_step), m)
-    v_hat = jax.tree_util.tree_map(lambda v_leaf: v_leaf / (1 - beta2**bias_step), v)
-    updates = jax.tree_util.tree_map(
-        lambda m_leaf, v_leaf: -learning_rate * m_leaf / (jnp.sqrt(v_leaf) + eps),
-        m_hat,
-        v_hat,
-    )
-    params = jax.tree_util.tree_map(lambda p, update: p + update, params, updates)
-    return params, (m, v)
-
-
-def learning_rate(step: int) -> float:
-    return 0.02 * (0.9 ** (step / 50.0))
 
 
 def speed_map(
@@ -293,9 +267,13 @@ def main() -> None:
     )
 
     xt_init = solve_rays(params, param_c, x0, p0, m0, a0, mode, ts)
-    m_state = jax.tree_util.tree_map(jnp.zeros_like, params)
-    v_state = jax.tree_util.tree_map(jnp.zeros_like, params)
-    opt_state = (m_state, v_state)
+    lr_schedule = optax.exponential_decay(
+        init_value=0.02,
+        transition_steps=50,
+        decay_rate=0.9,
+    )
+    optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adam(lr_schedule))
+    opt_state = optimizer.init(params)
 
     loss_history: list[float] = []
     best_loss = float("inf")
@@ -307,13 +285,8 @@ def main() -> None:
     for step in range(num_iters):
         (loss_value, aux), grads = loss_grad(params)
         loss_float = float(loss_value)
-        params, opt_state = adam_step(
-            params,
-            grads,
-            opt_state,
-            step,
-            learning_rate(step),
-        )
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
         loss_history.append(loss_float)
 
         # Mirrors the thesis script: the best ray trajectory is the one used

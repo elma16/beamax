@@ -30,7 +30,7 @@ script's directory under `examples/`.
 ### Rays and autodiff
 
 - [`2d_ray_bending.py`](rays/2d_ray_bending.py) — Trace a small fan of 2D rays through a smooth speed field. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/2d_ray_bending.ipynb)
-- [`2d_rays_autodiff.py`](rays/2d_rays_autodiff.py) — Differentiate through 2D Gaussian beam rays. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/2d_rays_autodiff.ipynb)
+- [`2d_rays_autodiff.py`](rays/2d_rays_autodiff.py) — Differentiate through 2D Gaussian beam rays. _(optional; requires `beamax[viz-mpl,autodiff]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/2d_rays_autodiff.ipynb)
 
 ### Single Gaussian beam diagnostics
 
@@ -52,6 +52,7 @@ python tools/run_examples.py --directory examples --include-optional --silent-fi
 Optional examples skipped by default:
 
 - [`forward/2d_forward.py`](forward/2d_forward.py) — requires `beamax[kwave,viz-mpl]`.
+- [`rays/2d_rays_autodiff.py`](rays/2d_rays_autodiff.py) — requires `beamax[viz-mpl,autodiff]`.
 - [`reconstruction/2d_time_reversal_and_adjoint.py`](reconstruction/2d_time_reversal_and_adjoint.py) — requires `beamax[kwave,viz-mpl]`.
 - [`single-gaussian-beam/single_gaussian_beam_absorption.py`](single-gaussian-beam/single_gaussian_beam_absorption.py) — requires `beamax[kwave,viz-mpl]`.
 
