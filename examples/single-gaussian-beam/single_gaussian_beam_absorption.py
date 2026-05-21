@@ -34,14 +34,10 @@ def load_kwave_solver():
     """Import k-Wave lazily so base beamax installs can still import this file."""
     try:
         from beamax.solvers import KWaveSolver
-        from kwave.options.simulation_execution_options import (
-            SimulationExecutionOptions,
-        )
-        from kwave.options.simulation_options import SimulationOptions
     except ImportError as exc:
         print(f"Skipping optional example: k-Wave is not installed ({INSTALL_HINT}).")
         raise SystemExit(0) from exc
-    return KWaveSolver, SimulationOptions, SimulationExecutionOptions
+    return KWaveSolver
 
 
 def lam_to_alpha_db_per_cm(lam: float, c0: float) -> float:
@@ -97,8 +93,6 @@ def kwave_run(
     alpha_coeff: float,
     cfl: float,
     KWaveSolver,
-    SimulationOptions,
-    SimulationExecutionOptions,
 ):
     """Run a 1D k-Wave strip simulation with a matching absorbing medium."""
     n = p0_1d.shape[0]
@@ -117,20 +111,19 @@ def kwave_run(
         alpha_coeff=alpha_coeff,
     )
     binary_mask = jnp.ones(n_kw)
-    sim_opts = SimulationOptions(data_cast="single", smooth_p0=False, save_to_disk=True)
-    exec_opts = SimulationExecutionOptions(
-        is_gpu_simulation=False,
-        delete_data=False,
-        verbose_level=0,
-        show_sim_log=False,
+    solver = KWaveSolver(
+        backend="python",
+        device="cpu",
+        smooth_p0=False,
+        debug=False,
+        quiet=True,
     )
-    solver = KWaveSolver(sim_opts, exec_opts)
     p0_2d = p0_1d[:, None]  # k-Wave wants the strip dim explicit
     return np.asarray(solver.forward(p0_2d, kw_domain, binary_mask, ts))
 
 
 def main() -> None:
-    KWaveSolver, SimulationOptions, SimulationExecutionOptions = load_kwave_solver()
+    KWaveSolver = load_kwave_solver()
 
     n = 512
     cfl = 0.3
@@ -164,8 +157,6 @@ def main() -> None:
         alpha_coeff=0.0,
         cfl=cfl,
         KWaveSolver=KWaveSolver,
-        SimulationOptions=SimulationOptions,
-        SimulationExecutionOptions=SimulationExecutionOptions,
     ).reshape(len(ts), n)
     k_abs = kwave_run(
         p0_init,
@@ -174,8 +165,6 @@ def main() -> None:
         alpha_coeff=alpha_db,
         cfl=cfl,
         KWaveSolver=KWaveSolver,
-        SimulationOptions=SimulationOptions,
-        SimulationExecutionOptions=SimulationExecutionOptions,
     ).reshape(len(ts), n)
 
     dx = float(domain.dx[0])

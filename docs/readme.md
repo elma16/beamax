@@ -138,11 +138,12 @@ axes[1].set_yticks([])
 plt.show()
 ```
 
-The complete script also runs k-Wave and produces this comparison:
+This produces:
 
 ![Output from the 2D photoacoustic forward example](assets/2d_forward.png)
 
-See [`examples/forward/2d_forward.py`](https://github.com/elma16/beamax/blob/main/examples/forward/2d_forward.py).
+For a fuller k-Wave/MSGB/Hybrid comparison, see
+[`examples/forward/2d_forward.py`](https://github.com/elma16/beamax/blob/main/examples/forward/2d_forward.py).
 
 ## Running examples
 
