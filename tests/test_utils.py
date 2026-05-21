@@ -254,6 +254,26 @@ def test_detect_root_falls_back_to_cwd_for_installed_layout(monkeypatch, tmp_pat
     assert detect_root() == tmp_path
 
 
+def test_example_plot_dir_uses_public_example_category(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEAMAX_ROOT", str(tmp_path))
+    example_path = tmp_path / "examples" / "forward" / "2d_forward.py"
+
+    plot_dir = device_utils.example_plot_dir(example_path)
+
+    assert plot_dir == tmp_path / "plots" / "forward"
+    assert plot_dir.is_dir()
+
+
+def test_example_plot_dir_falls_back_to_parent_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("BEAMAX_ROOT", str(tmp_path))
+    example_path = tmp_path / "scratch" / "demo.py"
+
+    plot_dir = device_utils.example_plot_dir(example_path)
+
+    assert plot_dir == tmp_path / "plots" / "scratch"
+    assert plot_dir.is_dir()
+
+
 def test_pad_zero_and_edge():
     x = jnp.arange(6).reshape(2, 3)
     z = pad_zero(x, (4, 5))

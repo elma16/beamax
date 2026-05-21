@@ -20,6 +20,7 @@ coverage.json
 *.coverage
 
 # Local output directories
+private/
 examples/private/
 examples/thesis/
 examples/learned/

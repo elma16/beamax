@@ -144,7 +144,7 @@ def test_msgb_forward_then_time_reversal_1d():
         sensors.positions,
         ts,
         img_wpt,
-    )[0]
+    )
 
     def cut_out_middle(arr, size):
         mid = arr.shape[0] // 2
@@ -184,7 +184,7 @@ def test_msgb_forward_then_time_reversal_1d():
         ts=ts,
         data_domain=data_domain,
         data_wpt=data_wpt,
-    )[0]
+    )
 
     assert jnp.max(p0 - p0_TR_msgb) < 0.2
 

@@ -2,26 +2,24 @@
 """
 2D MSGB vs k-Wave reconstruction: time reversal + adjoint.
 
-Distills the thesis ``inverse_2d_full`` figure to one small 2D problem. Steps:
+Runs a compact inverse-comparison workflow on one small 2D problem. Steps:
 
-  1. Build a smooth two-Gaussian phantom and a one-sided boundary sensor line.
+  1. Build a smooth two-Gaussian $p_0$ and a one-sided boundary sensor line.
   2. Forward-simulate with k-Wave to get the sensor record.
   3. Reconstruct with both k-Wave and MSGB via time reversal AND adjoint
      back-propagation (four reconstructions in total).
-  4. Plot the thesis-style 3-row figure: phantom + 2 TR images on top,
-     blank + 2 adjoint images in the middle, 1D profile through them on the
-     bottom. Print relative-L2 metrics against the truth.
+  4. Plot a 3-row comparison figure: $p_0$ + 2 TR images on top,
+     sensor data + 2 adjoint images in the middle, 1D profile through them on
+     the bottom. Print relative-L2 metrics against the truth.
 
 MSGB time-reversal in 2D needs a frequency-cropped data domain and a paired
-data-WPT — the helper ``prepare_data_domain_for_msgb`` below mirrors what the
-thesis script does in ~30 lines.
+data-WPT — the helper ``prepare_data_domain_for_msgb`` below keeps that setup
+local and explicit.
 
-Example category: Time-reversal reconstruction
+Example category: Reconstruction
 Example extras: kwave,viz-mpl
 Example smoke: false
 """
-
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -100,7 +98,7 @@ def scaled(recon: np.ndarray, truth: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 # ---------------------------------------------------------------------------
-# MSGB data-domain construction (thesis: prepare_sensor_data_for_tr)
+# MSGB data-domain construction
 # ---------------------------------------------------------------------------
 
 
@@ -174,6 +172,7 @@ def prepare_data_domain_for_msgb(
 
 def plot_comparison(
     p0,
+    sensor_data,
     tr_kw,
     tr_msgb,
     adj_kw,
@@ -185,7 +184,13 @@ def plot_comparison(
 ):
     """Thesis-style 3-row layout: 2 imshow rows + 1 profile row."""
     arrays = [np.asarray(a).real for a in (p0, tr_kw, tr_msgb, adj_kw, adj_msgb)]
+    sensor_arr = np.asarray(sensor_data).real
+    if sensor_arr.ndim != 2:
+        sensor_arr = sensor_arr.reshape(sensor_arr.shape[0], -1)
     vmax = max(float(np.max(np.abs(a))) for a in arrays)
+    sensor_vmax = float(np.percentile(np.abs(sensor_arr), 99.5))
+    if sensor_vmax == 0.0:
+        sensor_vmax = 1.0
     extent = (0.0, float(domain.grid_size[1]), 0.0, float(domain.grid_size[0]))
 
     fig = plt.figure(figsize=(12, 9))
@@ -200,16 +205,15 @@ def plot_comparison(
 
     top_titles = [
         r"$p_0$",
-        r"$p_{\rm TR}^{\rm k\text{-}Wave}$",
-        r"$p_{\rm TR}^{\rm MSGB}$",
+        r"$p_{\mathrm{TR}}^{\mathrm{k\!-\!Wave}}$",
+        r"$p_{\mathrm{TR}}^{\mathrm{MSGB}}$",
     ]
     mid_titles = [
-        None,
-        r"$p_{\rm Adj}^{\rm k\text{-}Wave}$",
-        r"$p_{\rm Adj}^{\rm MSGB}$",
+        r"$p_{\mathrm{Adj}}^{\mathrm{k\!-\!Wave}}$",
+        r"$p_{\mathrm{Adj}}^{\mathrm{MSGB}}$",
     ]
     top_arrays = [arrays[0], arrays[1], arrays[2]]
-    mid_arrays = [None, arrays[3], arrays[4]]
+    mid_arrays = [arrays[3], arrays[4]]
     image_axes = []
 
     for j, (title, arr) in enumerate(zip(top_titles, top_arrays)):
@@ -228,31 +232,54 @@ def plot_comparison(
         ax.set_yticks([])
         image_axes.append(ax)
 
-    for j, (title, arr) in enumerate(zip(mid_titles, mid_arrays)):
+    ax_data = fig.add_subplot(gs[1, 0])
+    ax_data.imshow(
+        sensor_arr,
+        origin="lower",
+        aspect="auto",
+        cmap="viridis",
+        vmin=-sensor_vmax,
+        vmax=sensor_vmax,
+    )
+    ax_data.set_title("sensor data")
+    ax_data.set_xlabel(r"$x_s$")
+    ax_data.set_ylabel(r"$t$")
+    ax_data.set_box_aspect(1)
+    ax_data.set_xticks([])
+    ax_data.set_yticks([])
+
+    for j, (title, arr) in enumerate(zip(mid_titles, mid_arrays), start=1):
         ax = fig.add_subplot(gs[1, j])
-        if arr is None:
-            ax.axis("off")
-        else:
-            ax.imshow(
-                arr,
-                origin="lower",
-                extent=extent,
-                vmin=-vmax,
-                vmax=vmax,
-                cmap="RdBu_r",
-                aspect="equal",
-            )
-            ax.set_title(title)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            image_axes.append(ax)
+        ax.imshow(
+            arr,
+            origin="lower",
+            extent=extent,
+            vmin=-vmax,
+            vmax=vmax,
+            cmap="RdBu_r",
+            aspect="equal",
+        )
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        image_axes.append(ax)
 
     # Overlay sensor positions on every image panel.
     rr, cc = jnp.where(sensors.binary_mask)
     xs = (np.asarray(cc) + 0.5) * float(domain.dx[1])
     ys = (np.asarray(rr) + 0.5) * float(domain.dx[0])
     for ax in image_axes:
-        ax.scatter(xs, ys, s=10, c="black", marker="^", alpha=0.85, zorder=10)
+        ax.scatter(
+            xs,
+            ys,
+            s=16,
+            c="red",
+            marker="^",
+            alpha=0.9,
+            edgecolors="white",
+            linewidths=0.3,
+            zorder=10,
+        )
 
     # 1D profile down the middle column of the image.
     ax_prof = fig.add_subplot(gs[2, :])
@@ -361,7 +388,7 @@ def main() -> None:
         sum_method="scan_real",
     )
     sensors_eval = Sensor(domain=domain, binary_mask=image_mask)
-    tr_msgb_raw, _ = msgb.time_reversal(
+    tr_msgb_raw = msgb.time_reversal(
         data=sensor_cropped,
         domain=domain,
         sensors=sensors_eval,
@@ -370,7 +397,7 @@ def main() -> None:
         data_domain=domain_data,
         data_wpt=wpt_data,
     )
-    adj_msgb_raw, _ = msgb.adjoint(
+    adj_msgb_raw = msgb.adjoint(
         data=sensor_cropped,
         domain=domain,
         sensors=sensors_eval,
@@ -394,11 +421,11 @@ def main() -> None:
     print(f"Adj k-Wave  rel L2 = {adj_kw_l2:.3f}")
     print(f"Adj MSGB    rel L2 = {adj_msgb_l2:.3f}")
 
-    out_dir = Path(utils.detect_root()) / "plots" / "optional"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = utils.example_plot_dir(__file__)
     out_path = out_dir / "2d_time_reversal_and_adjoint.png"
     plot_comparison(
         truth,
+        data,
         tr_kw_s,
         tr_msgb_s,
         adj_kw_s,

@@ -24,7 +24,7 @@ from beamax.transforms import MSWPT
 from beamax.gb import gb_solvers, core
 from beamax.solvers.msgb_solvers.msgb_solver import MSGBSolver
 from beamax.solvers.msgb_solvers import forward_solver_utils
-from beamax.solvers import HybridSolver
+from beamax.solvers import HybridBackend, HybridSolver
 from beamax.solvers.hybrid_solver import HybridSolverConfig
 
 try:
@@ -251,7 +251,7 @@ class TestMSGBSolverAggregation:
                 tr_ode_solver=gb_solvers.solve_ODE_batch_t,
                 sum_method=method,
             )
-            result = solver.forward(p0, domain, sensors, ts, wpt_1d)[0]
+            result = solver.forward(p0, domain, sensors, ts, wpt_1d)
             results.append(result)
 
         # Verify all results match
@@ -408,9 +408,7 @@ class TestMSGBSolverAccuracy:
                 sum_method="scan_real",
             )
 
-            gb_result = solver.forward(p0, domain, sensors, ts, wpt)[0][0, ...].reshape(
-                N
-            )
+            gb_result = solver.forward(p0, domain, sensors, ts, wpt)[0, ...].reshape(N)
             error = jnp.linalg.norm(gb_result - p0.real) / jnp.linalg.norm(p0.real)
             errors.append(error)
 
@@ -481,8 +479,8 @@ class TestHybridSolverBasics:
         p0 = p0.at[30, 40].set(100.0)
 
         hybrid = HybridSolver(
-            lf_solver=kwave_solver,
             hf_solver=kwave_solver,
+            lf_backend=HybridBackend.from_beamax_solver(kwave_solver),
             box_corners=jnp.array([0, 15]),
             downsample=downsample,
             dt_oversample=dt_oversample if downsample else 0,
@@ -530,7 +528,11 @@ class TestHybridSolverAdvanced:
             order=5,
         )
 
-        solver = HybridSolver(dummy_solver, dummy_solver, config=config)
+        solver = HybridSolver(
+            hf_solver=dummy_solver,
+            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
+            config=config,
+        )
 
         assert solver.config.downsample
         assert solver.config.interp_method == "zoom"
@@ -539,8 +541,8 @@ class TestHybridSolverAdvanced:
     def test_kwargs_initialization(self, dummy_solver):
         """Test initialization with kwargs."""
         solver = HybridSolver(
-            dummy_solver,
-            dummy_solver,
+            hf_solver=dummy_solver,
+            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
             box_corners=jnp.array([0, 15]),
             downsample=False,
             interp_method="fourier",
@@ -556,7 +558,10 @@ class TestHybridSolverAdvanced:
         )
 
         solver = HybridSolver.create_with_domain(
-            dummy_solver, dummy_solver, domain, box_corners=jnp.array([0, 15])
+            hf_solver=dummy_solver,
+            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
+            domain=domain,
+            box_corners=jnp.array([0, 15]),
         )
 
         assert solver.config.interp_method == "fourier"
@@ -568,7 +573,10 @@ class TestHybridSolverAdvanced:
         )
 
         solver = HybridSolver.create_with_domain(
-            dummy_solver, dummy_solver, domain, box_corners=jnp.array([0, 15])
+            hf_solver=dummy_solver,
+            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
+            domain=domain,
+            box_corners=jnp.array([0, 15]),
         )
 
         assert solver.config.interp_method == "zoom"
@@ -587,8 +595,8 @@ class TestHybridSolverAdvanced:
         )
 
         solver = HybridSolver(
-            dummy_solver,
-            dummy_solver,
+            hf_solver=dummy_solver,
+            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
             box_corners=jnp.array([0, 15]),
             downsample=True,
             interp_method="fourier",  # Explicitly use Fourier
@@ -611,8 +619,8 @@ class TestHybridSolverAdvanced:
     def test_window_types(self, dummy_solver, window_type):
         """Test different windowing functions."""
         solver = HybridSolver(
-            dummy_solver,
-            dummy_solver,
+            hf_solver=dummy_solver,
+            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
             box_corners=jnp.array([0, 15]),
             window_type=window_type,
             dt_oversample=20,
@@ -640,8 +648,8 @@ class TestHybridSolverAdvanced:
     def test_interpolation_methods(self, dummy_solver, interp_method, order):
         """Test different interpolation methods."""
         solver = HybridSolver(
-            dummy_solver,
-            dummy_solver,
+            hf_solver=dummy_solver,
+            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
             box_corners=jnp.array([0, 15]),
             interp_method=interp_method,
             order=order,
@@ -728,8 +736,8 @@ def test_hybrid_downsample():
     cutoff_freq = None
 
     hybrid_solver = HybridSolver(
-        lf_solver=kwave_solver,
         hf_solver=msgb_solver,
+        lf_backend=HybridBackend.from_beamax_solver(kwave_solver),
         downsample=False,
         box_corners=box_corners,
         cutoff_freq=cutoff_freq,
@@ -739,8 +747,8 @@ def test_hybrid_downsample():
     )
 
     hybrid_solver_downsample = HybridSolver(
-        lf_solver=kwave_solver,
         hf_solver=msgb_solver,
+        lf_backend=HybridBackend.from_beamax_solver(kwave_solver),
         downsample=True,
         box_corners=box_corners,
         cutoff_freq=cutoff_freq,

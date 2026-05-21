@@ -9,6 +9,7 @@ from .device import (
     memory_str,
     array_str,
     detect_root,
+    example_plot_dir,
 )
 
 # FFT helpers
@@ -45,6 +46,7 @@ __all__ = [
     "memory_str",
     "array_str",
     "detect_root",
+    "example_plot_dir",
     # fft
     "unitary_fft",
     "unitary_ifft",

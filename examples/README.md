@@ -13,32 +13,47 @@ Each notebook installs beamax from this repository in its first code cell:
 
 When running locally from a checkout, that cell can be skipped.
 
+Local script outputs are written under `plots/<category>/`, mirroring the
+script's directory under `examples/`.
+
 ## Gallery
-
-### Frequency decomposition & MSWPT
-
-- [`low_high_pass_filters.py`](decomposition/low_high_pass_filters.py) — Visualise the low-pass/high-pass filter pairs used by the MSWPT. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomposition/low_high_pass_filters.ipynb)
-- [`wave_packet_cutoff_error.py`](decomposition/wave_packet_cutoff_error.py) — Plot MSWPT frame cutoff error across dyadic scales. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomposition/wave_packet_cutoff_error.ipynb)
-- [`wave_packet_frame_atoms.py`](decomposition/wave_packet_frame_atoms.py) — Render a small grid of MSWPT frame atoms in Fourier space. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/decomposition/wave_packet_frame_atoms.ipynb)
 
 ### Forward propagation
 
-- [`1d_forward_kwave_reference.py`](forward/1d_forward_kwave_reference.py) — Compare a compact 1D MSGB forward solve with a k-Wave strip reference. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/1d_forward_kwave_reference.ipynb)
-- [`2d_forward_kwave_reference.py`](forward/2d_forward_kwave_reference.py) — Compare a small 2D MSGB forward solve with a k-Wave boundary-sensor reference. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/2d_forward_kwave_reference.ipynb)
+- [`custom_lf_spectral_backend.py`](forward/custom_lf_spectral_backend.py) — Custom low-frequency backend for HybridSolver. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/custom_lf_spectral_backend.ipynb)
+- [`2d_forward.py`](forward/2d_forward.py) — 2D photoacoustic forward comparison with MSGB, Hybrid, and k-Wave. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/2d_forward.ipynb)
 
-### Time-reversal reconstruction
+### Reconstruction
 
-- [`1d_time_reversal.py`](reconstruction/time-reversal/1d_time_reversal.py) — Run a compact 1D MSGB time-reversal smoke test. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/1d_time_reversal.ipynb)
-- [`2d_time_reversal_and_adjoint.py`](reconstruction/time-reversal/2d_time_reversal_and_adjoint.py) — Compare k-Wave time-reversal and adjoint reconstructions on a tiny 2D phantom. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/time-reversal/2d_time_reversal_and_adjoint.ipynb)
+- [`2d_time_reversal_and_adjoint.py`](reconstruction/2d_time_reversal_and_adjoint.py) — 2D MSGB vs k-Wave reconstruction: time reversal + adjoint. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/reconstruction/2d_time_reversal_and_adjoint.ipynb)
 
-### Rays and autofocus
+### Rays and autodiff
 
 - [`2d_ray_bending.py`](rays/2d_ray_bending.py) — Trace a small fan of 2D rays through a smooth speed field. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/2d_ray_bending.ipynb)
-- [`neural_sound_speed_autofocus.py`](rays/neural_sound_speed_autofocus.py) — Optimize a neural sound-speed field so initially parallel rays focus. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/neural_sound_speed_autofocus.ipynb)
+- [`2d_rays_autodiff.py`](rays/2d_rays_autodiff.py) — Differentiate through 2D Gaussian beam rays. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/2d_rays_autodiff.ipynb)
 
 ### Single Gaussian beam diagnostics
 
-- [`single_gaussian_beam_absorption.py`](single-gaussian-beam/single_gaussian_beam_absorption.py) — Compare lossless and absorbing single Gaussian beam propagation. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/single-gaussian-beam/single_gaussian_beam_absorption.ipynb)
+- [`single_gaussian_beam_absorption.py`](single-gaussian-beam/single_gaussian_beam_absorption.py) — Single Gaussian beam with viscous absorption: MSGB vs k-Wave. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/single-gaussian-beam/single_gaussian_beam_absorption.ipynb)
+
+
+## Smoke Testing
+
+The local default smoke command runs the base examples and skips only examples
+marked `Example smoke: false`. These are skipped because they require optional
+runtime extras, not because they are unsupported.
+
+CI installs the k-Wave and matplotlib extras and runs all public examples with:
+
+```bash
+python tools/run_examples.py --directory examples --include-optional --silent-figures
+```
+
+Optional examples skipped by default:
+
+- [`forward/2d_forward.py`](forward/2d_forward.py) — requires `beamax[kwave,viz-mpl]`.
+- [`reconstruction/2d_time_reversal_and_adjoint.py`](reconstruction/2d_time_reversal_and_adjoint.py) — requires `beamax[kwave,viz-mpl]`.
+- [`single-gaussian-beam/single_gaussian_beam_absorption.py`](single-gaussian-beam/single_gaussian_beam_absorption.py) — requires `beamax[kwave,viz-mpl]`.
 
 
 ## Contributing a new example

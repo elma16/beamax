@@ -5,7 +5,9 @@ Finalise the public example tree:
 2. For every public .py without a paired .ipynb, generate a thin Colab-runnable
    notebook (markdown banner + install cell + single big code cell with the
    full .py source).
-3. For every existing public .ipynb without an Open-in-Colab badge, prepend the
+3. For every thin generated notebook, refresh the install and source cells from
+   the paired .py script.
+4. For every existing public .ipynb without an Open-in-Colab badge, prepend the
    banner + install cell.
 
 Local/private example directories are intentionally ignored by this tool.
@@ -16,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import ast
+import hashlib
 from pathlib import Path
 
 GITHUB_REPO = "elma16/beamax"
@@ -178,8 +181,22 @@ def install_cell_source(extras: list[str]) -> list[str]:
     return [
         "# Install beamax for Google Colab. Safe to skip when running locally.\n",
         "%%capture\n",
-        f'%pip install --quiet "beamax{extras_spec} @ git+https://github.com/{GITHUB_REPO}.git"\n',
+        f'%pip install --quiet "beamax{extras_spec} @ git+https://github.com/{GITHUB_REPO}.git"',
     ]
+
+
+def cell_id(path: Path, index: int) -> str:
+    """Deterministic notebook cell id stable across regeneration."""
+    digest = hashlib.sha1(f"{path}:{index}".encode()).hexdigest()
+    return digest[:24]
+
+
+def notebook_code_source(text: str) -> list[str]:
+    """Return source lines in the same style Ruff uses for notebook cells."""
+    lines = text.splitlines(keepends=True)
+    if lines and lines[-1].endswith("\n"):
+        lines[-1] = lines[-1][:-1]
+    return lines
 
 
 def title_from_path(path: Path) -> str:
@@ -213,12 +230,14 @@ def add_badge_to_existing_nb(path: Path) -> bool:
     default_smoke = is_default_smoke_text(full_text)
     banner = {
         "cell_type": "markdown",
+        "id": cell_id(path, 0),
         "metadata": {},
         "source": banner_md(rel, title, memory_heavy, default_smoke),
     }
     install = {
         "cell_type": "code",
         "execution_count": None,
+        "id": cell_id(path, 1),
         "metadata": {},
         "outputs": [],
         "source": install_cell_source(extras),
@@ -239,17 +258,18 @@ def generate_nb_from_py(py_path: Path) -> bool:
     extras = example_extras(src)
     default_smoke = is_default_smoke_text(src)
 
-    src_lines = src.splitlines(keepends=True)
     nb = {
         "cells": [
             {
                 "cell_type": "markdown",
+                "id": cell_id(nb_path, 0),
                 "metadata": {},
                 "source": banner_md(rel_nb, title, memory_heavy, default_smoke),
             },
             {
                 "cell_type": "code",
                 "execution_count": None,
+                "id": cell_id(nb_path, 1),
                 "metadata": {},
                 "outputs": [],
                 "source": install_cell_source(extras),
@@ -257,9 +277,10 @@ def generate_nb_from_py(py_path: Path) -> bool:
             {
                 "cell_type": "code",
                 "execution_count": None,
+                "id": cell_id(nb_path, 2),
                 "metadata": {},
                 "outputs": [],
-                "source": src_lines,
+                "source": notebook_code_source(src),
             },
         ],
         "metadata": {
@@ -273,7 +294,65 @@ def generate_nb_from_py(py_path: Path) -> bool:
         "nbformat": 4,
         "nbformat_minor": 5,
     }
-    nb_path.write_text(json.dumps(nb, indent=1) + "\n")
+    new_text = json.dumps(nb, indent=1) + "\n"
+    nb_path.write_text(new_text)
+    return True
+
+
+def is_thin_generated_notebook(nb: dict) -> bool:
+    """Return whether ``nb`` follows the generated 3-cell example pattern."""
+    cells = nb.get("cells", [])
+    if len(cells) != 3:
+        return False
+    if [c.get("cell_type") for c in cells] != ["markdown", "code", "code"]:
+        return False
+    install_source = "".join(cells[1].get("source", []))
+    return "Install beamax for Google Colab" in install_source
+
+
+def sync_generated_nb_from_py(py_path: Path) -> bool:
+    """Refresh a thin generated notebook from its paired Python script."""
+    nb_path = py_path.with_suffix(".ipynb")
+    if not nb_path.exists():
+        return False
+
+    nb = json.loads(nb_path.read_text())
+    if not is_thin_generated_notebook(nb):
+        return False
+
+    src = py_path.read_text()
+    rel_nb = str(nb_path)
+    nb["cells"][0] = {
+        "cell_type": "markdown",
+        "id": cell_id(nb_path, 0),
+        "metadata": {},
+        "source": banner_md(
+            rel_nb,
+            title_from_path(py_path),
+            str(py_path) in MEMORY_HEAVY,
+            is_default_smoke_text(src),
+        ),
+    }
+    nb["cells"][1] = {
+        "cell_type": "code",
+        "execution_count": None,
+        "id": cell_id(nb_path, 1),
+        "metadata": {},
+        "outputs": [],
+        "source": install_cell_source(example_extras(src)),
+    }
+    nb["cells"][2] = {
+        "cell_type": "code",
+        "execution_count": None,
+        "id": cell_id(nb_path, 2),
+        "metadata": {},
+        "outputs": [],
+        "source": notebook_code_source(src),
+    }
+    new_text = json.dumps(nb, indent=1) + "\n"
+    if nb_path.read_text() == new_text:
+        return False
+    nb_path.write_text(new_text)
     return True
 
 
@@ -296,6 +375,14 @@ def main() -> None:
         if add_badge_to_existing_nb(p):
             badges_added += 1
     print(f"badges added to existing notebooks: {badges_added}")
+
+    nbs_synced = 0
+    for p in sorted(root.rglob("*.py")):
+        if "__pycache__" in p.parts or not is_public_example(p):
+            continue
+        if sync_generated_nb_from_py(p):
+            nbs_synced += 1
+    print(f"notebooks synced: {nbs_synced}")
 
     nbs_generated = 0
     for p in sorted(root.rglob("*.py")):

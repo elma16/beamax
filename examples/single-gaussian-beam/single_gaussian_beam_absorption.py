@@ -15,8 +15,6 @@ Example extras: kwave,viz-mpl
 Example smoke: false
 """
 
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -267,8 +265,7 @@ def main() -> None:
     axes[1, 2].set_xlabel("x")
     axes[1, 2].legend()
 
-    out_dir = Path(utils.detect_root()) / "plots" / "optional"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = utils.example_plot_dir(__file__)
     out_path = out_dir / "single_gaussian_beam_absorption.png"
     fig.savefig(out_path, dpi=180, bbox_inches="tight")
     plt.close(fig)

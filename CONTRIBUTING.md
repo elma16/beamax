@@ -20,7 +20,7 @@ pytest tests/test_gb.py # single file
 pytest -k "test_name"   # single test by name
 ```
 
-Some tests require optional dependencies such as k-Wave and the FNO stack. These are
+Some tests require optional dependencies such as k-Wave or j-Wave. These are
 skipped automatically if the packages are not installed.
 The k-Wave C++ OMP binary tests are skipped on CI by default because hosted
 runners do not execute the bundled binaries reliably. Set
@@ -34,6 +34,17 @@ binary has been validated.
   the full pytest suite before push. Install them with `tools/install-hooks.sh`
   so the tracked public-push guard is preserved.
 - No maximum line length is enforced (`E501` is ignored), but keep lines reasonable.
+
+## Documentation
+
+The API docs are generated from docstrings via MkDocs. After installing the
+development extra, run:
+
+```bash
+mkdocs serve   # live preview at http://127.0.0.1:8000
+```
+
+The navigation in `mkdocs.yml` mirrors the public modules in `beamax`.
 
 ## Pull requests
 

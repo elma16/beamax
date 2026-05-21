@@ -1,6 +1,6 @@
 # `beamax.transforms`
 
-Multiscale wave-packet transform (MSWPT) and frame-construction utilities.
+Multiscale wave packet transform (MSWPT) and frame construction utilities.
 
 ## Key Objects
 

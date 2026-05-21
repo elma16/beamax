@@ -1,4 +1,4 @@
-# Rays and autofocus
+# Rays and autodiff
 
 Static ray-tracing examples for Gaussian beam trajectories and differentiable
 ray objectives.
@@ -19,14 +19,14 @@ direction change.
 
 ---
 
-## Neural sound speed autofocus
+## 2D rays autodiff
 
-Represent `c(x)` with a tiny Equinox neural field and optimize the field
-parameters with autodiff through the Gaussian beam ray ODE. Source locations and
-launch directions stay fixed; the example changes the medium itself.
+Port the thesis ray-focusing example: represent `c(x)` with a small neural
+field, optimize it with autodiff through the Gaussian beam ray ODE, and save
+the before/after rays, loss curve, and $\Delta c$ panels.
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/neural_sound_speed_autofocus.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/rays/2d_rays_autodiff.ipynb)
 
 ```python
---8<-- "examples/rays/neural_sound_speed_autofocus.py"
+--8<-- "examples/rays/2d_rays_autodiff.py"
 ```

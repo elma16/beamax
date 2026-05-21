@@ -9,7 +9,7 @@ from typing import Any
 # Always-light, internal base types
 from .solverbase import Solver  # protocol/ABC only; safe
 
-from .hybrid_solver import HybridSolver
+from .hybrid_solver import HybridBackend, HybridContext, HybridSolver
 
 # Always available solvers implemented within this package:
 from .msgb_solvers.msgb_solver import MSGBSolver, ShardingStrategy
@@ -18,18 +18,16 @@ __all__ = [
     "Solver",
     "MSGBSolver",
     "ShardingStrategy",
+    "HybridBackend",
+    "HybridContext",
     "HybridSolver",
     # optional solvers exposed lazily via __getattr__
     "KWaveSolver",
-    "FNONeuralOpsSolver",
-    "FNOpdequinoxSolver",
 ]
 
 # Map attribute → (module path, symbol)
 _LAZY = {
     "KWaveSolver": ("beamax.solvers.kwave_solver", "KWaveSolver"),
-    "FNONeuralOpsSolver": ("beamax.solvers.fno_solver_neurops", "FNONeuralOpsSolver"),
-    "FNOpdequinoxSolver": ("beamax.solvers.fno_solver_pdequinox", "FNOpdequinoxSolver"),
 }
 
 

@@ -2,8 +2,7 @@
 Hybrid solver for combining low- and high-frequency propagation backends.
 
 The high-frequency component is typically handled by MSGB, while the
-low-frequency component can be supplied by any object implementing the shared
-solver interface.
+low-frequency component is supplied through a small adapter callable API.
 """
 
 import warnings
@@ -12,19 +11,27 @@ import jax.numpy as jnp
 import equinox as eqx
 from scipy.signal.windows import kaiser
 from scipy.ndimage import zoom
-from typing import Union, Optional, Tuple, Callable
+from typing import Any, Literal, Optional, Tuple, Callable
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from beamax.solvers.hybrid_solver_utils import split_frequency_components
 from beamax.geometry import Domain, Sensor
-from beamax.solvers.solverbase import Solver
 from beamax.solvers.msgb_solvers.msgb_solver import MSGBSolver
 from beamax import utils
 from beamax.transforms import MSWPT
 
 
-__all__ = ["HybridSolver", "HybridSolverConfig"]
+HybridOperationName = Literal["forward", "time_reversal", "adjoint"]
+HybridOperation = Callable[[jnp.ndarray, "HybridContext"], Any]
+_HYBRID_OPERATION_NAMES: tuple[HybridOperationName, ...] = (
+    "forward",
+    "time_reversal",
+    "adjoint",
+)
+
+
+__all__ = ["HybridBackend", "HybridContext", "HybridSolver", "HybridSolverConfig"]
 
 
 @dataclass(frozen=True)
@@ -95,6 +102,206 @@ class HybridSolverConfig:
             raise ValueError(
                 f"window_type must be 'kaiser' or 'tukey', got {self.window_type!r}"
             )
+
+
+@dataclass(frozen=True)
+class HybridContext:
+    """
+    Runtime context passed to a low-frequency hybrid backend operation.
+
+    The backend receives the already split low-frequency component plus this
+    object. It may use any of the fields it understands and ignore the rest;
+    the :class:`HybridSolver` still owns splitting, optional downsampling, time
+    extension/windowing, interpolation, and HF/LF merging.
+
+    Attributes
+    ----------
+    operation : {"forward", "time_reversal", "adjoint"}
+        Operation currently being dispatched.
+    config : HybridSolverConfig
+        Hybrid split/downsampling/windowing configuration.
+    domain : Domain
+        Full-resolution output domain. For ``forward`` this is the physical
+        simulation domain; for inverse operations this is the reconstruction
+        domain.
+    input_domain : Domain
+        Full-resolution domain of the data being split. This is usually the
+        same as ``domain`` for ``forward`` and ``data_domain`` for inverse
+        operations.
+    component_domain : Domain
+        Domain for the LF component actually passed to the backend. It may be
+        downsampled when ``config.downsample`` is true.
+    full_sensors : object
+        Original sensor object or mask supplied by the caller.
+    component_sensors : object
+        Sensor representation aligned to ``component_domain``.
+    full_sensor_mask : jnp.ndarray
+        Full-resolution sensor mask.
+    component_sensor_mask : jnp.ndarray
+        Sensor mask aligned to ``component_domain``.
+    ts : jnp.ndarray
+        Time grid passed to the LF operation. This may be extended for forward
+        solves.
+    original_ts : jnp.ndarray
+        Time grid supplied by the caller before any hybrid extension.
+    target_shape : tuple[int, ...]
+        Shape the LF result will be interpolated/truncated to before merging.
+    sources : object, optional
+        Source geometry for inverse operations.
+    wpt, data_wpt, img_wpt : MSWPT, optional
+        Wave-packet transforms relevant to the operation.
+    data_domain : Domain, optional
+        Full-resolution data domain for inverse operations.
+    """
+
+    operation: HybridOperationName
+    config: HybridSolverConfig
+    domain: Domain
+    input_domain: Domain
+    component_domain: Domain
+    full_sensors: Any
+    component_sensors: Any
+    full_sensor_mask: jnp.ndarray
+    component_sensor_mask: jnp.ndarray
+    ts: jnp.ndarray
+    original_ts: jnp.ndarray
+    target_shape: Tuple[int, ...]
+    sources: Any = None
+    wpt: Optional[MSWPT] = None
+    data_wpt: Optional[MSWPT] = None
+    img_wpt: Optional[MSWPT] = None
+    data_domain: Optional[Domain] = None
+
+    @property
+    def split_config(self) -> HybridSolverConfig:
+        """Alias for ``config`` for adapters that name it by responsibility."""
+        return self.config
+
+
+@dataclass(frozen=True)
+class HybridBackend:
+    """
+    Adapter for a low-frequency backend used by :class:`HybridSolver`.
+
+    Parameters
+    ----------
+    forward, time_reversal, adjoint : callable, optional
+        Operation callables with signature ``callable(component_array, context)
+        -> array``. At least one operation must be provided.
+    name : str
+        Human-readable backend name used in error messages.
+    """
+
+    forward: Optional[HybridOperation] = None
+    time_reversal: Optional[HybridOperation] = None
+    adjoint: Optional[HybridOperation] = None
+    name: str = "low-frequency backend"
+
+    def __post_init__(self) -> None:
+        """Validate that the backend exposes at least one operation."""
+        if not any(getattr(self, op) is not None for op in _HYBRID_OPERATION_NAMES):
+            raise ValueError(
+                "HybridBackend requires at least one operation: "
+                "forward, time_reversal, or adjoint."
+            )
+
+    @property
+    def operations(self) -> Tuple[str, ...]:
+        """Operation names implemented by this backend."""
+        return tuple(
+            op for op in _HYBRID_OPERATION_NAMES if getattr(self, op) is not None
+        )
+
+    def supports(self, operation: HybridOperationName) -> bool:
+        """Return whether this backend implements ``operation``."""
+        self._validate_operation_name(operation)
+        return getattr(self, operation) is not None
+
+    def require(self, operation: HybridOperationName) -> HybridOperation:
+        """
+        Return an operation callable or raise a clear missing-operation error.
+
+        Parameters
+        ----------
+        operation : {"forward", "time_reversal", "adjoint"}
+            Operation required by the hybrid solve.
+        """
+        self._validate_operation_name(operation)
+        solver_op = getattr(self, operation)
+        if solver_op is None:
+            available = ", ".join(self.operations) or "none"
+            raise NotImplementedError(
+                f"{self.name} does not implement LF operation {operation!r}. "
+                f"Available operations: {available}."
+            )
+        return solver_op
+
+    @staticmethod
+    def _validate_operation_name(operation: str) -> None:
+        if operation not in _HYBRID_OPERATION_NAMES:
+            allowed = ", ".join(_HYBRID_OPERATION_NAMES)
+            raise ValueError(
+                f"Unknown hybrid operation {operation!r}; expected {allowed}."
+            )
+
+    @classmethod
+    def from_beamax_solver(
+        cls, solver: Any, *, name: Optional[str] = None
+    ) -> "HybridBackend":
+        """
+        Wrap a beamax-style solver object as a low-frequency backend.
+
+        The wrapped solver may implement any subset of ``forward``,
+        ``time_reversal``, and ``adjoint``. Each method is called with the
+        current component-domain objects from :class:`HybridContext`.
+        """
+        backend_name = name or solver.__class__.__name__
+        operations: dict[str, HybridOperation] = {}
+
+        if callable(getattr(solver, "forward", None)):
+
+            def forward(component: jnp.ndarray, context: HybridContext) -> Any:
+                return solver.forward(
+                    component,
+                    context.component_domain,
+                    context.component_sensor_mask,
+                    context.ts,
+                )
+
+            operations["forward"] = forward
+
+        if callable(getattr(solver, "time_reversal", None)):
+
+            def time_reversal(component: jnp.ndarray, context: HybridContext) -> Any:
+                return solver.time_reversal(
+                    component,
+                    context.component_domain,
+                    context.component_sensor_mask,
+                    context.sources,
+                    context.ts,
+                )
+
+            operations["time_reversal"] = time_reversal
+
+        if callable(getattr(solver, "adjoint", None)):
+
+            def adjoint(component: jnp.ndarray, context: HybridContext) -> Any:
+                return solver.adjoint(
+                    component,
+                    context.component_domain,
+                    context.component_sensor_mask,
+                    context.sources,
+                    context.ts,
+                )
+
+            operations["adjoint"] = adjoint
+
+        return cls(
+            forward=operations.get("forward"),
+            time_reversal=operations.get("time_reversal"),
+            adjoint=operations.get("adjoint"),
+            name=backend_name,
+        )
 
 
 class InterpolationStrategy(ABC):
@@ -190,41 +397,42 @@ class ZoomInterpolation(InterpolationStrategy):
 
 class HybridSolver(eqx.Module):
     """
-    Hybrid MSGB / grid-based wave solver.
+    Hybrid MSGB / low-frequency backend solver.
 
     Splits the input pressure in frequency: a fast high-frequency solver
     (typically :class:`beamax.solvers.MSGBSolver`) handles the sparse, highly
-    oscillatory content, while a conventional low-frequency solver handles
+    oscillatory content, while a configurable low-frequency backend handles
     the smooth residual, optionally on a coarser grid. The two results are
     added back together on the target grid.
 
     Parameters
     ----------
-    lf_solver : Solver
-        Solver used for the low-frequency component. Must implement the
-        :class:`beamax.solvers.Solver` interface.
-    hf_solver : MSGBSolver or Solver
+    hf_solver : MSGBSolver or object
         Solver used for the high-frequency component.
+    lf_backend : HybridBackend
+        Low-frequency backend adapter. Each operation callable receives the
+        LF component and a :class:`HybridContext`.
     config : HybridSolverConfig
         Frequency-split and windowing configuration.
 
     Notes
     -----
-    Both solvers must agree on the global time grid. The LF solver is
-    invoked on a possibly-downsampled domain (per ``config``); output is
-    interpolated back to the target grid via Fourier or spline interpolation
-    depending on whether the domain is periodic.
+    The LF backend does not need to subclass :class:`beamax.solvers.Solver`.
+    It only needs to provide at least one operation through
+    :class:`HybridBackend`. Missing operations fail when called, not at hybrid
+    construction time.
     """
 
-    lf_solver: Solver
-    hf_solver: Union[MSGBSolver, Solver]
+    lf_backend: HybridBackend = eqx.field(static=True)
+    hf_solver: Any
     config: HybridSolverConfig = eqx.field(static=True)
     _interpolator: InterpolationStrategy = eqx.field(static=True)
 
     def __init__(
         self,
-        lf_solver: Solver,
-        hf_solver: Union[MSGBSolver, Solver],
+        *,
+        hf_solver: Any,
+        lf_backend: HybridBackend,
         config: Optional[HybridSolverConfig] = None,
         **config_kwargs,
     ):
@@ -233,16 +441,16 @@ class HybridSolver(eqx.Module):
 
         Parameters
         ----------
-        lf_solver : Solver
-            Low-frequency solver
-        hf_solver : Solver
-            High-frequency solver
+        hf_solver : MSGBSolver or object
+            High-frequency solver.
+        lf_backend : HybridBackend
+            Low-frequency backend adapter.
         config : HybridSolverConfig, optional
-            Configuration object
+            Configuration object.
         **config_kwargs
-            Alternative: pass config parameters as kwargs
+            Alternative: pass config parameters as kwargs.
         """
-        self.lf_solver = lf_solver
+        self.lf_backend = lf_backend
         self.hf_solver = hf_solver
 
         if config is None:
@@ -262,8 +470,9 @@ class HybridSolver(eqx.Module):
 
     @staticmethod
     def create_with_domain(
-        lf_solver: Solver,
-        hf_solver: Union[MSGBSolver, Solver],
+        *,
+        hf_solver: Any,
+        lf_backend: HybridBackend,
         domain: Domain,
         config: Optional[HybridSolverConfig] = None,
         **config_kwargs,
@@ -276,10 +485,10 @@ class HybridSolver(eqx.Module):
 
         Parameters
         ----------
-        lf_solver : Solver
-            Low-frequency solver.
-        hf_solver : MSGBSolver or Solver
+        hf_solver : MSGBSolver or object
             High-frequency solver.
+        lf_backend : HybridBackend
+            Low-frequency backend adapter.
         domain : Domain
             Domain whose periodic flags determine interpolation choice.
         config : HybridSolverConfig, optional
@@ -306,7 +515,11 @@ class HybridSolver(eqx.Module):
 
             config = HybridSolverConfig(**config_dict)
 
-        return HybridSolver(lf_solver, hf_solver, config)
+        return HybridSolver(
+            hf_solver=hf_solver,
+            lf_backend=lf_backend,
+            config=config,
+        )
 
     def _extend_time(self, ts: jnp.ndarray) -> jnp.ndarray:
         """
@@ -425,49 +638,37 @@ class HybridSolver(eqx.Module):
             return data * window[:, None]
         return data * window
 
-    def _solve_lf_component(
+    def _run_lf_backend(
         self,
+        operation: HybridOperationName,
         lf_data: jnp.ndarray,
-        solver_method: Callable,
-        target_shape: Tuple,
-        domain: Domain,
-        sensors,
-        ts: jnp.ndarray,
+        context: HybridContext,
         apply_windowing: bool = True,
         apply_interpolation: bool = True,
-        **solver_kwargs,
     ) -> jnp.ndarray:
         """
-        Generic LF component solver with configurable processing.
+        Run an LF backend operation and apply hybrid-owned post-processing.
 
         Parameters
         ----------
+        operation : {"forward", "time_reversal", "adjoint"}
+            Backend operation to dispatch.
         lf_data : jnp.ndarray
-            Low-frequency input data
-        solver_method : callable
-            Solver method (e.g., lf_solver.forward, lf_solver.time_reversal)
-        target_shape : Tuple
-            Shape to interpolate to
-        domain : Domain
-            LF domain (possibly downsampled)
-        sensors : array
-            LF sensor mask (possibly downsampled)
-        ts : jnp.ndarray
-            Time array
+            Low-frequency input data.
+        context : HybridContext
+            Stable adapter context.
         apply_windowing : bool
-            Whether to apply windowing (typically True for forward, False for TR)
+            Whether to apply windowing (typically True for forward, False for TR).
         apply_interpolation : bool
-            Whether to interpolate spatially (typically True if downsampled)
-        **solver_kwargs
-            Method-specific parameters (e.g., sources, data_domain for TR)
+            Whether to interpolate to ``context.target_shape`` when downsampled.
 
         Returns
         -------
         jnp.ndarray
-            LF result with shape=target_shape
+            LF result post-processed for merging with the HF result.
         """
-        # Solve with appropriate parameters
-        lf_result = solver_method(lf_data, domain, sensors, ts, **solver_kwargs)
+        solver_method = self.lf_backend.require(operation)
+        lf_result = jnp.asarray(solver_method(lf_data, context))
 
         # Apply windowing if enabled and downsampled
         if apply_windowing and self.config.downsample:
@@ -475,7 +676,7 @@ class HybridSolver(eqx.Module):
 
         # Apply interpolation if enabled and downsampled
         if apply_interpolation and self.config.downsample:
-            lf_result = self._interpolator.interpolate(lf_result, target_shape)
+            lf_result = self._interpolator.interpolate(lf_result, context.target_shape)
 
         return lf_result
 
@@ -554,11 +755,36 @@ class HybridSolver(eqx.Module):
             Method-specific parameters
         """
         if isinstance(self.hf_solver, MSGBSolver):
-            solver_fn = getattr(self.hf_solver, method)
-            return solver_fn(data, domain, sensors, ts, wpt, **kwargs)[0]
-        else:
-            solver_fn = getattr(self.hf_solver, method)
+            if method == "forward":
+                return self.hf_solver.forward(data, domain, sensors, ts, wpt, **kwargs)
+            if method == "time_reversal":
+                return self.hf_solver.time_reversal(
+                    data,
+                    domain,
+                    sensors,
+                    kwargs["sources"],
+                    ts,
+                    kwargs["data_domain"],
+                    kwargs["data_wpt"],
+                )
+            if method == "adjoint":
+                return self.hf_solver.adjoint(
+                    data,
+                    domain,
+                    sensors,
+                    kwargs["sources"],
+                    ts,
+                    kwargs["data_domain"],
+                    kwargs["data_wpt"],
+                )
+            raise ValueError(f"Unknown HF method: {method!r}")
+
+        solver_fn = getattr(self.hf_solver, method)
+        if method == "forward":
             return solver_fn(data, domain, mask, ts, **kwargs)
+        if method in ("time_reversal", "adjoint"):
+            return solver_fn(data, domain, mask, kwargs["sources"], ts)
+        raise ValueError(f"Unknown HF method: {method!r}")
 
     def _validate_configuration(self, domain: Domain):
         """
@@ -633,14 +859,27 @@ class HybridSolver(eqx.Module):
         # Apply window to HF result
         hf_result = self._apply_window(hf_result)
 
-        # Solve LF with extended time (windowing + interpolation inside)
-        lf_result = self._solve_lf_component(
+        context = HybridContext(
+            operation="forward",
+            config=self.config,
+            domain=domain,
+            input_domain=domain,
+            component_domain=ds_domain,
+            full_sensors=sensors,
+            component_sensors=ds_mask,
+            full_sensor_mask=mask,
+            component_sensor_mask=ds_mask,
+            ts=ts_extended,
+            original_ts=ts,
+            target_shape=tuple(hf_result.shape),
+            wpt=wpt,
+        )
+
+        # Solve LF with extended time (windowing + interpolation inside).
+        lf_result = self._run_lf_backend(
+            "forward",
             p0_LF,
-            self.lf_solver.forward,
-            hf_result.shape,
-            ds_domain,
-            ds_mask,
-            ts_extended,
+            context,
             apply_windowing=True,
             apply_interpolation=True,
         )
@@ -704,36 +943,46 @@ class HybridSolver(eqx.Module):
         )
         data_HF, data_LF = data_HF.real, data_LF.real
 
-        # Solve HF (in reconstruction domain). MSGBSolver.time_reversal only
-        # takes the data-side wpt; `img_wpt` is unused by that path and was
-        # being passed as a stray 8th positional argument that would raise
-        # TypeError at runtime.
-        if isinstance(self.hf_solver, MSGBSolver):
-            hf_result = self.hf_solver.time_reversal(
-                data_HF,
-                domain,
-                sensors,
-                sources,
-                ts,
-                data_domain,
-                data_wpt,
-            )[0]
-        else:
-            hf_result = self.hf_solver.time_reversal(
-                data_HF, domain, ds_mask, sources, ts
-            )
-
-        # Solve LF (in reconstruction domain, no windowing for TR)
-        lf_result = self._solve_lf_component(
-            data_LF,
-            self.lf_solver.time_reversal,
-            hf_result.shape,
-            ds_domain,
-            ds_mask,
+        # Solve HF in reconstruction domain.
+        hf_result = self._solve_hf(
+            data_HF,
+            domain,
+            sensors,
+            mask,
             ts,
+            data_wpt,
+            method="time_reversal",
+            sources=sources,
+            data_domain=data_domain,
+            data_wpt=data_wpt,
+        )
+
+        context = HybridContext(
+            operation="time_reversal",
+            config=self.config,
+            domain=domain,
+            input_domain=data_domain,
+            component_domain=ds_domain,
+            full_sensors=sensors,
+            component_sensors=ds_mask,
+            full_sensor_mask=mask,
+            component_sensor_mask=ds_mask,
+            ts=ts,
+            original_ts=ts,
+            target_shape=tuple(hf_result.shape),
+            sources=sources,
+            data_wpt=data_wpt,
+            img_wpt=img_wpt,
+            data_domain=data_domain,
+        )
+
+        # Solve LF in component domain, then interpolate to reconstruction shape.
+        lf_result = self._run_lf_backend(
+            "time_reversal",
+            data_LF,
+            context,
             apply_windowing=False,  # No windowing for TR
             apply_interpolation=True,  # Still need interpolation
-            sources=sources,  # Pass TR-specific parameter
         )
 
         return jnp.asarray(hf_result + lf_result)
@@ -802,17 +1051,32 @@ class HybridSolver(eqx.Module):
             data_wpt=data_wpt,
         )
 
-        # Solve LF adjoint (no windowing)
-        lf_result = self._solve_lf_component(
+        context = HybridContext(
+            operation="adjoint",
+            config=self.config,
+            domain=domain,
+            input_domain=data_domain,
+            component_domain=ds_domain,
+            full_sensors=sensors,
+            component_sensors=ds_mask,
+            full_sensor_mask=mask,
+            component_sensor_mask=ds_mask,
+            ts=ts,
+            original_ts=ts,
+            target_shape=tuple(hf_result.shape),
+            sources=sources,
+            data_wpt=data_wpt,
+            img_wpt=img_wpt,
+            data_domain=data_domain,
+        )
+
+        # Solve LF adjoint in component domain, then interpolate to reconstruction shape.
+        lf_result = self._run_lf_backend(
+            "adjoint",
             data_LF,
-            self.lf_solver.adjoint,
-            hf_result.shape,
-            ds_domain,
-            ds_mask,
-            ts,
+            context,
             apply_windowing=False,
             apply_interpolation=True,
-            sources=sources,
         )
 
         return hf_result + lf_result

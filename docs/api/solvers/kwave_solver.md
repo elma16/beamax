@@ -1,6 +1,6 @@
 # `beamax.solvers.kwave_solver`
 
-Wrapper around `k-wave-python` for forward, time-reversal, and adjoint workflows.
+Wrapper around `k-wave-python` for forward, time reversal, and adjoint workflows.
 
 ## Notes
 

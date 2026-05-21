@@ -9,6 +9,7 @@ time-reversal, or sharding integration tests. In particular:
 - `MSGBSolver.forward` / `.time_reversal` / `.adjoint` sensor + periodicity
   validation,
 - `MSGBSolver.solve_ivp` (thin wrapper around `forward`),
+- explicit `*_with_params` diagnostic variants,
 - A small `adjoint` smoke test exercising the full
   `_prepare_adj_params → compute_TR_result` path.
 """
@@ -258,10 +259,36 @@ class TestSolveIvp:
             ode_solver=gb_solvers.solve_ODE_base,
             sum_method="all_real",
         )
-        out_fwd, _ = solver.forward(p0, domain, sensors, ts, wpt)
-        out_ivp, _ = solver.solve_ivp(p0, jnp.zeros_like(p0), domain, wpt, sensors, ts)
+        out_fwd = solver.forward(p0, domain, sensors, ts, wpt)
+        out_ivp = solver.solve_ivp(p0, jnp.zeros_like(p0), domain, wpt, sensors, ts)
 
         assert jnp.allclose(out_fwd, out_ivp, atol=1e-12)
+
+
+class TestDiagnosticParamVariants:
+    def test_forward_with_params_matches_forward(self):
+        """Diagnostic forward variant should expose params without changing data."""
+        domain, wpt = _build_small_1d_setup(periodic=True)
+        sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(domain.N))
+        p0 = jnp.cos(2.0 * jnp.pi * jnp.arange(domain.N[0]) / domain.N[0])
+        ts = jnp.linspace(0.0, 0.1, 8)
+
+        solver = MSGBSolver(
+            thr=8,
+            thr_strat="top_n",
+            batch_size=4,
+            input_type="spatial",
+            ode_solver=gb_solvers.solve_ODE_base,
+            sum_method="all_real",
+        )
+
+        sensor_data = solver.forward(p0, domain, sensors, ts, wpt)
+        diagnostic_data, params = solver.forward_with_params(
+            p0, domain, sensors, ts, wpt
+        )
+
+        assert jnp.allclose(sensor_data, diagnostic_data, atol=1e-12)
+        assert len(params) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +338,7 @@ def test_adjoint_runs_on_small_2d_problem():
     )
     data_wpt = MSWPT(data_decomp, redundancy=2, windowing="rectangular")
 
-    q_T, _ = solver.adjoint(
+    q_T = solver.adjoint(
         data=data,
         domain=domain,
         sensors=full_grid,

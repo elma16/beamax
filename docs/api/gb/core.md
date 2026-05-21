@@ -1,6 +1,6 @@
 # `beamax.gb.core`
 
-Low-level Gaussian beam field evaluation kernels.
+Low level Gaussian beam field evaluation kernels.
 
 ## Scope
 

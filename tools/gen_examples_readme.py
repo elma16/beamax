@@ -19,10 +19,9 @@ PRIVATE_EXAMPLE_DIRS = {"private", "thesis", "learned", "benchmarks"}
 
 # Friendly section titles, ordered
 GROUPS = [
-    ("examples/decomposition", "Frequency decomposition & MSWPT"),
     ("examples/forward", "Forward propagation"),
-    ("examples/reconstruction/time-reversal", "Time-reversal reconstruction"),
-    ("examples/rays", "Rays and autofocus"),
+    ("examples/reconstruction", "Reconstruction"),
+    ("examples/rays", "Rays and autodiff"),
     ("examples/single-gaussian-beam", "Single Gaussian beam diagnostics"),
 ]
 
@@ -71,6 +70,14 @@ def optional_note(py_path: Path) -> str:
     extras = metadata.get("extras", "").strip()
     install = f"`beamax[{extras}]`" if extras else "extra dependencies"
     return f" _(optional; requires {install}; skipped by default smoke)_"
+
+
+def optional_skip_reason(py_path: Path) -> str:
+    metadata = example_metadata(py_path)
+    extras = metadata.get("extras", "").strip()
+    if extras:
+        return f"requires `beamax[{extras}]`"
+    return "marked optional by `Example smoke: false`"
 
 
 def gallery_sort_key(py_path: Path) -> tuple[bool, str]:
@@ -155,6 +162,41 @@ def main() -> None:
         sections.append("\n".join(section))
 
     body = "\n".join(sections)
+    optional_examples = sorted(
+        (
+            p
+            for p in root.rglob("*.py")
+            if "__pycache__" not in p.parts
+            and is_public_example(p)
+            and not is_default_smoke_example(p)
+        ),
+        key=lambda p: str(p),
+    )
+    optional_lines = "\n".join(
+        f"- [`{p.relative_to(root)}`]({p.relative_to(root)}) — {optional_skip_reason(p)}."
+        for p in optional_examples
+    )
+    optional_section = (
+        f"""## Smoke Testing
+
+The local default smoke command runs the base examples and skips only examples
+marked `Example smoke: false`. These are skipped because they require optional
+runtime extras, not because they are unsupported.
+
+CI installs the k-Wave and matplotlib extras and runs all public examples with:
+
+```bash
+python tools/run_examples.py --directory examples --include-optional --silent-figures
+```
+
+Optional examples skipped by default:
+
+{optional_lines}
+
+"""
+        if optional_examples
+        else ""
+    )
     output = f"""# Examples
 
 This directory holds the supported beamax example gallery. Base examples are
@@ -170,10 +212,14 @@ Each notebook installs beamax from this repository in its first code cell:
 
 When running locally from a checkout, that cell can be skipped.
 
+Local script outputs are written under `plots/<category>/`, mirroring the
+script's directory under `examples/`.
+
 ## Gallery
 
 {body}
 
+{optional_section}
 ## Contributing a new example
 
 1. Add the script under the appropriate `examples/<category>/` directory with

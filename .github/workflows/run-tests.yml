@@ -58,27 +58,4 @@ jobs:
           MPLCONFIGDIR: /tmp/mplconfig
         run: |
           mkdir -p "$MPLCONFIGDIR"
-          python tools/run_examples.py --directory examples --fail-fast --silent-figures
-
-  fno-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - name: Install with fno extra
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,fno]"
-      - name: Run FNO smoke tests
-        run: pytest --cov=beamax --cov-report=xml -q tests/solvers/test_fno_solver.py
-
-      - name: Upload FNO coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          files: ./coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          flags: fno
-          fail_ci_if_error: false
+          python tools/run_examples.py --directory examples --include-optional --fail-fast --silent-figures

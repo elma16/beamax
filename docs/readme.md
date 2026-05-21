@@ -3,7 +3,7 @@
 [![CI](https://github.com/elma16/beamax/actions/workflows/run-tests.yml/badge.svg)](https://github.com/elma16/beamax/actions/workflows/run-tests.yml)
 [![codecov](https://codecov.io/gh/elma16/beamax/branch/main/graph/badge.svg)](https://codecov.io/gh/elma16/beamax)
 
-[Install](#installation) | [Documentation](https://elma16.github.io/beamax/) | [Examples](examples/README.md)
+[Install](#installation) | [Examples](examples/index.md) | [API reference](api/decomposition.md)
 
 beamax is a [JAX](https://github.com/jax-ml/jax) library for solving photoacoustic tomography problems using the multiscale Gaussian beam method.
 
@@ -28,7 +28,7 @@ pip install "beamax[viz-mpl]"
 pip install "beamax[kwave]"
 ```
 
-For development, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+For development, see [`CONTRIBUTING.md`](https://github.com/elma16/beamax/blob/main/CONTRIBUTING.md).
 
 ## Example
 
@@ -140,13 +140,13 @@ plt.show()
 
 The complete script also runs k-Wave and produces this comparison:
 
-![Output from the 2D photoacoustic forward example](docs/assets/2d_forward.png)
+![Output from the 2D photoacoustic forward example](assets/2d_forward.png)
 
-See [`examples/forward/2d_forward.py`](examples/forward/2d_forward.py).
+See [`examples/forward/2d_forward.py`](https://github.com/elma16/beamax/blob/main/examples/forward/2d_forward.py).
 
 ## Running examples
 
-The public examples are listed in [`examples/README.md`](examples/README.md).
+The public examples are listed in the [examples gallery](examples/index.md).
 Several have **Open in Colab** links if you want to try them on a GPU or TPU
 runtime.
 
@@ -175,7 +175,7 @@ Related acoustic simulation projects:
 
 ## License
 
-MIT; see `LICENSE`.
+MIT; see [`LICENSE`](https://github.com/elma16/beamax/blob/main/LICENSE).
 
 ## Citation
 

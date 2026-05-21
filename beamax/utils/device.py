@@ -154,3 +154,39 @@ def detect_root() -> Path:
             return package_root
 
     return Path.cwd()
+
+
+def example_plot_dir(example_file: str | os.PathLike[str]) -> Path:
+    """
+    Return the plot output directory for a public example script.
+
+    Examples mirror their first directory under ``examples/``:
+
+    - ``examples/forward/2d_forward.py`` -> ``<root>/plots/forward``
+    - ``examples/rays/2d_ray_bending.py`` -> ``<root>/plots/rays``
+
+    If ``example_file`` is outside the detected checkout's ``examples`` tree,
+    the file's immediate parent directory name is used as the category.
+
+    Parameters
+    ----------
+    example_file : str or os.PathLike
+        Usually ``__file__`` from an example script.
+
+    Returns
+    -------
+    Path
+        Existing output directory for plots from that example category.
+    """
+    root = detect_root()
+    example_path = Path(example_file).resolve()
+
+    try:
+        rel = example_path.relative_to((root / "examples").resolve())
+        category = rel.parts[0] if len(rel.parts) > 1 else example_path.parent.name
+    except ValueError:
+        category = example_path.parent.name
+
+    out = root / "plots" / category
+    out.mkdir(parents=True, exist_ok=True)
+    return out

@@ -14,13 +14,13 @@ Simulating the acoustic wave equation on large, smoothly varying media is expens
 - **`beamax.transforms`** — the multiscale wave-packet transform (`MSWPT.forward` / `MSWPT.inverse`), filter construction, frame analysis.
 - **`beamax.geometry`** — `Domain` (grid, spacing, wave speed, periodicity) and `Sensor` containers.
 - **`beamax.gb`** — low-level Gaussian beam kernels and ODE solvers for ray trajectories and amplitude evolution.
-- **`beamax.solvers`** — high-level solver classes (`MSGBSolver`, `HybridSolver`, optional `KWaveSolver` and FNO adapters) sharing a common interface for forward, adjoint, and time-reversal operations.
+- **`beamax.solvers`** — high-level solver classes (`MSGBSolver`, `HybridSolver`, and optional `KWaveSolver`) sharing a common interface for forward, adjoint, and time-reversal operations.
 - **`beamax.plotter`** — matplotlib / pyvista helpers for wavefields, beam trajectories, and MSWPT coefficients.
 - **`beamax.utils`** — FFT/interpolation primitives, device placement, and coefficient-indexing helpers.
 
 ## Start here
 
-- **New users** — see [Getting Started](getting-started.md) for installation, a minimal 1D forward solve, and a tour of the solver hierarchy.
+- **New users** — see the [README](readme.md) for installation, a minimal 2D photoacoustic forward solve, and links to the public examples.
 - **API reference** — use the navigation tree under **Basic API**; every module page is generated from the in-source docstrings via `mkdocstrings`.
 
 ## References and related projects

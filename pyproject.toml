@@ -1,12 +1,13 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "beamax"
 description = "Multiscale Gaussian Beams in JAX"
 version = "0.1.0"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 authors = [
@@ -26,7 +27,6 @@ keywords = [
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Programming Language :: Python :: 3",
@@ -45,7 +45,7 @@ dependencies = [
   "einops>=0.8",
   "optimistix>=0.0.9",
   "scipy>=1.11",
-  "h5py>=3.9",
+  "jaxtyping>=0.3",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +55,7 @@ dev = [
   "ruff",
   "pre-commit",
   "pyright",
+  "h5py>=3.9",
   "mkdocs",
   "mkdocs-material",
   "mkdocstrings-python",
@@ -68,9 +69,7 @@ viz = [
 
 kwave = ["k-wave-python>=0.6.2"]
 
-fno = ["neuraloperator", "torch", "pdequinox"]
-
-all = ["beamax[dev,viz,kwave,fno]"]
+all = ["beamax[dev,viz,kwave]"]
 
 [project.urls]
 Homepage = "https://github.com/elma16/beamax"

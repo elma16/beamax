@@ -8,8 +8,6 @@ parallel rays, overlays the paths on the speed map, and reports compact
 diagnostics for the amount of bending.
 """
 
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -62,9 +60,7 @@ def solve_rays() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
 
 
 def main() -> None:
-    root_dir = utils.detect_root()
-    plot_dir = Path(root_dir) / "plots"
-    plot_dir.mkdir(exist_ok=True)
+    plot_dir = utils.example_plot_dir(__file__)
     use_beamax_style()
 
     xt, pt, x0, ts = solve_rays()

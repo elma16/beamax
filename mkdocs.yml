@@ -74,13 +74,13 @@ plugins:
 nav:
   - index.md
   - Guides:
-      - getting-started.md
+      - README: readme.md
+      - Custom low-frequency solvers: guides/custom-low-frequency-solvers.md
   - Examples:
       - examples/index.md
-      - Frequency decomposition: examples/decomposition.md
       - Forward propagation: examples/forward.md
-      - Time reversal: examples/time-reversal.md
-      - Rays and autofocus: examples/rays.md
+      - Reconstruction: examples/reconstruction.md
+      - Rays and autodiff: examples/rays.md
       - Single Gaussian beam: examples/single-gaussian-beam.md
   - Basic API:
       - decomposition: api/decomposition.md
@@ -97,8 +97,6 @@ nav:
           - api/solvers/hybrid_solver.md
           - api/solvers/hybrid_solver_utils.md
           - api/solvers/kwave_solver.md
-          - api/solvers/fno_neurops.md
-          - api/solvers/fno_pdequinox.md
           - msgb_solver:
             - api/solvers/msgb_solvers/forward_solver_utils.md
             - api/solvers/msgb_solvers/msgb_solver.md

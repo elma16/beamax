@@ -109,7 +109,7 @@ class TestForwardAggregationConsistency2D:
 
         results = []
         for m in methods:
-            out, _ = _solver(m, batch_size=32).forward(
+            out = _solver(m, batch_size=32).forward(
                 p0,
                 domain_2d_periodic,
                 sensors,
@@ -207,7 +207,7 @@ class TestTimeReversalAggregationConsistency:
 
         results = []
         for sm in ["all_real", "scan_real", "vmap_real"]:
-            out, _ = _solver(sm, batch_size=16).time_reversal(
+            out = _solver(sm, batch_size=16).time_reversal(
                 data=data,
                 domain=domain,
                 sensors=eval_sensors,
@@ -243,7 +243,7 @@ class TestTimeReversalAggregationConsistency:
 
         results = []
         for sm in ["all_real", "scan_real", "vmap_real"]:
-            out, _ = _solver(sm, batch_size=8).time_reversal(
+            out = _solver(sm, batch_size=8).time_reversal(
                 data=data,
                 domain=domain,
                 sensors=eval_sensors,
@@ -288,7 +288,7 @@ class TestAdjointAggregationConsistency:
 
         results = []
         for sm in ["all_real", "scan_real", "vmap_real"]:
-            out, _ = _solver(sm, batch_size=8).adjoint(
+            out = _solver(sm, batch_size=8).adjoint(
                 data=data,
                 domain=domain,
                 sensors=eval_sensors,
@@ -301,10 +301,9 @@ class TestAdjointAggregationConsistency:
 
         for i, sm in enumerate(["scan_real", "vmap_real"], 1):
             diff = np.max(np.abs(results[0] - results[i]))
-            assert diff < 1e-8, (
-                f"adjoint 2D: {sm!r} differs from all_real by "
-                f"max abs diff {diff:.3e}"
-            )
+            assert (
+                diff < 1e-8
+            ), f"adjoint 2D: {sm!r} differs from all_real by max abs diff {diff:.3e}"
 
 
 # ============================================================================
@@ -340,7 +339,7 @@ def test_tr_2d_all_real_regression():
     eval_sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(n))
 
     data = _synth_sensor_data(domain, ts)
-    out, _ = _solver("all_real", batch_size=8).time_reversal(
+    out = _solver("all_real", batch_size=8).time_reversal(
         data=data,
         domain=domain,
         sensors=eval_sensors,

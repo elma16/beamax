@@ -1849,6 +1849,32 @@ def plot_coeffs(data, dyadic_decomp, wpt):
     plt.show()
 
 
+def _mswpt_highlight_indices(
+    dyadic_decomp: DyadicDecomposition,
+    cutoff_freq: float | None,
+    box_corners: np.ndarray | jnp.ndarray | tuple[int, int] | None,
+):
+    """Return coefficient-box indices using the same LF selection as hybrid solves."""
+    if cutoff_freq is not None:
+        idx = hybrid_solver_utils.get_indices_with_norm_less_than(
+            dyadic_decomp.centres_ndim, cutoff_freq
+        )
+        return np.asarray(idx)
+    if box_corners is None:
+        return None
+
+    bc = np.asarray(box_corners, dtype=int)
+    if bc.shape != (2,):
+        raise ValueError("box_corners must contain exactly two box indices.")
+
+    idx = hybrid_solver_utils.get_indices_between_two_opposing_corners(
+        dyadic_decomp.centres_ndim,
+        int(bc[0]),
+        int(bc[1]),
+    )
+    return np.asarray(idx)
+
+
 def plot_mswpt_coeffs(
     ax: plt.Axes,
     coeffs_array: jnp.ndarray,
@@ -1872,7 +1898,8 @@ def plot_mswpt_coeffs(
     cutoff_freq : float, optional
         Highlight boxes whose centre norm is below this threshold.
     box_corners : array-like, optional
-        Pair of global box indices defining a highlighted interval.
+        Pair of opposing global box indices defining the highlighted
+        low-frequency region.
     asymptote : bool, default=False
         Whether to overlay diagonal asymptote guides.
     log_scale : bool, default=False
@@ -1950,16 +1977,11 @@ def plot_mswpt_coeffs(
             ax.add_patch(rect)
 
     # --- Highlights ---
-    if cutoff_freq is not None:
-        idx = hybrid_solver_utils.get_indices_with_norm_less_than(
-            dyadic_decomp.centres_ndim, cutoff_freq
-        )
-        selector_indices = np.asarray(idx)
-    elif box_corners is not None:
-        bc = np.asarray(box_corners, dtype=int)
-        selector_indices = np.arange(bc[0], bc[1], dtype=int)
-    else:
-        selector_indices = None
+    selector_indices = _mswpt_highlight_indices(
+        dyadic_decomp,
+        cutoff_freq,
+        box_corners,
+    )
 
     if selector_indices is not None and selector_indices.size > 0:
         bounds_x, bounds_y = [], []
@@ -2090,15 +2112,11 @@ def plot_mswpt_coeffs_3d(
             )
             ax.add_patch(rect)
 
-    if cutoff_freq is not None:
-        selector_indices = hybrid_solver_utils.get_indices_with_norm_less_than(
-            dyadic_decomp.centres_ndim, cutoff_freq
-        )
-    elif box_corners is not None:
-        bc = np.asarray(box_corners, dtype=int)
-        selector_indices = np.arange(bc[0], bc[1], dtype=int)
-    else:
-        selector_indices = None
+    selector_indices = _mswpt_highlight_indices(
+        dyadic_decomp,
+        cutoff_freq,
+        box_corners,
+    )
 
     if selector_indices is not None and selector_indices.size > 0:
         bounds_x, bounds_y = [], []

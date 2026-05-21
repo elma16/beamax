@@ -347,7 +347,7 @@ class MSGBSolver(eqx.Module):
             raise ValueError(f"thr_strat must be one of {allowed}; got {thr_strat!r}.")
         if input_type not in {"spatial", "fourier"}:
             raise ValueError(
-                "input_type must be 'spatial' or 'fourier'; " f"got {input_type!r}."
+                f"input_type must be 'spatial' or 'fourier'; got {input_type!r}."
             )
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive; got {batch_size}.")
@@ -622,7 +622,6 @@ class MSGBSolver(eqx.Module):
 
         return surface, axis, coord
 
-    @eqx.filter_jit
     def forward(
         self,
         p0: jnp.ndarray,
@@ -632,7 +631,7 @@ class MSGBSolver(eqx.Module):
         wpt: MSWPT,
         *,
         dpdt: Optional[jnp.ndarray] = None,
-    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+    ) -> jnp.ndarray:
         """
         Solve the forward wave equation ``u_tt - c²∇²u = 0`` with MSGB.
 
@@ -658,10 +657,37 @@ class MSGBSolver(eqx.Module):
 
         Returns
         -------
+        jnp.ndarray, shape (Nt, Ns)
+            Pressure at each sensor over time.
+        """
+        sensor_data, _ = self.forward_with_params(
+            p0, domain, sensors, ts, wpt, dpdt=dpdt
+        )
+        return sensor_data
+
+    @eqx.filter_jit
+    def forward_with_params(
+        self,
+        p0: jnp.ndarray,
+        domain: Domain,
+        sensors: Union[Sensor, jnp.ndarray],
+        ts: jnp.ndarray,
+        wpt: MSWPT,
+        *,
+        dpdt: Optional[jnp.ndarray] = None,
+    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+        """
+        Forward MSGB solve plus diagnostic beam parameters.
+
+        This is the explicit diagnostic variant of :meth:`forward`. Most users
+        should call :meth:`forward`, which returns only sensor data.
+
+        Returns
+        -------
         sensor_data : jnp.ndarray, shape (Nt, Ns)
             Pressure at each sensor over time.
         params : tuple of jnp.ndarray
-            Beam parameters used in the solve, exposed for diagnostics:
+            Beam parameters used in the solve:
             ``(p0s, M0s, x0s, omegas, a0s, modes)``.
         """
         if dpdt is None:
@@ -716,7 +742,6 @@ class MSGBSolver(eqx.Module):
 
         return sensor_data, params
 
-    @eqx.filter_jit
     def time_reversal(
         self,
         data: jnp.ndarray,
@@ -726,7 +751,7 @@ class MSGBSolver(eqx.Module):
         ts,
         data_domain: Domain,
         data_wpt: MSWPT,
-    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+    ) -> jnp.ndarray:
         """
         MSGB time-reversal reconstruction.
 
@@ -752,11 +777,9 @@ class MSGBSolver(eqx.Module):
 
         Returns
         -------
-        p0_recon : jnp.ndarray, shape (*N,)
+        jnp.ndarray, shape (*N,)
             Reconstructed initial pressure. Scaled by 2 to match the
             standard full-field time-reversal convention.
-        params : tuple of jnp.ndarray
-            Beam parameters used in the solve, exposed for diagnostics.
 
         Raises
         ------
@@ -768,6 +791,36 @@ class MSGBSolver(eqx.Module):
         Time reversal here uses per-beam time intervals (via
         :func:`beamax.gb.solve_ODE_batch_t`) regardless of the forward
         integrator, to accommodate the variable emission time of each beam.
+        """
+        p0_recon, _ = self.time_reversal_with_params(
+            data, domain, sensors, sources, ts, data_domain, data_wpt
+        )
+        return p0_recon
+
+    @eqx.filter_jit
+    def time_reversal_with_params(
+        self,
+        data: jnp.ndarray,
+        domain: Domain,
+        sensors: Sensor,
+        sources: Sensor,
+        ts,
+        data_domain: Domain,
+        data_wpt: MSWPT,
+    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+        """
+        Time-reversal MSGB solve plus diagnostic beam parameters.
+
+        This is the explicit diagnostic variant of :meth:`time_reversal`. Most
+        users should call :meth:`time_reversal`, which returns only the
+        reconstructed field.
+
+        Returns
+        -------
+        p0_recon : jnp.ndarray, shape (*N,)
+            Reconstructed initial pressure.
+        params : tuple of jnp.ndarray
+            Beam parameters used in the solve.
         """
         if any(domain.periodic):
             raise ValueError(
@@ -814,7 +867,6 @@ class MSGBSolver(eqx.Module):
 
         return p0_recon, params
 
-    @eqx.filter_jit
     def solve_ivp(
         self,
         p0: jnp.ndarray,
@@ -823,7 +875,7 @@ class MSGBSolver(eqx.Module):
         wpt: MSWPT,
         sensors: Union[Sensor, jnp.ndarray],
         ts: jnp.ndarray,
-    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+    ) -> jnp.ndarray:
         """
         Solve the wave-equation IVP with non-zero initial velocity.
 
@@ -848,9 +900,27 @@ class MSGBSolver(eqx.Module):
 
         Returns
         -------
-        Same as :meth:`forward`.
+        jnp.ndarray
+            Sensor time series. Equivalent to :meth:`forward` with explicit
+            ``dpdt``.
         """
         return self.forward(p0, domain, sensors, ts, wpt, dpdt=dpdt)
+
+    def solve_ivp_with_params(
+        self,
+        p0: jnp.ndarray,
+        dpdt: jnp.ndarray,
+        domain: Domain,
+        wpt: MSWPT,
+        sensors: Union[Sensor, jnp.ndarray],
+        ts: jnp.ndarray,
+    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+        """
+        IVP solve plus diagnostic beam parameters.
+
+        This is the explicit diagnostic variant of :meth:`solve_ivp`.
+        """
+        return self.forward_with_params(p0, domain, sensors, ts, wpt, dpdt=dpdt)
 
     def _prepare_adj_params(
         self,
@@ -912,7 +982,6 @@ class MSGBSolver(eqx.Module):
 
         return pts, Mts, xts, omegas, ats, signum, ts
 
-    @eqx.filter_jit
     def adjoint(
         self,
         data: jnp.ndarray,
@@ -922,7 +991,7 @@ class MSGBSolver(eqx.Module):
         ts: jnp.ndarray,
         data_domain: Domain,
         data_wpt: MSWPT,
-    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+    ) -> jnp.ndarray:
         """
         MSGB adjoint solve (Arridge-style): F = w ∂_t r(T - t), then B^{-1}F + TR.
 
@@ -966,11 +1035,38 @@ class MSGBSolver(eqx.Module):
 
         Returns
         -------
-        q_T : jnp.ndarray
+        jnp.ndarray
             Adjoint field q(T, x) on the reconstruction domain (same
             shape as a forward initial condition).
-        params : Tuple
-            Beam parameters used internally (for inspection / debugging).
+        """
+        q_T, _ = self.adjoint_with_params(
+            data, domain, sensors, sources, ts, data_domain, data_wpt
+        )
+        return q_T
+
+    @eqx.filter_jit
+    def adjoint_with_params(
+        self,
+        data: jnp.ndarray,
+        domain: Domain,
+        sensors: Union[Sensor, jnp.ndarray],
+        sources: Sensor,
+        ts: jnp.ndarray,
+        data_domain: Domain,
+        data_wpt: MSWPT,
+    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+        """
+        Adjoint MSGB solve plus diagnostic beam parameters.
+
+        This is the explicit diagnostic variant of :meth:`adjoint`. Most users
+        should call :meth:`adjoint`, which returns only the adjoint field.
+
+        Returns
+        -------
+        q_T : jnp.ndarray
+            Adjoint field q(T, x) on the reconstruction domain.
+        params : tuple of jnp.ndarray
+            Beam parameters used internally.
         """
         if any(domain.periodic):
             raise ValueError(

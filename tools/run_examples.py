@@ -32,6 +32,15 @@ def is_default_smoke_example(file_path: Path) -> bool:
     return smoke.lower() not in {"0", "false", "no", "off"}
 
 
+def optional_skip_reason(file_path: Path) -> str:
+    """Return the reason an optional example is skipped by the default suite."""
+    metadata = example_metadata(file_path)
+    extras = metadata.get("extras", "").strip()
+    if extras:
+        return f"requires beamax[{extras}]"
+    return "marked optional by Example smoke: false"
+
+
 def run_python_files(
     directory: str | Path,
     fail_fast: bool = False,
@@ -39,6 +48,7 @@ def run_python_files(
     include_optional: bool = False,
 ) -> None:
     total_failures = 0
+    skipped_optional: list[tuple[Path, str]] = []
 
     # Use pathlib to recursively find all Python files.
     for file_path in sorted(Path(directory).rglob("*.py")):
@@ -47,6 +57,7 @@ def run_python_files(
         ):
             continue
         if not include_optional and not is_default_smoke_example(file_path):
+            skipped_optional.append((file_path, optional_skip_reason(file_path)))
             continue
         print(f"Running: {file_path}")
 
@@ -87,6 +98,11 @@ def run_python_files(
         print(f"Total failures: {total_failures}")
         sys.exit(1)
     else:
+        if skipped_optional:
+            print("\nSkipped optional examples:")
+            for path, reason in skipped_optional:
+                print(f"  - {path} ({reason})")
+            print("Run again with --include-optional to execute them.")
         print("All Python files ran successfully.")
 
 
