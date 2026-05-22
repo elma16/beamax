@@ -128,6 +128,8 @@ axes[0].scatter(
     linewidths=0.4,
 )
 axes[0].set_title(r"$p_0$")
+axes[0].set_xticks([])
+axes[0].set_yticks([])
 axes[1].imshow(msgb_data, origin="lower", aspect="auto", cmap="viridis")
 axes[1].set_title("MSGB sensor data")
 axes[1].set_xlabel(r"$x_s$")
