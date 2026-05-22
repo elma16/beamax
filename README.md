@@ -50,33 +50,33 @@ from beamax.solvers import MSGBSolver
 jax.config.update("jax_enable_x64", True)
 
 
-# Build two localized high-frequency wave packets.
-def make_initial_pressure(dyadic, redundancy=2):
+# Build the same two-packet p0 used by examples/forward/2d_forward.py.
+def make_initial_pressure(dyadic):
     grid = dyadic.fourier_meshgrid
     high = transforms.compute_frames(
         dyadic,
         125,
         jnp.array([11, 6]),
         grid,
-        redundancy,
-        "none",
+        redundancy=2,
+        windowing="none",
     )
     low = transforms.compute_frames(
         dyadic,
         44,
         jnp.array([11, 3]),
         grid,
-        redundancy,
-        "none",
+        redundancy=2,
+        windowing="none",
     )
 
     p0 = utils.unitary_ifft(high) + utils.unitary_ifft(low)
-    p0 = p0.T.real
-    return p0 / jnp.max(jnp.abs(p0))
+    p0 = p0 / jnp.max(jnp.abs(p0))
+    return p0.T.real
 
 
-# 1. Define a 64 x 64 PAT domain with homogeneous sound speed.
-n = (64, 64)
+# 1. Define a 128 x 128 PAT domain with homogeneous sound speed.
+n = (128, 128)
 domain = Domain(
     N=n,
     dx=(1.0e-4, 1.0e-4),
@@ -87,9 +87,9 @@ domain = Domain(
 
 # 2. Build the multiscale wave-packet transform and $p_0$.
 decomp = DyadicDecomposition(
-    num_levels=2,
+    num_levels=3,
     N=domain.N,
-    num_boxes_levels=(4, 8),
+    num_boxes_levels=(4, 8, 16),
     box_aspect_ratio=(1, 1),
 )
 wpt = MSWPT(decomp, redundancy=2, windowing="rectangular_mirror")
@@ -110,11 +110,11 @@ solver = MSGBSolver(
     sum_method="scan_real",
 )
 
-# 5. Apply the MSGB forward operator: $p_0$ -> sensor data.
+# 5. Apply the MSGB forward operator: p0 -> sensor data.
 msgb_data = solver.forward(p0, domain, sensors, ts, wpt)
 msgb_data = np.asarray(msgb_data.block_until_ready())
 
-# 6. Plot $p_0$ and MSGB sensor data.
+# 6. Plot p0 and MSGB sensor data.
 fig, axes = plt.subplots(1, 2, figsize=(8, 3.5), constrained_layout=True)
 axes[0].imshow(np.asarray(p0), origin="lower", cmap="viridis")
 sensor_rows, sensor_cols = np.nonzero(np.asarray(sensor_mask))
