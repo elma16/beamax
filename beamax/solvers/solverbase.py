@@ -133,7 +133,8 @@ class Solver(ABC):
         Returns
         -------
         Array, shape (*N,)
-            Reconstructed initial pressure on the image grid. Unlike
-            time-reversal, the adjoint is the *exact* transpose of the
-            discretised forward map.
+            Adjoint or adjoint-backprojection field on the image grid. Whether
+            this is an exact transpose of a discretised forward map or a
+            continuous/principal-symbol approximation is implementation
+            specific and must be stated by the concrete solver.
         """

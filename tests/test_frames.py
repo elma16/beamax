@@ -37,9 +37,15 @@ def compute_frames_custom(
     fourier_space: jnp.ndarray,
     windowing: str,
 ) -> jnp.ndarray:
-    ndim = dyadic_decomp.ndim
     box_length = dyadic_decomp.box_lengths[level]
-    Lls = box_length * redundancy
+    support_lengths = (
+        box_length * redundancy * jnp.asarray(dyadic_decomp.box_aspect_ratio)
+    )
+    half_support = support_lengths // 2
+    grid_shape = jnp.asarray(dyadic_decomp.N)
+    parity_index = (centre + grid_shape // 2) // half_support
+    parity_sign = 1 - 2 * (parity_index & 1)
+    rolls = parity_sign * (half_support // 2)
 
     g = transforms.single_filter_coord(
         centre,
@@ -50,9 +56,15 @@ def compute_frames_custom(
         windowing,
     )
 
-    x_dot_k = jnp.einsum("...d,d->...", fourier_space, k)
+    scaled_phase = jnp.einsum(
+        "...d,d->...", fourier_space - centre + rolls, k / support_lengths
+    )
 
-    return Lls ** (-ndim / 2) * jnp.exp(-2 * jnp.pi * 1j * x_dot_k / Lls) * g
+    return (
+        jnp.prod(support_lengths) ** (-0.5)
+        * jnp.exp(-2 * jnp.pi * 1j * scaled_phase)
+        * g
+    )
 
 
 @pytest.mark.parametrize(
@@ -397,6 +409,62 @@ def test_single_coeff_eq_frame(
                 dyadic_decomp, idx_guess, k_guess, KXY, redundancy, windowing
             )
             assert jnp.allclose(phi_kx, f_rect, atol=1e-16)
+
+
+@pytest.mark.parametrize(
+    "N, aspect, frame_redundancy",
+    [
+        ((64, 32), (2, 1), 1),
+        ((64, 32), (2, 1), 2),
+        ((32, 64), (1, 2), 1),
+        ((32, 64), (1, 2), 2),
+    ],
+)
+def test_anisotropic_single_coeff_eq_frame(N, aspect, frame_redundancy):
+    """Explicit frame atoms match the per-axis local-FFT reconstruction."""
+    windowing = "rectangular" if frame_redundancy == 1 else "rectangular_mirror"
+    decomp = DyadicDecomposition(
+        num_levels=1,
+        N=N,
+        num_boxes_levels=(4,),
+        box_aspect_ratio=aspect,
+    )
+    wpt = transforms.MSWPT(decomp, redundancy=frame_redundancy, windowing=windowing)
+
+    coeff_shape = tuple(wpt.coeff_shapes[0])
+    local_k = (coeff_shape[1] - 1, coeff_shape[2] - 1)
+    coeff_idx = jnp.ravel_multi_index((0, *local_k), coeff_shape)
+    coeffs = jnp.zeros(wpt.total_coeffs).at[coeff_idx].set(1.0)
+
+    reconstructed = wpt.inverse(coeffs, "fourier")
+    frame = transforms.compute_frames(
+        decomp,
+        0,
+        jnp.asarray(local_k),
+        decomp.fourier_meshgrid,
+        frame_redundancy,
+        windowing,
+    )
+
+    assert jnp.allclose(frame, reconstructed, atol=1e-16)
+
+
+def test_isotropic_redundancy_two_phase_offsets_are_exactly_trivial():
+    """The published rho=2 convention must not perturb packet amplitudes."""
+    decomp = DyadicDecomposition(2, (64, 64), (4, 8), (1, 1))
+    wpt = transforms.MSWPT(decomp, redundancy=2, windowing="rectangular")
+    shapes = utils.compute_coeff_shapes(
+        decomp, wpt.redundancy, jnp.arange(decomp.num_levels)
+    )
+    levels, indices = utils.find_tensor_and_multiindex(
+        jnp.arange(wpt.total_coeffs), shapes
+    )
+    offsets = jnp.r_[0, jnp.cumsum(decomp.num_boxes_ndim)]
+    boxes = indices[0] + offsets[levels]
+
+    phases = transforms.compute_frame_phase(decomp, boxes, indices[1:].T, 2)
+
+    assert jnp.array_equal(phases, jnp.ones_like(phases))
 
 
 if __name__ == "__main__":

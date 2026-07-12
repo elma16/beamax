@@ -130,24 +130,32 @@ def prepare_M0(
     M0: Optional[Complex[Array, "b d d"]],
 ) -> Complex[Array, "b d d"]:
     """
-    Construct/validate initial Hessian.
+    Construct an initial Hessian or pass through an explicit one.
 
     Parameters
     ----------
     alpha0 : jnp.ndarray | None, shape (b, d), complex
         If given, produces diagonal M0 = diag(alpha0). Im(alpha0) should be > 0.
     M0 : jnp.ndarray | None, shape (b, d, d), complex
-        If given, must be symmetric with Im(M0) ≻ 0.
+        Explicit Hessian. Mathematical callers must ensure symmetry and
+        ``Im(M0) ≻ 0``; call :func:`check_M0` in eager validation code.
 
     Returns
     -------
     jnp.ndarray, shape (b, d, d), complex
-        Validated/constructed Hessian.
+        Constructed or supplied Hessian.
 
     Raises
     ------
     ValueError
         If both or neither of `alpha0` and `M0` are provided.
+
+    Notes
+    -----
+    This helper is used inside JIT-compiled solver paths, so it cannot raise a
+    Python exception from data-dependent positivity checks. Use
+    :func:`check_M0` before entering a compiled solve when accepting untrusted
+    user-supplied Hessians.
     """
     if (M0 is None) == (alpha0 is None):
         raise ValueError("Provide either alpha0 or M0, but not both.")
@@ -155,10 +163,8 @@ def prepare_M0(
     if M0 is None:
         assert alpha0 is not None  # exclusive-or guarded above
         d = alpha0.shape[-1]
-        # assert jnp.all(alpha0.imag > 0), "Imaginary part of alpha0 must be positive."
         M0 = jnp.einsum("bd,dj->bdj", alpha0, jnp.eye(d))
 
-    # check_M0(M0)
     return M0
 
 

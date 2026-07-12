@@ -110,6 +110,37 @@ def test_decomp_is_dyadic(num_levels, N, num_boxes_outer_level, box_aspect_ratio
         ), f"Box lengths at level {i} are not dyadic."
 
 
+@pytest.mark.parametrize(
+    "N, expected_lengths, expected_retained",
+    [
+        ((2048,), (32, 64, 128), (4, 6, 12)),
+        ((256, 256), (4, 8, 16), (16, 60, 240)),
+    ],
+)
+def test_reported_three_level_thesis_tiling(N, expected_lengths, expected_retained):
+    """Lock widths and retained counts reported for the MSWPT experiment."""
+    decomp = DyadicDecomposition(
+        num_levels=3,
+        N=N,
+        num_boxes_levels=(4, 8, 16),
+        box_aspect_ratio=(1,) * len(N),
+    )
+
+    assert tuple(int(x) for x in decomp.box_lengths) == expected_lengths
+    assert tuple(int(x) for x in decomp.num_boxes_ndim) == expected_retained
+
+
+@pytest.mark.parametrize("N", [(64, 64), (32, 32)])
+def test_rejects_zero_width_or_zero_variance_inner_boxes_cleanly(N):
+    with pytest.raises(ValueError, match="at least 2 Fourier samples"):
+        DyadicDecomposition(
+            num_levels=3,
+            N=N,
+            num_boxes_levels=(4, 8, 16),
+            box_aspect_ratio=(1, 1),
+        )
+
+
 # @pytest.mark.parametrize(
 #     "num_levels, N, num_boxes_outer_level, box_aspect_ratio", common_params3d
 # )

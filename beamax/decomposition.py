@@ -152,7 +152,7 @@ def validate_params(
                 f"Expected smallest-axis sequence {num_boxes_levels}, got {implied}."
             )
 
-    # Max levels given smallest side and coarsest tiling (by smallest-axis count).
+    # Max levels given the innermost smallest-axis box count.
     N_ref = min(N)
     base = num_boxes_levels[0]
     if base <= 0 or base > N_ref:
@@ -167,6 +167,11 @@ def validate_params(
     levels_desc = list(range(num_levels - 1, -1, -1))
     denom_last = num_boxes_levels[-1]
     box_lengths = [N_ref // (denom_last * (2**L)) for L in levels_desc]
+    if any(L < 2 for L in box_lengths):
+        raise ValueError(
+            "Every box length must be at least 2 Fourier samples so the "
+            f"Gaussian width is positive; computed {box_lengths} for N_ref={N_ref}."
+        )
     if any(N_ref % L != 0 for L in box_lengths):
         raise ValueError(
             f"Box lengths must divide N_ref={N_ref}; computed {box_lengths}."
@@ -178,10 +183,10 @@ class DyadicDecomposition(eqx.Module):
     Multi-level dyadic tiling of Fourier space on a rectangular grid.
 
     The decomposition partitions Fourier space into frequency boxes organised
-    across ``num_levels`` scales. Each coarser level covers roughly half the
-    resolution of the next, and the outer ring of boxes at each non-final
-    level is retained while an inner cutout (covered by the finer level) is
-    removed — this gives the "dyadic" structure.
+    across ``num_levels`` scales. Levels are stored from the innermost
+    low-frequency region to the outermost high-frequency region. Box side
+    lengths double with the level index, and the central region represented at
+    the preceding level is removed from each later level.
 
     Parameters
     ----------
@@ -191,8 +196,9 @@ class DyadicDecomposition(eqx.Module):
     N : Tuple[int, ...]
         Grid shape of the underlying domain per spatial axis.
     num_boxes_levels : Tuple[int, ...]
-        Boxes per side along the smallest spatial axis, one entry per level,
-        from coarsest to finest. Typically a dyadic progression such as
+        Outer boxes per side along the smallest spatial axis, one entry per
+        level from the innermost to the outermost region. Typically a dyadic
+        progression such as
         ``(4, 8)`` or ``(2, 4, 8)``.
     box_aspect_ratio : Tuple[int, ...]
         Integer aspect ratio of each box per axis, applied at every level.
@@ -332,8 +338,9 @@ class DyadicDecomposition(eqx.Module):
         Returns
         -------
         jnp.ndarray, shape (num_levels,), int32
-            Length at level ``L`` is ``min(N) // (num_boxes_levels[-1] * 2**(num_levels-1-L))``;
-            halves moving coarse → fine.
+            For zero-based level ``r``, the length is
+            ``min(N) // (num_boxes_levels[-1] * 2**(num_levels - 1 - r))``.
+            It doubles as ``r`` increases.
         """
         N_ref = int(min(self.N))
         levels_desc = np.arange(self.num_levels - 1, -1, -1, dtype=np.int32)
@@ -383,8 +390,8 @@ class DyadicDecomposition(eqx.Module):
         Returns
         -------
         np.ndarray, shape (num_levels,), dtype=int32
-            Per-level box counts after removing inner cutouts covered by
-            finer levels.
+            Per-level box counts after removing central cutouts represented by
+            preceding inner levels.
         """
         boxes_total: List[int] = []
         cutouts: List[int] = []

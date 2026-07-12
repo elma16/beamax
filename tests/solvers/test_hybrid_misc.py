@@ -15,7 +15,7 @@ from typing import Literal
 import jax.numpy as jnp
 import pytest
 
-from beamax import geometry
+from beamax import geometry, utils
 from beamax.solvers.hybrid_solver import (
     FourierInterpolation,
     HybridBackend,
@@ -359,6 +359,70 @@ def test_fourier_interpolation_upsamples_constant_array():
     out = FourierInterpolation().interpolate(arr, (8, 8))
     assert out.shape == (8, 8)
     assert float(jnp.std(out)) < 1e-8
+
+
+def test_fourier_interpolation_inverts_unitary_lf_crop():
+    """The hybrid resize exactly cancels the paired unitary LF crop."""
+    i, j = jnp.meshgrid(jnp.arange(8), jnp.arange(8), indexing="ij")
+    full = 1.0 + 0.2 * jnp.cos(2 * jnp.pi * i / 8) + 0.3 * jnp.cos(2 * jnp.pi * j / 8)
+    coarse_ft = utils.crop_centered(utils.unitary_fft(full), (4, 4))
+    coarse = utils.unitary_ifft(coarse_ft)
+
+    reconstructed = FourierInterpolation().interpolate(coarse, full.shape)
+
+    assert jnp.allclose(reconstructed, full, atol=5e-7)
+
+
+def test_hybrid_forward_fourier_normalization_for_planar_sensor_data():
+    """Domain-volume scaling restores amplitudes after detector-grid resize."""
+    full_domain = geometry.Domain(
+        N=(8, 8),
+        dx=(1.0, 1.0),
+        c=lambda x: 1.0 + 0.0 * x[..., 0],
+        periodic=(True, True),
+    )
+    coarse_domain = geometry.Domain(
+        N=(4, 4),
+        dx=(2.0, 2.0),
+        c=lambda x: 1.0 + 0.0 * x[..., 0],
+        periodic=(True, True),
+    )
+    config = HybridSolverConfig(
+        box_corners=jnp.array([0, 1]),
+        downsample=True,
+        interp_method="fourier",
+    )
+    # A 2-D unitary crop inflates the coarse LF field, and hence any linear
+    # sensor prediction, by sqrt((8/4)^2) = 2.
+    backend = HybridBackend(forward=lambda component, context: 2.0 * jnp.ones((3, 4)))
+    solver = HybridSolver(
+        hf_solver=_StrictHybridHFSolver(), lf_backend=backend, config=config
+    )
+    context = HybridContext(
+        operation="forward",
+        config=config,
+        domain=full_domain,
+        input_domain=full_domain,
+        component_domain=coarse_domain,
+        full_sensors=None,
+        component_sensors=None,
+        full_sensor_mask=jnp.ones(full_domain.N),
+        component_sensor_mask=jnp.ones(coarse_domain.N),
+        ts=jnp.arange(3.0),
+        original_ts=jnp.arange(3.0),
+        target_shape=(3, 8),
+    )
+
+    result = solver._run_lf_backend(
+        "forward",
+        jnp.zeros(coarse_domain.N),
+        context,
+        apply_windowing=False,
+        apply_interpolation=True,
+    )
+
+    assert result.shape == (3, 8)
+    assert jnp.allclose(result, 1.0, atol=5e-7)
 
 
 def test_zoom_interpolation_returns_target_shape():

@@ -203,6 +203,62 @@ def test_tr_temporal_carrier_sets_tangential_phase():
     )
 
 
+@pytest.mark.parametrize("redundancy", [1, 2])
+def test_tr_packet_positions_follow_redundant_anisotropic_support(redundancy):
+    """Boundary packet indices use the full physical local-FFT support."""
+
+    data_N = (32, 16)
+    data_domain = geometry.Domain(
+        N=data_N,
+        dx=(0.1, 0.3),
+        c=0.01,
+        periodic=(False, False),
+    )
+    aspect = (2, 1)
+    decomp = DyadicDecomposition(
+        num_levels=1,
+        N=data_N,
+        num_boxes_levels=(4,),
+        box_aspect_ratio=aspect,
+    )
+    wpt = transforms.MSWPT(decomp, redundancy=redundancy, windowing="rectangular")
+
+    spatial_domain = geometry.Domain(
+        N=(16, 16),
+        dx=(0.2, 0.3),
+        c=0.01,
+        periodic=(False, False),
+    )
+    mask = jnp.zeros(spatial_domain.N).at[0, :].set(1)
+    sensors = geometry.Sensor(domain=spatial_domain, binary_mask=mask)
+
+    coeff_shape = tuple(wpt.coeff_shapes[0])
+    k = jnp.asarray([coeff_shape[1] - 1, coeff_shape[2] - 1])
+    flat_index = jnp.ravel_multi_index((0, k[0], k[1]), coeff_shape)
+    (
+        _,
+        _,
+        positions,
+        _,
+        amplitudes,
+        _,
+        launch_times,
+    ) = tr_solver_utils.compute_TR_parameters(
+        jnp.asarray([flat_index]), data_domain, wpt, sensors
+    )
+
+    support_lengths = redundancy * decomp.box_lengths[0] * jnp.asarray(aspect)
+    expected_data_position = k * data_domain.grid_size / support_lengths
+
+    assert launch_times[0, 0] == pytest.approx(expected_data_position[0])
+    assert positions[0, 0] == pytest.approx(0.0)
+    assert positions[0, 1] == pytest.approx(expected_data_position[1])
+    assert launch_times[0, 0] < data_domain.grid_size[0]
+    assert positions[0, 1] < data_domain.grid_size[1]
+    expected_phase = transforms.compute_frame_phase(decomp, 0, k, redundancy)
+    assert amplitudes[0, 0] / jnp.abs(amplitudes[0, 0]) == pytest.approx(expected_phase)
+
+
 @pytest.mark.parametrize("d", [1, 2, 3])
 def test_linear_system(d):
     """

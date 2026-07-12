@@ -223,6 +223,50 @@ def test_make_c_function_from_grid_and_derivs():
     assert Fb.shape == (2,)
 
 
+def test_bspline3_interpolates_grid_values():
+    xx = jnp.linspace(0.0, 1.0, 12)
+    vals = jnp.sin(2 * jnp.pi * xx) + 0.1 * xx
+    cfun = make_c_function_from_grid(
+        vals,
+        spacing=(float(xx[1] - xx[0]),),
+        origin=(float(xx[0]),),
+        method="bspline3",
+        boundary="reflect",
+    )
+
+    got = cfun(xx[:, None])
+    assert got.shape == vals.shape
+    assert jnp.allclose(got, vals, atol=1e-10)
+
+
+def test_bspline3_derivatives_are_continuous_at_cell_boundaries():
+    vals = jnp.array([0.0, 1.0, 0.5, 2.0, 1.0, 0.2, 0.3, 0.0])
+    cfun = make_c_function_from_grid(vals, method="bspline3", boundary="reflect")
+
+    eps = 1e-5
+    x0 = 3.0
+    grad_left = jax.grad(lambda x: cfun(jnp.array([x])))(x0 - eps)
+    grad_right = jax.grad(lambda x: cfun(jnp.array([x])))(x0 + eps)
+    hess_left = jax.hessian(lambda x: cfun(jnp.array([x])))(x0 - eps)
+    hess_right = jax.hessian(lambda x: cfun(jnp.array([x])))(x0 + eps)
+
+    assert jnp.allclose(grad_left, grad_right, atol=1e-3)
+    assert jnp.allclose(hess_left, hess_right, atol=1e-3)
+
+
+def test_make_c_function_from_grid_options_validate():
+    vals = jnp.ones((4, 4))
+
+    with pytest.raises(ValueError, match="method"):
+        make_c_function_from_grid(vals, method="quadratic")
+
+    with pytest.raises(ValueError, match="Unsupported boundary"):
+        make_c_function_from_grid(vals, boundary="zero")
+
+    with pytest.raises(ValueError, match="smooth_sigma"):
+        make_c_function_from_grid(vals, smooth_sigma=(1.0, 2.0, 3.0))
+
+
 def test_memory_helpers_and_array_str():
     x = jnp.zeros((2, 3), dtype=jnp.float32)
     s = memory_estimate(jnp.array(x.shape), x.dtype)

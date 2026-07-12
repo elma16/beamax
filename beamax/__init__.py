@@ -7,7 +7,7 @@ from importlib import import_module
 from types import ModuleType
 from typing import Any
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # ---- Curated, always-light symbols (fast to import)
 # geometry

@@ -50,6 +50,41 @@ def generate_test_params():
 all_params = generate_test_params()
 
 
+def test_redundancy_one_mirror_window_is_rejected_before_dual_division():
+    decomp = DyadicDecomposition(2, (64, 32), (4, 8), (2, 1))
+
+    with pytest.raises(ValueError, match="uncovered Fourier bins"):
+        transforms.MSWPT(decomp, redundancy=1, windowing="rectangular_mirror")
+    with pytest.raises(ValueError, match="uncovered Fourier bins"):
+        transforms.compute_gh_filters(
+            decomp, redundancy=1, windowing="rectangular_mirror"
+        )
+
+
+def test_unwindowed_fast_analysis_is_rejected_but_synthesis_remains_available():
+    decomp = DyadicDecomposition(1, (64,), (4,), (1,))
+    wpt = transforms.MSWPT(decomp, redundancy=2, windowing="none")
+    rectangular_wpt = transforms.MSWPT(decomp, redundancy=2, windowing="rectangular")
+
+    with pytest.raises(ValueError, match="does not support windowing='none'"):
+        wpt.forward(jnp.ones((64,)), "spatial")
+
+    coeffs = jnp.zeros(wpt.total_coeffs).at[7].set(1.0)
+    synthesized = wpt.inverse(coeffs, "fourier")
+    rectangular_atom = rectangular_wpt.inverse(coeffs, "fourier")
+    assert jnp.array_equal(synthesized, rectangular_atom)
+
+
+def test_redundancy_one_anisotropic_rectangular_roundtrip():
+    decomp = DyadicDecomposition(2, (64, 32), (4, 8), (2, 1))
+    wpt = transforms.MSWPT(decomp, redundancy=1, windowing="rectangular")
+    data = jax.random.normal(jax.random.PRNGKey(91), decomp.N)
+
+    reconstructed = wpt.inverse(wpt.forward(data, "spatial"), "spatial")
+
+    assert jnp.allclose(reconstructed, data, rtol=1e-12, atol=1e-12)
+
+
 @pytest.fixture
 def setup_transform(request):
     num_levels, N, num_boxes_outer_level, box_aspect_ratio, windowing = request.param

@@ -7,7 +7,7 @@ from typing import Callable, Union, Tuple, Optional
 from beamax import utils
 from beamax.gb import core, gb_utils
 from beamax.gb.gb_solvers import SolverFn, SolverConfig
-from beamax.transforms import MSWPT
+from beamax.transforms import MSWPT, compute_frame_phase
 from beamax.geometry import Domain
 
 
@@ -220,6 +220,28 @@ def threshold_coefficients(
     return (f(coeffs[0]), f(coeffs[1])) if isinstance(coeffs, tuple) else f(coeffs)
 
 
+def _coefficient_positions(
+    nn_level: jnp.ndarray,
+    nn_idx: jnp.ndarray,
+    wpt: MSWPT,
+    domain: Domain,
+) -> jnp.ndarray:
+    """Map local MSWPT coefficient indices to physical packet centres.
+
+    A level's coefficient block is the inverse FFT of a support whose length
+    on axis ``s`` is ``redundancy * box_length * box_aspect_ratio[s]``.
+    Consequently index ``k_s`` represents the physical position
+    ``k_s * domain_size_s / support_length_s``.
+    """
+    local_indices = jnp.stack(nn_idx[1:, :], axis=-1)
+    box_lengths = jnp.asarray(wpt.dyadic_decomp.box_lengths)
+    aspect = jnp.asarray(wpt.dyadic_decomp.box_aspect_ratio)
+    support_lengths = (
+        rearrange(box_lengths[nn_level], "b -> b 1") * aspect * wpt.redundancy
+    )
+    return local_indices * jnp.asarray(domain.grid_size) / support_lengths
+
+
 def compute_forward_parameters(
     significant_coeffs: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
     wpt: MSWPT,
@@ -301,7 +323,7 @@ def compute_forward_parameters(
 
         # Compute box parameters
         bl = rearrange(box_lengths[nn_level], "j -> j 1") / grid_size * box_aspect_ratio
-        Lls = bl * 2
+        Lls = bl * wpt.redundancy
         sigmas = bl / 2
 
         # Compute beam parameters
@@ -317,7 +339,11 @@ def compute_forward_parameters(
             keepdims=True,
         )
         a0s = rearrange(a0s, "b 1 -> b")
-        x0s = jnp.stack(nn_idx[1:, :], axis=-1) / Lls
+        local_k = jnp.stack(nn_idx[1:, :], axis=-1)
+        a0s = a0s * compute_frame_phase(
+            wpt.dyadic_decomp, box_idx, local_k, wpt.redundancy
+        )
+        x0s = _coefficient_positions(nn_level, nn_idx, wpt, domain)
         ωs = rearrange(norm, "b 1 -> b")
         modes = sign * jnp.ones((p0s.shape[0],))
 
@@ -718,9 +744,8 @@ def compute_coefficients(
     nn_level, nn_idx = utils.find_tensor_and_multiindex(
         jnp.arange(wpt.total_coeffs), shapes
     )
-    k = nn_idx[1:, :]
-    b = k.shape[1]
-    x_b = (k / wpt.dyadic_decomp.box_lengths[nn_level]).T
+    b = nn_idx.shape[1]
+    x_b = _coefficient_positions(nn_level, nn_idx, wpt, domain)
     box_idx = nn_idx[0, :] + cumsum[nn_level]
     centres = wpt.dyadic_decomp.centres_ndim[box_idx] / domain.grid_size
     p_b = 2 * jnp.pi * centres

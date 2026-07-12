@@ -328,7 +328,7 @@ class InterpolationStrategy(ABC):
 
 
 class FourierInterpolation(InterpolationStrategy):
-    """Fourier-based interpolation (periodic boundaries assumed)."""
+    """Unitary Fourier resizing (periodic boundaries assumed)."""
 
     def interpolate(self, data: jnp.ndarray, target_shape: Tuple) -> jnp.ndarray:
         """
@@ -344,21 +344,18 @@ class FourierInterpolation(InterpolationStrategy):
         Returns
         -------
         jnp.ndarray
-            Real-valued resized array with sample-value normalization.
+            Real-valued unitary Fourier resize.
+
+        Notes
+        -----
+        This primitive performs no pointwise amplitude correction. The hybrid
+        owner has the source/target-domain context needed to distinguish a
+        full-field resize from detector-data resizing and applies the matched
+        correction there.
         """
-        resampled = utils.interpolate_fourier(
+        return utils.interpolate_fourier(
             data, target_shape, input_type="spatial", output_type="spatial"
         ).real
-        # `utils.interpolate_fourier` uses unitary FFTs, which preserve the
-        # discrete L2 norm. For solver outputs we need sample values on the
-        # target grid, so compensate each resized axis by sqrt(N_in / N_out).
-        scale = math.sqrt(
-            math.prod(
-                input_len / output_len
-                for input_len, output_len in zip(data.shape, target_shape)
-            )
-        )
-        return resampled * scale
 
 
 class ZoomInterpolation(InterpolationStrategy):
@@ -676,7 +673,27 @@ class HybridSolver(eqx.Module):
 
         # Apply interpolation if enabled and downsampled
         if apply_interpolation and self.config.downsample:
+            source_shape = tuple(int(n) for n in lf_result.shape)
             lf_result = self._interpolator.interpolate(lf_result, context.target_shape)
+            if operation == "forward" and self.config.interp_method == "fourier":
+                # The LF initial condition is obtained by cropping a unitary
+                # d-D DFT, which inflates its coarse samples by
+                # sqrt(prod(N_full / N_coarse)). A detector record generally
+                # has fewer spatial axes than that initial field, so bare
+                # unitary detector-grid resizing cancels only part of the
+                # inflation. Restore physical sample amplitudes using both the
+                # output-grid ratio and the full/component domain-volume ratio.
+                output_ratio = math.prod(
+                    target / source
+                    for source, target in zip(source_shape, context.target_shape)
+                )
+                domain_ratio = math.prod(
+                    full / coarse
+                    for full, coarse in zip(
+                        context.domain.N, context.component_domain.N
+                    )
+                )
+                lf_result = lf_result * math.sqrt(output_ratio / domain_ratio)
 
         return lf_result
 

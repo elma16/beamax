@@ -27,6 +27,54 @@ __all__ = ["MSGBSolver", "ShardingStrategy"]
 complex_dtypes = (jnp.complex64, jnp.complex128)
 
 
+def _form_adjoint_source(
+    data: jnp.ndarray,
+    dt: float,
+    c_at_sources: jnp.ndarray,
+    window: Optional[jnp.ndarray] = None,
+) -> jnp.ndarray:
+    """Form the acquisition-time source for the unweighted wave equation.
+
+    For detector residual ``r(s, x_s)`` this returns
+
+    ``-c(x_s)**2 * d_s(window(s, x_s) * r(s, x_s))``.
+
+    It is the acquisition-time representation of the time-reversed source in
+    the continuous PAT adjoint.  A one-dimensional window is interpreted as a
+    time window and broadcast over detector axes.
+    """
+    if window is None:
+        windowed_data = data
+    else:
+        if window.ndim == 1 and data.ndim > 1:
+            window = window.reshape((window.shape[0],) + (1,) * (data.ndim - 1))
+        windowed_data = window * data
+
+    # The adjoint construction is microlocal/Fourier based.  A centred
+    # two-point difference has multiplier i*sin(Omega*dt)/dt and therefore
+    # suppresses precisely the high temporal frequencies on which the
+    # principal-symbol approximation operates.  Differentiate on the sampled
+    # Fourier grid instead.  The documented endpoint/taper condition makes the
+    # periodic extension appropriate; for real data the Nyquist contribution
+    # is projected to the real derivative (hence zero, as required).
+    frequencies = jnp.fft.fftfreq(windowed_data.shape[0], d=dt).astype(
+        windowed_data.real.dtype
+    )
+    multiplier_shape = (frequencies.shape[0],) + (1,) * (windowed_data.ndim - 1)
+    multiplier = (2j * jnp.pi * frequencies).reshape(multiplier_shape)
+    derivative = jnp.fft.ifft(multiplier * jnp.fft.fft(windowed_data, axis=0), axis=0)
+    if not jnp.issubdtype(windowed_data.dtype, jnp.complexfloating):
+        derivative = derivative.real
+    return -(c_at_sources**2) * derivative
+
+
+def _apply_adjoint_image_weight(
+    terminal_field: jnp.ndarray, c_at_image: jnp.ndarray
+) -> jnp.ndarray:
+    """Apply the ``c^{-2}`` weight for an unweighted image-space pairing."""
+    return terminal_field / (c_at_image**2)
+
+
 @dataclass(frozen=True)
 class ShardingStrategy:
     """
@@ -283,6 +331,9 @@ class MSGBSolver(eqx.Module):
     ode_config : SolverConfig, optional
         Numerical configuration passed through to the ODE integrator. Falls
         back to ``SolverConfig.from_precision()``.
+    adjoint_relative_guard : float, default=5e-2
+        Dimensionless near-grazing exclusion ``Gamma / abs(tau)`` used by the
+        principal-symbol adjoint. Tune together with the ODE configuration.
     """
 
     thr: Union[int, float] = eqx.field()
@@ -295,6 +346,7 @@ class MSGBSolver(eqx.Module):
     aggregate_method: str = eqx.field(static=True)
     sharding: Optional[ShardingStrategy] = eqx.field(default=None, static=True)
     ode_config: Optional[SolverConfig] = eqx.field(default=None, static=True)
+    adjoint_relative_guard: float = eqx.field(default=5e-2, static=True)
 
     def __init__(
         self,
@@ -307,6 +359,7 @@ class MSGBSolver(eqx.Module):
         tr_ode_solver: Optional[SolverFn] = None,
         sharding: Optional[ShardingStrategy] = None,
         ode_config: Optional[SolverConfig] = None,
+        adjoint_relative_guard: float = 5e-2,
     ):
         """
         Initialize the MSGB solver.
@@ -333,6 +386,9 @@ class MSGBSolver(eqx.Module):
         ode_config : SolverConfig, optional
             Numerical ODE solver configuration. Defaults to
             ``SolverConfig.from_precision()``.
+        adjoint_relative_guard : float, default=5e-2
+            Dimensionless near-grazing exclusion for the adjoint. Must lie in
+            ``[0, 1)``.
         """
         valid_thresholds = {
             "hard",
@@ -351,6 +407,11 @@ class MSGBSolver(eqx.Module):
             )
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive; got {batch_size}.")
+        if not 0.0 <= adjoint_relative_guard < 1.0:
+            raise ValueError(
+                "adjoint_relative_guard must lie in [0, 1); got "
+                f"{adjoint_relative_guard}."
+            )
 
         valid_sum_methods = {
             "all_real",
@@ -376,6 +437,7 @@ class MSGBSolver(eqx.Module):
         self.ode_config = (
             ode_config if ode_config is not None else SolverConfig.from_precision()
         )
+        self.adjoint_relative_guard = float(adjoint_relative_guard)
 
         # Parse sum_method
         self.use_real = "real" in sum_method
@@ -431,8 +493,21 @@ class MSGBSolver(eqx.Module):
             p0, dpdt, self.input_type, domain, wpt, mode="pos_only"
         )
 
+        threshold = self.thr
+        if self.thr_strat == "top_n":
+            # ``pos_only`` has already zeroed one conjugate-frequency half of
+            # every level.  Requesting more rows than the retained half-frame
+            # used to select zero coefficients and propagate zero-amplitude
+            # beams.  Clamp to the exact static capacity of ``_half_mask``;
+            # this removes wasted trajectories without changing the field.
+            frequency_half_capacity = sum(
+                (end - start) // 2
+                for start, end in zip(wpt.coeffs_cumsum[:-1], wpt.coeffs_cumsum[1:])
+            )
+            threshold = min(self.thr, frequency_half_capacity)
+
         coeff_pos_idx, max_pos_coeffs = threshold_coefficients(
-            c_pos, self.thr, self.thr_strat, wpt
+            c_pos, threshold, self.thr_strat, wpt
         )
 
         p0s, M0s, x0s, ωs, a0s, modes = compute_forward_parameters(
@@ -930,14 +1005,14 @@ class MSGBSolver(eqx.Module):
         sources: Sensor,
     ) -> Tuple[jnp.ndarray, ...]:
         """
-        Prepare beam parameters for the Arridge-style adjoint solve.
+        Prepare beam parameters for the principal-symbol adjoint backprojection.
 
         Parameters
         ----------
         source : jnp.ndarray
-            Boundary *mass source* F(t, x_s) appearing on the RHS of the
-            second-order adjoint wave equation (already windowed and
-            time-reversed / differentiated as needed).
+            Boundary source density appearing on the RHS of the unweighted
+            second-order wave equation. It is already windowed, differentiated,
+            and expressed on the time grid used by the backpropagator.
         data_domain : Domain
             Domain describing the (t, x_s) grid of `source`.
         data_wpt : MSWPT
@@ -949,19 +1024,23 @@ class MSGBSolver(eqx.Module):
         -------
         Tuple of beam parameters suitable for `compute_TR_result`.
         """
-        # Analyse the source in the MSWPT frame; we only need the positive
-        # "half" since the underlying beam dynamics are real.
-        dpdt = jnp.zeros_like(source)
-        c_pos, _ = compute_coefficients(
-            source, dpdt, self.input_type, data_domain, data_wpt, mode="both"
-        )
+        # Analyse the spacetime source directly.  This is not an initial-value
+        # half-wave split: applying ``compute_coefficients(source, 0, ...)``
+        # would insert an erroneous factor 1/2.  The raw MSWPT coefficients
+        # still cover signed temporal Fourier boxes, which are required by the
+        # odd B^{-1} branch factor.
+        source_coeffs = data_wpt.forward(source, self.input_type)
 
         coeff_idx, max_coeffs = threshold_coefficients(
-            c_pos, self.thr, self.thr_strat, data_wpt
+            source_coeffs, self.thr, self.thr_strat, data_wpt
         )
 
         pts, Mts, xts, omegas, ats, signum, ts = compute_adj_parameters(
-            coeff_idx, data_domain, data_wpt, sources
+            coeff_idx,
+            data_domain,
+            data_wpt,
+            sources,
+            relative_guard=self.adjoint_relative_guard,
         )
 
         # Attach the (preconditioned) MSWPT coefficients to the beam amplitudes
@@ -991,15 +1070,16 @@ class MSGBSolver(eqx.Module):
         ts: jnp.ndarray,
         data_domain: Domain,
         data_wpt: MSWPT,
+        *,
+        window: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """
-        MSGB adjoint solve (Arridge-style): F = w ∂_t r(T - t), then B^{-1}F + TR.
+        Principal-symbol MSGB approximation of the continuous PAT adjoint.
 
         Parameters
         ----------
         data : jnp.ndarray
-            Boundary measurement r(t, x_s) on Gamma, or (if use_raw_source=True)
-            an already-formed adjoint source F(t, x_s). Shape (Nt, Ns) or (Nt,)
+            Boundary residual r(t, x_s) on Gamma. Shape (Nt, Ns) or (Nt,),
             with time along axis 0.
         domain : Domain
             Reconstruction (image) domain where we want q(T, x).
@@ -1019,28 +1099,29 @@ class MSGBSolver(eqx.Module):
         data_wpt : MSWPT
             MSWPT instance for analysing the boundary data / source.
 
-        Keyword Parameters
-        ------------------
-        use_raw_source : bool, default False
-            If False (default), `data` is interpreted as a boundary
-            measurement r(s, x_s) in the original acquisition variable and
-            we internally form the adjoint source
-
-                F(t, x_s) = w(x_s) ∂_t r(T - t, x_s),
-
-            represented on the original-time grid as -w(x_s) ∂_s r(s, x_s),
-            using a simple finite-difference in time and unit weights w≡1.
-            If True, `data` is assumed to already be F(t, x_s) and is
-            passed to `_prepare_adj_params` unchanged.
+        window : jnp.ndarray, optional
+            Sampled acquisition window. It may have the same shape as ``data``
+            or shape (Nt,), in which case it is broadcast over sensors. The
+            default is one on the sampled acquisition array and assumes the
+            residual is negligible at the temporal endpoints; otherwise pass a
+            taper that vanishes there.
 
         Returns
         -------
         jnp.ndarray
-            Adjoint field q(T, x) on the reconstruction domain (same
-            shape as a forward initial condition).
+            Principal-symbol approximation to P*data for unweighted image and
+            data L2 pairings. This is not the exact transpose of the
+            thresholded discrete MSGB forward solver.
         """
         q_T, _ = self.adjoint_with_params(
-            data, domain, sensors, sources, ts, data_domain, data_wpt
+            data,
+            domain,
+            sensors,
+            sources,
+            ts,
+            data_domain,
+            data_wpt,
+            window=window,
         )
         return q_T
 
@@ -1054,6 +1135,8 @@ class MSGBSolver(eqx.Module):
         ts: jnp.ndarray,
         data_domain: Domain,
         data_wpt: MSWPT,
+        *,
+        window: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
         """
         Adjoint MSGB solve plus diagnostic beam parameters.
@@ -1064,7 +1147,8 @@ class MSGBSolver(eqx.Module):
         Returns
         -------
         q_T : jnp.ndarray
-            Adjoint field q(T, x) on the reconstruction domain.
+            Principal-symbol approximation to P*data on the reconstruction
+            domain under unweighted L2 pairings.
         params : tuple of jnp.ndarray
             Beam parameters used internally.
         """
@@ -1086,21 +1170,16 @@ class MSGBSolver(eqx.Module):
             raise ValueError("Unsupported sensor type for `sensors` in adjoint().")
 
         # ------------------------------------------------------------------
-        # 1. Build F(t, x_s) from measured data r(t, x_s), unless user has
-        #    explicitly asked to treat `data` as a raw source.
+        # 1. Build the unweighted-equation source in acquisition time:
+        #    F_acq = -c_Gamma^2 d_s(window * r).
         # ------------------------------------------------------------------
 
-        # data is r(t, x_s) on [0, T]; we construct F(t, x_s) ≈ ∂_t r(T - t, x_s)
-        # using a simple finite-difference in time. The c(x_s) prefactor is
-        # evaluated at the source/acquisition geometry (not the reconstruction
-        # eval grid), and broadcasts across the time axis of `data`.
         dt = float(data_domain.dx[0])
-        c_at_sources = domain.c_fn(sources.positions)
-        r = data * c_at_sources
-        # `jnp.gradient(..., axis=int)` returns a single Array even though the
-        # static type is `Array | list[Array]`; assert for pyright.
-        source = jnp.gradient(r, dt, axis=0)
-        assert isinstance(source, jnp.ndarray)
+        # The acquisition geometry owns the boundary medium. Using the image
+        # domain here could make the c_Gamma^2 source inconsistent with the TR
+        # geometry and B^{-1} multiplier when the two Domain objects differ.
+        c_at_sources = sources.domain.c_fn(sources.positions)
+        source = _form_adjoint_source(data, dt, c_at_sources, window)
 
         # ------------------------------------------------------------------
         # 2. Prepare adjoint (B^{-1}F) beams using the MSWPT + symbol logic.
@@ -1110,8 +1189,9 @@ class MSGBSolver(eqx.Module):
             params = self.sharding.shard_tr_params(*params)
 
         # ------------------------------------------------------------------
-        # 3. Propagate beams with the TR machinery, but evaluate in the
-        #    reconstruction domain (domain.grid_size).
+        # 3. Propagate beams with the TR machinery, evaluate in the image
+        #    domain, and apply the c^{-2} image weight required by the
+        #    unweighted L2 image pairing.
         # ------------------------------------------------------------------
         q_T = compute_TR_result(
             params=params,
@@ -1125,7 +1205,6 @@ class MSGBSolver(eqx.Module):
             solver_config=self.ode_config,
         )
 
-        # should maybe rescale by 2/3?
-        q_T = -q_T
+        q_T = _apply_adjoint_image_weight(q_T, domain.c_fn(sensor_positions))
 
         return q_T, params

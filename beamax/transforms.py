@@ -19,6 +19,20 @@ from beamax.decomposition import DyadicDecomposition
 DomainLength = Union[Int[Array, " d"], Tuple[int, ...]]
 
 
+def _validate_transform_configuration(redundancy: int, windowing: str) -> None:
+    """Reject transform configurations that cannot define a finite dual."""
+    if redundancy not in (1, 2):
+        raise ValueError(f"redundancy must be 1 or 2; got {redundancy}.")
+    if windowing not in ("none", "rectangular", "rectangular_mirror"):
+        raise ValueError(f"Unknown windowing mode {windowing!r}.")
+    if redundancy == 1 and windowing == "rectangular_mirror":
+        raise ValueError(
+            "redundancy=1 with windowing='rectangular_mirror' leaves "
+            "uncovered Fourier bins, so the canonical-dual analysis is "
+            "undefined; use windowing='rectangular' or redundancy=2."
+        )
+
+
 def compute_windowed_gaussian(
     centre: Int[Array, " d"],
     meshgrid: Int[Array, "*N d"],
@@ -43,10 +57,12 @@ def compute_windowed_gaussian(
         Smallest-axis tile length for this level.
     box_aspect_ratio : jnp.ndarray, shape (d,)
         Per-axis aspect multipliers. Values ≥ 1 with at least one 1.
-    domain_length : int
-        Smallest side length `min(N)`.
+    domain_length : array-like, shape (d,)
+        Per-axis grid lengths. These define the periodic wrap independently on
+        each Fourier axis.
     redundancy : int
-        1 for basis, 2 for tight frame.
+        Supported translation-lattice redundancy (1 or 2). Redundancy 2 does
+        not by itself make the Gaussian-window frame tight.
     windowing : {"none", "rectangular", "rectangular_mirror"}
         Windowing function applied to the Gaussian.
 
@@ -100,7 +116,7 @@ def single_filter_idx(
     dyadic_decomp : DyadicDecomposition
         Dyadic parameters providing centres and per-level box lengths.
     redundancy : int
-        1 (basis) or 2 (frame).
+        Supported translation-lattice redundancy (1 or 2).
     windowing : str
         Windowing function (see `compute_windowed_gaussian`).
 
@@ -174,6 +190,42 @@ def single_filter_coord(
 vmap_filter_coord = vmap(single_filter_coord, in_axes=(0, 0, None, None, None, None))
 
 
+def compute_frame_phase(
+    dyadic_decomp: DyadicDecomposition,
+    boxidx: int,
+    k: Int[Array, "... d"],
+    redundancy: int,
+) -> Num[Array, "..."]:
+    """Unit-modulus phase induced by local-patch parity recentering.
+
+    The fast transform parity-rolls each local Fourier patch before applying
+    its FFT.  This factor converts the clean global modulation
+    ``exp(-2 pi i m.k / S)`` into the exact coefficient convention used by the
+    implemented transform, including rectangular supports and both supported
+    redundancies.
+    """
+    level = utils.find_level(dyadic_decomp, boxidx)
+    box_length = dyadic_decomp.box_lengths[level]
+    if box_length.ndim > 0:
+        box_length = box_length[..., None]
+    support_lengths = (
+        box_length * redundancy * jnp.asarray(dyadic_decomp.box_aspect_ratio)
+    )
+    half_support = support_lengths // 2
+    centre = dyadic_decomp.centres_ndim[boxidx]
+    grid_shape = jnp.asarray(dyadic_decomp.N)
+    parity_index = (centre + grid_shape // 2) // half_support
+    parity_sign = 1 - 2 * (parity_index & 1)
+    rolls = parity_sign * (half_support // 2)
+    phase_cycles = jnp.sum((centre - rolls) * k / support_lengths, axis=-1)
+    # Reduce before evaluating the exponential.  Besides improving accuracy for
+    # large indices, this makes mathematically integral offsets (including the
+    # reported rho=2 isotropic configurations) evaluate as exactly zero cycles
+    # instead of feeding a large multiple of an approximate float32 pi to exp.
+    phase_cycles = jnp.remainder(phase_cycles, 1.0)
+    return jnp.exp(2 * jnp.pi * 1j * phase_cycles)
+
+
 def compute_sum_gsquare(
     dyadic_decomp: DyadicDecomposition,
     redundancy: int,
@@ -200,6 +252,7 @@ def compute_sum_gsquare(
     -----
     Implemented with `lax.fori_loop` to avoid large vmaps.
     """
+    _validate_transform_configuration(redundancy, windowing)
     filters = vmap_filter_idx(
         jnp.arange(dyadic_decomp.total_num_boxes),
         dyadic_decomp.fourier_meshgrid,
@@ -232,6 +285,7 @@ def compute_gh_filters(
     (jnp.ndarray, jnp.ndarray)
         `(gfilt, hfilt)` each with shape (num_boxes, *N).
     """
+    _validate_transform_configuration(redundancy, windowing)
     num_boxes_ndim = dyadic_decomp.num_boxes_ndim
     gfilt = vmap_filter_idx(
         jnp.arange(jnp.sum(num_boxes_ndim)),
@@ -262,9 +316,9 @@ def compute_frames(
     boxidx : int
         Box index.
     k : jnp.ndarray, shape (d,)
-        Wave-vector.
+        Local spatial-translation multi-index.
     fourier_space : jnp.ndarray, shape (*N, d)
-        Physical Fourier coordinates.
+        Integer Fourier-index coordinates.
     redundancy : int
         1 or 2.
     windowing : str
@@ -275,23 +329,21 @@ def compute_frames(
     jnp.ndarray, shape (*N,)
         Complex atom, dtype = complex64/complex128.
     """
-    ndim = dyadic_decomp.ndim
-
     level = utils.find_level(dyadic_decomp, boxidx)
-
-    box_length = dyadic_decomp.box_lengths[
-        level
-    ]  # jnp.array(dyadic_decomp.box_aspect_ratio)
-
-    Lls = box_length * redundancy
+    box_length = dyadic_decomp.box_lengths[level]
+    support_lengths = (
+        box_length * redundancy * jnp.asarray(dyadic_decomp.box_aspect_ratio)
+    )
 
     g = single_filter_idx(
         boxidx, dyadic_decomp.fourier_meshgrid, dyadic_decomp, redundancy, windowing
     )
 
-    x_dot_k = jnp.einsum("...d,d->...", fourier_space, k)
+    scaled_phase = jnp.einsum("...d,d->...", fourier_space, k / support_lengths)
+    normalisation = jnp.prod(support_lengths) ** (-0.5)
+    phase_offset = compute_frame_phase(dyadic_decomp, boxidx, k, redundancy)
 
-    return Lls ** (-ndim / 2) * jnp.exp(-2 * jnp.pi * 1j * x_dot_k / Lls) * g
+    return normalisation * phase_offset * jnp.exp(-2 * jnp.pi * 1j * scaled_phase) * g
 
 
 class MSWPT(eqx.Module):
@@ -303,9 +355,12 @@ class MSWPT(eqx.Module):
     dyadic_decomp : DyadicDecomposition
         Frequency tiling (centres, per-level box lengths).
     redundancy : int
-        1 (basis) or 2 (tight frame). Static under JIT.
+        Supported translation-lattice redundancy (1 or 2). Static under JIT.
     windowing : {"rectangular", "rectangular_mirror", "none"}
-        Windowing for tile filters. Static under JIT.
+        Windowing for tile filters. ``"none"`` is available for explicit
+        synthesis/beam-comparison atoms only; the fast packed analysis rejects
+        it because an untruncated Gaussian is not supported on the packed
+        local patch. Static under JIT.
 
     Attributes
     ----------
@@ -331,7 +386,8 @@ class MSWPT(eqx.Module):
     _box_shapes : List[Tuple[int, ...]]
         Per-level “box lengths” in each axis (static).
     _half_mask : jnp.ndarray
-        Mask selecting positive-frequency half.
+        Mask selecting one spatial-frequency representative from each
+        conjugate pair.
 
     Notes
     -----
@@ -375,6 +431,7 @@ class MSWPT(eqx.Module):
         - Chooses complex dtype from global JAX precision flag.
         - Packs representative per-level `g` filters for later slicing/rolls.
         """
+        _validate_transform_configuration(redundancy, windowing)
         self.dyadic_decomp = dyadic_decomp
         self.redundancy = redundancy
         self.windowing = windowing
@@ -589,8 +646,14 @@ class MSWPT(eqx.Module):
                 )
                 support_filtered = gfilt_level_packed * fft_patch
 
-                rolls_intermediate = (centre + N // 2) // jnp.array(box_length_level)
-                rolls = ((-1) ** rolls_intermediate) * jnp.array(box_length_level) // 2
+                box_half_support = jnp.array(box_length_level)
+                rolls_intermediate = (centre + N // 2) // box_half_support
+                parity_sign = 1 - 2 * (rolls_intermediate & 1)
+                # Parenthesise the half-length before applying the sign. For
+                # an odd half-support, ``(-1 * length) // 2`` floors to -1,
+                # whereas the inverse correctly uses ``-(length // 2) == 0``.
+                # The old ordering broke rho=1 anisotropic round trips.
+                rolls = parity_sign * (box_half_support // 2)
                 support_filtered = jnp.roll(support_filtered, rolls, axis=axis)
 
                 # Compute IFFT and update the coefficient array for this level
@@ -636,9 +699,17 @@ class MSWPT(eqx.Module):
         Notes
         -----
         - Converts to Fourier (`utils.unitary_fft`) if needed.
-        - Divides by Σ g^2 to form the canonical tight-frame analysis.
+        - Divides by Σ g^2 to apply the pointwise canonical-dual analysis
+          filters for this painless frame construction.
         - JIT-compiled via `@eqx.filter_jit(donate="all")`.
         """
+        if self.windowing == "none":
+            raise ValueError(
+                "MSWPT.forward does not support windowing='none': the fast "
+                "local-patch implementation truncates an otherwise global "
+                "Gaussian, so it cannot provide an exact analysis/synthesis "
+                "pair. Use 'rectangular' or 'rectangular_mirror'."
+            )
         ft_data = utils.convert_space(data, input_type, "fourier")
         ft_sum_gsq = ft_data / self.sum_gsquare
         coeffs = self._compute_coeffs(ft_sum_gsq)
@@ -649,7 +720,8 @@ class MSWPT(eqx.Module):
         self, coeffs: Num[Array, " total_coeffs"], output_type: str
     ) -> Num[Array, "*N"]:
         """
-        Fast, *exact* inverse MSWPT.
+        Fast synthesis MSWPT; the exact inverse of :meth:`forward` for its
+        supported window configurations.
 
         Parameters
         ----------
@@ -665,6 +737,12 @@ class MSWPT(eqx.Module):
 
         Notes
         -----
+        With ``windowing="none"`` this remains a synthesis-only map for the
+        Gaussian restricted to the transform's nominal packed support (the
+        same packed atom as ``windowing="rectangular"``). It is *not* the
+        global unwindowed atom returned by :func:`compute_frames`; there is
+        deliberately no corresponding fast analysis call.
+
         The synthesis mirrors the analysis steps in :meth:`forward`::
 
             forward:   patch = extract(F / Σg², centre);   c = IFFT(roll(g*patch, +r))

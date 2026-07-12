@@ -9,7 +9,7 @@ from typing import Tuple, Union, Callable, Optional
 from beamax import utils
 from beamax.gb import core, gb_utils, gb_solvers
 from beamax.geometry import Domain, Sensor
-from beamax.transforms import MSWPT
+from beamax.transforms import MSWPT, compute_frame_phase
 from beamax.gb.gb_solvers import SolverFn, SolverConfig
 
 
@@ -290,7 +290,10 @@ def compute_TR_parameters(
     bl = (
         rearrange(box_lengths[nn_level], "j -> j 1") / L_phys * box_aspect
     )  # (B, d_data)
-    Lls = bl * 2.0
+    # Physical modulation periods for the local MSWPT support.  Keep this in
+    # lockstep with transforms.compute_frames and compute_coeff_shapes: the
+    # support length is rho * box_length * aspect on each data axis.
+    Lls = bl * red
     sigmas = bl / 2.0
 
     # Mode sign from sign(τ): signum = -sign τ selects outgoing vs incoming branch
@@ -330,8 +333,12 @@ def compute_TR_parameters(
     else:
         xts = jnp.where(mask_tan, xstar[:, tan_index], normal_value)
 
-    # Local wave speed at x_T
-    cxts = domain_data.c(xts).reshape(-1, 1)  # (B_, 1)
+    # Local physical wave speed at x_T. ``domain_data`` describes the sampled
+    # (time, tangential-position) array and is not the authoritative spatial
+    # medium; the source sensor's domain is. Using ``c_fn`` also supports the
+    # documented scalar-speed Domain API.
+    physical_c = sources.domain.c_fn
+    cxts = physical_c(xts).reshape(-1, 1)  # (B_, 1)
 
     # -------------------------------------------------------------------------
     # 3. Spatial momentum direction p_unit(x_T) from (τ, k_tan)
@@ -397,7 +404,7 @@ def compute_TR_parameters(
 
     M_init = jnp.einsum("bi,ij->bij", alpha, jnp.eye(d_spatial))
 
-    Mts = compute_mT_linear_system(xts, pts, None, M_init, signum, domain_data.c)
+    Mts = compute_mT_linear_system(xts, pts, None, M_init, signum, physical_c)
 
     ats = jnp.prod(
         jnp.sqrt(
@@ -408,6 +415,8 @@ def compute_TR_parameters(
         axis=1,
         keepdims=True,
     )
+    local_k = jnp.stack(nn_idx[1:, :], axis=-1)
+    ats = ats * compute_frame_phase(decomp, box_idx, local_k, red)[:, None]
 
     # -------------------------------------------------------------------------
     # 5. Grazing handling: zero contributions and keep numerically safe values

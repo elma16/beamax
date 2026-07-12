@@ -184,6 +184,7 @@ def create_test_signal(dyadic_decomp, wpt, box_indices=(34, 6), k_values=None):
         ({"input_type": "time"}, "input_type"),
         ({"batch_size": 0}, "batch_size"),
         ({"sum_method": "all"}, "sum_method"),
+        ({"adjoint_relative_guard": 1.0}, "adjoint_relative_guard"),
     ],
 )
 def test_msgb_solver_validates_configuration(override, message):

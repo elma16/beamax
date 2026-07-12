@@ -625,7 +625,10 @@ def interpolate_LF_soln(
     target_size : Tuple[int, ...]
         Desired output shape.
     interpolation_method : {"spline", "fourier"}, default="spline"
-        Interpolation method.
+        Interpolation method. The Fourier branch retains the historical
+        two-dimensional planar-sensor normalization; new code should prefer
+        :class:`beamax.solvers.HybridSolver`, which has the domain context
+        required for dimension-general normalization.
     interp_window : {"cos2", "hann", "hamming", "blackman"}, default="cos2"
         Temporal taper to apply before interpolation.
     dt_oversample : int, default=0
@@ -657,6 +660,12 @@ def interpolate_LF_soln(
         lf_upsampled = utils.interpolate_fourier(
             lf_windowed, target_size, "spatial", "spatial"
         )
+        # Historical convention for a 2-D volume cropped equally in both
+        # axes and observed on a 1-D planar sensor: the initial unitary crop
+        # inflates amplitudes by the spatial ratio, while the bare sensor-grid
+        # resize cancels only its square root. This second square-root factor
+        # completes the cancellation. The helper lacks enough domain metadata
+        # to generalise this rule to arbitrary dimensions/geometries.
         scale = math.sqrt(
             math.prod(
                 input_len / output_len

@@ -30,7 +30,12 @@ from beamax import geometry
 from beamax.decomposition import DyadicDecomposition
 from beamax.transforms import MSWPT
 from beamax.gb import gb_solvers
-from beamax.solvers.msgb_solvers.msgb_solver import MSGBSolver
+from beamax.solvers.msgb_solvers import msgb_solver as msgb_solver_module
+from beamax.solvers.msgb_solvers.msgb_solver import (
+    MSGBSolver,
+    _apply_adjoint_image_weight,
+    _form_adjoint_source,
+)
 from beamax.solvers import ShardingStrategy
 
 jax.config.update("jax_enable_x64", True)
@@ -290,10 +295,135 @@ class TestDiagnosticParamVariants:
         assert jnp.allclose(sensor_data, diagnostic_data, atol=1e-12)
         assert len(params) == 6
 
+    def test_oversized_real_top_n_matches_half_frame_cap(self):
+        """Oversized requests must not propagate masked zero-amplitude rows."""
+        N = (16,)
+        domain = geometry.Domain(N=N, dx=(1.0 / N[0],), c=_c_const, periodic=(True,))
+        decomp = DyadicDecomposition(
+            num_levels=1,
+            N=N,
+            num_boxes_levels=(4,),
+            box_aspect_ratio=(1,),
+        )
+        wpt = MSWPT(decomp, redundancy=2, windowing="rectangular")
+        half_capacity = sum(
+            (end - start) // 2
+            for start, end in zip(wpt.coeffs_cumsum[:-1], wpt.coeffs_cumsum[1:])
+        )
+        p0 = jax.random.normal(jax.random.PRNGKey(37), N)
+        sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(N))
+        ts = jnp.linspace(0.0, 0.02, 3)
+
+        def run(threshold):
+            solver = MSGBSolver(
+                thr=threshold,
+                thr_strat="top_n",
+                batch_size=4,
+                input_type="spatial",
+                ode_solver=gb_solvers.solve_ODE_base,
+                sum_method="all_real",
+            )
+            return solver.forward_with_params(p0, domain, sensors, ts, wpt)
+
+        capped_data, capped_params = run(half_capacity)
+        oversized_data, oversized_params = run(wpt.total_coeffs)
+
+        assert capped_params[4].shape == (2 * half_capacity,)
+        assert jnp.all(jnp.abs(capped_params[4]) > 0)
+        assert jnp.allclose(oversized_data, capped_data, rtol=1e-12, atol=1e-12)
+        for oversized, capped in zip(oversized_params, capped_params):
+            assert jnp.allclose(oversized, capped, rtol=1e-12, atol=1e-12)
+
 
 # ---------------------------------------------------------------------------
 # adjoint — smoke test the happy path (also covers _prepare_adj_params)
 # ---------------------------------------------------------------------------
+
+
+def test_form_adjoint_source_applies_spectral_derivative_sign_and_c_squared():
+    n = 64
+    dt = 0.25 / n
+    mode = 5
+    t = jnp.arange(n) * dt
+    period = n * dt
+    angular_frequency = 2.0 * jnp.pi * mode / period
+    data = jnp.ones((n, 2))
+    window = jnp.sin(angular_frequency * t)
+    c_at_sources = jnp.array([2.0, 3.0])
+
+    source = _form_adjoint_source(data, dt, c_at_sources, window)
+    expected = (
+        -(c_at_sources**2) * angular_frequency * jnp.cos(angular_frequency * t)[:, None]
+    )
+
+    assert jnp.allclose(source, expected, rtol=1e-12, atol=1e-10)
+    nonzero = jnp.abs(source[:, 0]) > 0
+    assert jnp.allclose(source[nonzero, 1] / source[nonzero, 0], 9.0 / 4.0)
+
+
+def test_prepare_adjoint_uses_raw_spacetime_coefficients(monkeypatch):
+    """Boundary-source analysis must not insert an IVP half-wave factor 1/2."""
+
+    class FakeWPT:
+        def forward(self, source, input_type):
+            assert input_type == "spatial"
+            return jnp.array([1.0, 4.0, 2.0, 3.0])
+
+    def fake_compute_adj_parameters(
+        indices, data_domain, data_wpt, sources, relative_guard
+    ):
+        del data_domain, data_wpt, sources
+        assert relative_guard == pytest.approx(5e-2)
+        b = indices.shape[0]
+        return (
+            jnp.zeros((b, 1)),
+            1j * jnp.ones((b, 1, 1)),
+            jnp.zeros((b, 1)),
+            jnp.ones((b,)),
+            jnp.ones((b, 1)),
+            jnp.ones((b, 1)),
+            jnp.zeros((b, 2)),
+        )
+
+    monkeypatch.setattr(
+        msgb_solver_module, "compute_adj_parameters", fake_compute_adj_parameters
+    )
+    solver = MSGBSolver(
+        thr=2,
+        thr_strat="top_n",
+        batch_size=2,
+        input_type="spatial",
+        ode_solver=gb_solvers.solve_ODE_base,
+        sum_method="all_real",
+    )
+    params = solver._prepare_adj_params(
+        source=jnp.ones(4),
+        data_domain=object(),
+        data_wpt=FakeWPT(),
+        sources=object(),
+    )
+
+    # top_n returns the selected values in increasing magnitude: 3 then 4.
+    assert jnp.array_equal(params[4].ravel(), jnp.array([3.0, 4.0]))
+
+
+def test_c_inverse_squared_output_weight_closes_constant_speed_mode_identity():
+    """The terminal mass-source field needs c^-2 for unweighted image L2."""
+    c = jnp.array(2.5)
+    spatial_frequency = 1.7
+    ts = jnp.linspace(0.0, 0.8, 257)
+    dt = ts[1] - ts[0]
+    f = jnp.array(0.7)
+    h = jnp.sin(2.3 * ts) + 0.2 * jnp.cos(0.4 * ts)
+    propagator = jnp.cos(c * spatial_frequency * ts)
+
+    forward_data = propagator * f
+    terminal_mass_source_field = c**2 * jnp.sum(propagator * h) * dt
+    adjoint_image = _apply_adjoint_image_weight(terminal_mass_source_field, c)
+
+    lhs = jnp.sum(forward_data * h) * dt
+    rhs = f * adjoint_image
+    assert jnp.allclose(lhs, rhs, rtol=1e-12, atol=1e-12)
 
 
 def test_adjoint_runs_on_small_2d_problem():
@@ -346,6 +476,7 @@ def test_adjoint_runs_on_small_2d_problem():
         ts=ts,
         data_domain=data_domain,
         data_wpt=data_wpt,
+        window=jnp.ones(Nt),
     )
 
     # `compute_TR_result` returns one value per evaluation sensor; for the
