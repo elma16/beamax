@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from typing import Union, Optional, Tuple
 import jax
@@ -65,6 +66,20 @@ def _form_adjoint_source(
     derivative = jnp.fft.ifft(multiplier * jnp.fft.fft(windowed_data, axis=0), axis=0)
     if not jnp.issubdtype(windowed_data.dtype, jnp.complexfloating):
         derivative = derivative.real
+
+    # ``c_at_sources`` is flat over detectors, ``(Ns,)``.  Data may carry the
+    # detector grid unflattened -- a planar 3D array is ``(Nt, Ny, Nz)`` -- so
+    # fold the speeds back onto those trailing axes before multiplying.  In 2D
+    # (``(Nt, Ns)``) the flat vector already broadcasts and is left untouched.
+    c_at_sources = jnp.asarray(c_at_sources)
+    detector_shape = derivative.shape[1:]
+    if c_at_sources.ndim == 1 and c_at_sources.shape != detector_shape:
+        if c_at_sources.size != math.prod(detector_shape):
+            raise ValueError(
+                f"c_at_sources has {c_at_sources.size} detector samples, which "
+                f"does not match the data detector grid {detector_shape}."
+            )
+        c_at_sources = c_at_sources.reshape(detector_shape)
     return -(c_at_sources**2) * derivative
 
 

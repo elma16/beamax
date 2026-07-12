@@ -361,6 +361,48 @@ def test_form_adjoint_source_applies_spectral_derivative_sign_and_c_squared():
     assert jnp.allclose(source[nonzero, 1] / source[nonzero, 0], 9.0 / 4.0)
 
 
+def test_form_adjoint_source_folds_flat_speeds_onto_a_detector_grid():
+    """3D planar data keeps its detector grid: (Nt, Ny, Nz), not (Nt, Ns).
+
+    ``c_at_sources`` is always flat over detectors, ``(Ns,)``. A 2D problem's
+    ``(Nt, Ns)`` data broadcasts against it directly, but 3D data does not, and
+    the flat speeds must be folded back onto the trailing detector axes in the
+    same row-major order the data uses.
+    """
+    nt, ny, nz = 8, 3, 2
+    dt = 0.1
+    key = jax.random.PRNGKey(0)
+    k_data, k_c = jax.random.split(key)
+    data_grid = jax.random.normal(k_data, (nt, ny, nz), dtype=jnp.float64)
+    c_flat = jax.random.uniform(
+        k_c, (ny * nz,), dtype=jnp.float64, minval=1.0, maxval=2.0
+    )
+
+    source_grid = _form_adjoint_source(data_grid, dt, c_flat, None)
+    assert source_grid.shape == (nt, ny, nz)
+
+    # The flattened problem is the reference: same physics, (Nt, Ns) layout.
+    source_flat = _form_adjoint_source(data_grid.reshape(nt, ny * nz), dt, c_flat, None)
+    assert jnp.allclose(source_grid.reshape(nt, ny * nz), source_flat, atol=1e-12)
+
+    # Each detector must receive its own speed (catches a transposed fold).
+    expected = (
+        -(c_flat.reshape(ny, nz) ** 2)
+        * jnp.fft.ifft(
+            (2j * jnp.pi * jnp.fft.fftfreq(nt, d=dt)).reshape(nt, 1, 1)
+            * jnp.fft.fft(data_grid, axis=0),
+            axis=0,
+        ).real
+    )
+    assert jnp.allclose(source_grid, expected, atol=1e-12)
+
+
+def test_form_adjoint_source_rejects_mismatched_detector_count():
+    data = jnp.ones((4, 3, 2))
+    with pytest.raises(ValueError, match="does not match the data detector grid"):
+        _form_adjoint_source(data, 0.1, jnp.ones(5), None)
+
+
 def test_prepare_adjoint_uses_raw_spacetime_coefficients(monkeypatch):
     """Boundary-source analysis must not insert an IVP half-wave factor 1/2."""
 
