@@ -19,12 +19,6 @@ import matplotlib.patches as patches
 from beamax.decomposition import DyadicDecomposition
 from beamax.solvers import hybrid_solver_utils
 
-# since pyvista is only used for 3d stuff, it's not essential
-try:
-    import pyvista as pv
-except ImportError:
-    pass
-
 from beamax import utils
 from beamax.geometry import Domain
 
@@ -475,15 +469,17 @@ class PlotHelper:
                 self._plot_complex_wavefield_2d(data, *args, **kwargs)
             elif ndim == 3:
                 self._plot_complex_wavefield_3d(data, *args, **kwargs)
-        elif not complex:
+            else:
+                raise ValueError(f"Unsupported data dimension: {ndim}")
+        else:
             if ndim == 1:
                 self._plot_wavefield_1d(data, *args, **kwargs)
             elif ndim == 2:
                 self._plot_wavefield_2d(data, *args, **kwargs)
             elif ndim == 3:
                 self._plot_wavefield_3d(data, *args, **kwargs)
-        else:
-            raise ValueError(f"Unsupported data dimension: {ndim}")
+            else:
+                raise ValueError(f"Unsupported data dimension: {ndim}")
 
     def _plot_wavefield_1d(
         self,
@@ -700,7 +696,9 @@ class PlotHelper:
         else:
             plt.show()
 
-    def _plot_complex_wavefield_2d(self, Z_complex, X, Y, title=None, filename=None):
+    def _plot_complex_wavefield_2d(
+        self, Z_complex, X=None, Y=None, title=None, filename=None
+    ):
         """
         Plot real and imaginary parts of a two-dimensional complex field.
 
@@ -717,6 +715,8 @@ class PlotHelper:
         """
         real_part = jnp.real(Z_complex)
         imag_part = jnp.imag(Z_complex)
+        if X is None or Y is None:
+            Y, X = jnp.indices(Z_complex.shape)
         fig, (ax1, ax2) = plt.subplots(1, 2)
 
         pcm1 = ax1.pcolormesh(X, Y, real_part, cmap=self.colormap)
@@ -728,10 +728,33 @@ class PlotHelper:
         ax2.set_title("Imaginary Part", fontsize=self.font_size)
 
         fig.suptitle(title or "Complex Array Plot", fontsize=self.title_font_size)
+        self._finalize_plot(fig, filename)
+
+    def _plot_complex_wavefield_3d(
+        self, values, X=None, Y=None, Z=None, title=None, filename=None
+    ):
+        """Volume-render real and imaginary parts of a complex 3D field."""
+        try:
+            import pyvista as pv
+        except ImportError as exc:
+            raise ImportError("PyVista is required for 3D plotting.") from exc
+        if X is None or Y is None or Z is None:
+            X, Y, Z = jnp.mgrid[: values.shape[0], : values.shape[1], : values.shape[2]]
+        plotter = pv.Plotter(shape=(1, 2), off_screen=filename is not None)
+        for column, (label, component) in enumerate(
+            (("Real", jnp.real(values)), ("Imaginary", jnp.imag(values)))
+        ):
+            grid = pv.StructuredGrid(X, Y, Z)
+            grid[label] = np.asarray(component).flatten(order="F")
+            plotter.subplot(0, column)
+            plotter.add_volume(grid, scalars=label, cmap=self.colormap)
+            plotter.add_title(label)
+        if title:
+            plotter.add_text(title, position="upper_edge")
         if filename:
-            self.save_plot(filename)
+            plotter.screenshot(filename)
         else:
-            plt.show()
+            plotter.show()
 
     def plot_pressure_time(self, p, t, title=None, filename=None):
         """
@@ -1136,6 +1159,10 @@ class PlotHelper:
             plt.show()
 
         elif domain.ndim == 3:
+            try:
+                import pyvista as pv
+            except ImportError as exc:
+                raise ImportError("PyVista is required for 3D plotting.") from exc
             X, Y, Z = spatial_meshgrid
             grid = pv.StructuredGrid(X, Y, Z)
             grid["speed_of_sound"] = c.flatten(order="F")
@@ -1148,7 +1175,8 @@ class PlotHelper:
 
             if filename is not None:
                 p.screenshot(filename)
-            p.show()
+            else:
+                p.show()
 
         else:
             raise ValueError(f"Unsupported number of dimensions: {domain.ndim}")

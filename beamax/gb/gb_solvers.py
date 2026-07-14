@@ -1,17 +1,15 @@
 import jax
 import jax.numpy as jnp
 from jax import vmap, grad, hessian
+import math
 
 import diffrax
 from functools import partial
-import warnings
 from einops import rearrange
 from dataclasses import dataclass
 from typing import Tuple, Callable, Protocol, Optional
 import optimistix
 
-
-warnings.filterwarnings("ignore", module="equinox")
 
 __all__ = [
     "SolverFn",
@@ -53,6 +51,7 @@ class SolverFn(Protocol):
         mode: jnp.ndarray,
         ts: jnp.ndarray,
         c: Callable,
+        /,
         *args,
         **kwargs,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -595,7 +594,7 @@ def solve_hom_TR(
     return x0, p0_time, m0, a0
 
 
-@dataclass
+@dataclass(frozen=True)
 class SolverConfig:
     """
     Configuration for ODE solver settings.
@@ -609,6 +608,25 @@ class SolverConfig:
     icoeff: float = 1.0
     dcoeff: float = 0.0
     dt0: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate integration limits and tolerances."""
+        if isinstance(self.max_steps, bool) or not isinstance(self.max_steps, int):
+            raise ValueError("max_steps must be a positive integer.")
+        if self.max_steps <= 0:
+            raise ValueError("max_steps must be a positive integer.")
+        for name in ("rtol", "atol"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive.")
+        for name in ("pcoeff", "icoeff", "dcoeff"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite.")
+        if self.dt0 is not None and (
+            not math.isfinite(float(self.dt0)) or float(self.dt0) <= 0
+        ):
+            raise ValueError("dt0 must be finite and positive when provided.")
 
     @classmethod
     def from_precision(

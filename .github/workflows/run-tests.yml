@@ -26,6 +26,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      - name: Set up uv
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: astral-sh/setup-uv@v6
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -40,8 +44,30 @@ jobs:
           python -m pip install pyright
           pyright
 
+      - name: Check lockfile and distributions
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          uv lock --check
+          uv build
+          python -m venv --system-site-packages /tmp/beamax-wheel-smoke
+          /tmp/beamax-wheel-smoke/bin/pip install --no-deps dist/*.whl
+          cd /tmp
+          /tmp/beamax-wheel-smoke/bin/python -c "import beamax; assert beamax.__version__ == '0.2.2'"
+
       - name: Test with pytest
         run: pytest --cov=beamax --cov-report=term-missing --cov-report=xml -q
+
+      - name: Test two-device sharding contract
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        env:
+          XLA_FLAGS: --xla_force_host_platform_device_count=2
+        run: pytest -q tests/solvers/test_sharding_contract.py
+
+      - name: Test float32 numerical path
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        env:
+          JAX_ENABLE_X64: "0"
+        run: python tools/smoke_float32.py
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'

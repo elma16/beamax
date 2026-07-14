@@ -7,6 +7,7 @@ low-frequency component is supplied through a small adapter callable API.
 
 import warnings
 import math
+import numpy as np
 import jax.numpy as jnp
 import equinox as eqx
 from scipy.signal.windows import kaiser
@@ -96,7 +97,35 @@ class HybridSolverConfig:
             raise ValueError("Must provide either box_corners or cutoff_freq")
         if has_corners and has_freq:
             raise ValueError("Provide only one of box_corners or cutoff_freq")
-        if not 0 <= self.order <= 5:
+        if self.box_corners is not None:
+            corners = np.asarray(self.box_corners)
+            if corners.shape != (2,) or not np.issubdtype(corners.dtype, np.integer):
+                raise ValueError(
+                    "box_corners must contain exactly two integer indices."
+                )
+            if np.any(corners < 0) or corners[0] > corners[1]:
+                raise ValueError("box_corners must be non-negative and ordered.")
+        if self.cutoff_freq is not None and (
+            not math.isfinite(float(self.cutoff_freq)) or self.cutoff_freq <= 0
+        ):
+            raise ValueError("cutoff_freq must be finite and positive.")
+        if self.input_type not in {"spatial", "fourier"}:
+            raise ValueError("input_type must be 'spatial' or 'fourier'.")
+        if self.interp_method not in {"fourier", "zoom"}:
+            raise ValueError("interp_method must be 'fourier' or 'zoom'.")
+        if (
+            isinstance(self.dt_oversample, bool)
+            or not isinstance(self.dt_oversample, int)
+            or self.dt_oversample < 0
+        ):
+            raise ValueError("dt_oversample must be a non-negative integer.")
+        if not math.isfinite(float(self.beta)) or self.beta <= 0:
+            raise ValueError("beta must be finite and positive.")
+        if (
+            isinstance(self.order, bool)
+            or not isinstance(self.order, int)
+            or not 0 <= self.order <= 5
+        ):
             raise ValueError(f"order must be 0-5, got {self.order}")
         if self.window_type not in ("kaiser", "tukey"):
             raise ValueError(
@@ -353,6 +382,10 @@ class FourierInterpolation(InterpolationStrategy):
         full-field resize from detector-data resizing and applies the matched
         correction there.
         """
+        if len(target_shape) != data.ndim:
+            raise ValueError(
+                f"target_shape must have length {data.ndim}, got {target_shape}."
+            )
         return utils.interpolate_fourier(
             data, target_shape, input_type="spatial", output_type="spatial"
         ).real
@@ -388,6 +421,10 @@ class ZoomInterpolation(InterpolationStrategy):
         jnp.ndarray
             Resized array from :func:`scipy.ndimage.zoom`.
         """
+        if len(target_shape) != data.ndim:
+            raise ValueError(
+                f"target_shape must have length {data.ndim}, got {target_shape}."
+            )
         zoom_factors = tuple(o / i for o, i in zip(target_shape, data.shape))
         return jnp.asarray(zoom(data, zoom_factors, order=self.order))
 
@@ -539,10 +576,22 @@ class HybridSolver(eqx.Module):
         ):
             return ts
 
+        if ts.ndim != 1 or ts.shape[0] < 2:
+            raise ValueError(
+                "ts must be a one-dimensional array with at least two points."
+            )
         dt = ts[1] - ts[0]
+        if (
+            not bool(jnp.isfinite(dt))
+            or not bool(dt > 0)
+            or not bool(jnp.allclose(jnp.diff(ts), dt))
+        ):
+            raise ValueError(
+                "ts must be finite, strictly increasing, and uniformly spaced."
+            )
         Nt = len(ts)
         Nt_extended = Nt + self.config.dt_oversample
-        return jnp.arange(0, Nt_extended) * dt
+        return ts[0] + jnp.arange(0, Nt_extended) * dt
 
     def _apply_window(self, data: jnp.ndarray) -> jnp.ndarray:
         """
@@ -599,7 +648,7 @@ class HybridSolver(eqx.Module):
         window = window.at[-taper_len:].set(kaiser_tail)
 
         if data.ndim > 1:
-            return data * window[:, None]
+            return data * window.reshape((Nt,) + (1,) * (data.ndim - 1))
         return data * window
 
     def _apply_tukey_window(self, data: jnp.ndarray, alpha: float = 0.5) -> jnp.ndarray:
@@ -632,7 +681,7 @@ class HybridSolver(eqx.Module):
         window = window.at[-taper_len:].set(taper)
 
         if data.ndim > 1:
-            return data * window[:, None]
+            return data * window.reshape((Nt,) + (1,) * (data.ndim - 1))
         return data * window
 
     def _run_lf_backend(

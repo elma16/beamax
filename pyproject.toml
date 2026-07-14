@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "beamax"
 description = "Multiscale Gaussian Beams in JAX"
-version = "0.2.1"
+version = "0.2.2"
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
@@ -101,7 +101,6 @@ ignore = ["E501", "E402", "F722", "F821"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-filterwarnings = "ignore"
 
 [tool.coverage.run]
 source = ["beamax"]

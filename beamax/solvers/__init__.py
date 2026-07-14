@@ -1,7 +1,4 @@
-"""
-Solvers public API with lazy loading of optional stacks.
-No imports of heavy third-party libs at module import time.
-"""
+"""Solver API; the optional k-Wave stack is imported only on first use."""
 
 from importlib import import_module
 from typing import Any

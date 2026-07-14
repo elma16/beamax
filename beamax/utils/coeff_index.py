@@ -44,7 +44,26 @@ def batch_data(*args, batch_size, zero_padded_args=()):
     Tuple[jnp.ndarray, ...]
         Batched arrays (with padding if needed).
     """
+    if not args:
+        raise ValueError("batch_data requires at least one array.")
+    if (
+        isinstance(batch_size, bool)
+        or not isinstance(batch_size, int)
+        or batch_size <= 0
+    ):
+        raise ValueError("batch_size must be a positive integer.")
+    if any(arg.ndim == 0 for arg in args):
+        raise ValueError("All arrays must have a leading batch dimension.")
     b = args[0].shape[0]
+    if b == 0:
+        raise ValueError("Cannot batch empty arrays.")
+    if any(arg.shape[0] != b for arg in args[1:]):
+        raise ValueError("All arrays must have the same leading dimension.")
+    if any(
+        isinstance(i, bool) or not isinstance(i, int) or i < 0 or i >= len(args)
+        for i in zero_padded_args
+    ):
+        raise ValueError("zero_padded_args contains an invalid argument index.")
     num_batches = (b + batch_size - 1) // batch_size
 
     def _pad(arr, zero_pad=True):
@@ -68,7 +87,9 @@ def batch_data(*args, batch_size, zero_padded_args=()):
     return tuple(batched_args)
 
 
-def find_level(dyadic_decomp: DyadicDecomposition, box_num: int) -> Int[Array, ""]:
+def find_level(
+    dyadic_decomp: DyadicDecomposition, box_num: int | Int[Array, "..."]
+) -> Int[Array, ""]:
     """
     Map global box index → dyadic level.
 

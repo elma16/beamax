@@ -27,6 +27,19 @@ __all__ = [
 ]
 
 
+def _normalise_target_shape(shape: Tuple, ndim: int, *, name: str) -> Tuple[int, ...]:
+    """Validate and normalise an array target shape."""
+    if len(shape) != ndim:
+        raise ValueError(f"{name} must have length {ndim}; got {shape}.")
+    values = []
+    for value in shape:
+        numeric = float(value)
+        if not np.isfinite(numeric) or not numeric.is_integer() or numeric <= 0:
+            raise ValueError(f"{name} entries must be positive integers; got {shape}.")
+        values.append(int(numeric))
+    return tuple(values)
+
+
 def interpolate_nearest(array: jnp.ndarray, new_shape: Tuple) -> jnp.ndarray:
     """
     Nearest-neighbour resampling to `new_shape`.
@@ -41,6 +54,7 @@ def interpolate_nearest(array: jnp.ndarray, new_shape: Tuple) -> jnp.ndarray:
     jnp.ndarray
         Resampled array.
     """
+    new_shape = _normalise_target_shape(new_shape, array.ndim, name="new_shape")
     zoom_factors = tuple(
         [new_dim / old_dim for new_dim, old_dim in zip(new_shape, array.shape)]
     )
@@ -100,6 +114,7 @@ def _center_slices(curr: Tuple[int, ...], target: Tuple[int, ...]):
     ValueError
         If any target dimension is larger than the current dimension.
     """
+    target = _normalise_target_shape(target, len(curr), name="target")
     sl = []
     for c, t in zip(curr, target):
         if t > c:
@@ -125,6 +140,9 @@ def pad_array(
     -------
     jnp.ndarray
     """
+    desired_size = _normalise_target_shape(
+        desired_size, array.ndim, name="desired_size"
+    )
     curr = array.shape
     pads = []
     for c, d in zip(curr, desired_size):
@@ -156,6 +174,9 @@ def crop_centered(array: jnp.ndarray, desired_size: Tuple[int, ...]) -> jnp.ndar
     -------
     jnp.ndarray
     """
+    desired_size = _normalise_target_shape(
+        desired_size, array.ndim, name="desired_size"
+    )
     curr = array.shape
     if any(d > c for d, c in zip(desired_size, curr)):
         return array  # caller should pad first; keep function pure
@@ -187,6 +208,9 @@ def interpolate_fourier(
     -----
     Assumes periodic boundaries. Uses `pad_array` then `crop_centered` in frequency.
     """
+    desired_size = _normalise_target_shape(
+        desired_size, array.ndim, name="desired_size"
+    )
     if input_type not in {"spatial", "fourier"} or output_type not in {
         "spatial",
         "fourier",

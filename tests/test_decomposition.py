@@ -105,9 +105,9 @@ def test_decomp_is_dyadic(num_levels, N, num_boxes_outer_level, box_aspect_ratio
     decomp = DyadicDecomposition(num_levels, N, num_boxes_outer_level, box_aspect_ratio)
 
     for i in range(1, num_levels):
-        assert jnp.all(
-            decomp.box_lengths[i] == 2 * decomp.box_lengths[i - 1]
-        ), f"Box lengths at level {i} are not dyadic."
+        assert jnp.all(decomp.box_lengths[i] == 2 * decomp.box_lengths[i - 1]), (
+            f"Box lengths at level {i} are not dyadic."
+        )
 
 
 @pytest.mark.parametrize(
@@ -234,6 +234,36 @@ def test_boxes_per_dim_override_rectangular_counts():
     assert d.num_boxes_ndim.tolist() == [16, 124]
     assert d.total_num_boxes == 16 + 124
     assert d.centres_ndim.shape == (d.total_num_boxes, 2)
+
+
+def test_noninteger_rectangular_aspect_is_tiled_without_uncovered_bins():
+    from beamax.transforms import MSWPT
+
+    d = DyadicDecomposition(
+        num_levels=1,
+        N=(64, 96),
+        num_boxes_levels=(4,),
+        box_aspect_ratio=(1, 1),
+    )
+    wpt = MSWPT(d, redundancy=2, windowing="rectangular")
+
+    assert d._outer_boxes_per_axis_py(0).tolist() == [4, 6]
+    assert bool(jnp.all(jnp.isfinite(wpt.sum_gsquare)))
+    assert bool(jnp.all(wpt.sum_gsquare > 0))
+
+
+@pytest.mark.parametrize(
+    "N,boxes,aspect",
+    [
+        ((64.5, 64), (4,), (1, 1)),
+        ((64, 64), (4.5,), (1, 1)),
+        ((64, 64), (4,), (1.5, 1)),
+        ((64, 64), (4,), (-1, 1)),
+    ],
+)
+def test_decomposition_rejects_nonintegral_or_negative_geometry(N, boxes, aspect):
+    with pytest.raises(ValueError):
+        DyadicDecomposition(1, N, boxes, aspect)
 
 
 def test_validate_params_error_branches():

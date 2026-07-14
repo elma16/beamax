@@ -266,6 +266,33 @@ def test_make_c_function_from_grid_options_validate():
     with pytest.raises(ValueError, match="smooth_sigma"):
         make_c_function_from_grid(vals, smooth_sigma=(1.0, 2.0, 3.0))
 
+    with pytest.raises(ValueError, match="strictly positive"):
+        make_c_function_from_grid(vals, spacing=(1.0, 0.0))
+
+    cfun = make_c_function_from_grid(vals)
+    with pytest.raises(ValueError, match="final dimension"):
+        cfun(jnp.ones((3,)))
+
+
+@pytest.mark.parametrize(
+    "axes,values,match",
+    [
+        ([jnp.array([1.0, 0.0])], jnp.ones(2), "strictly increasing"),
+        ([jnp.array([0.0, 1.0, 3.0])], jnp.ones(3), "uniformly spaced"),
+        ([jnp.arange(3.0)], jnp.ones(4), "values must have shape"),
+    ],
+)
+def test_interpolator_rejects_invalid_rectilinear_grids(axes, values, match):
+    with pytest.raises(ValueError, match=match):
+        Interpolator(axes, values)
+
+
+def test_array_resampling_rejects_wrong_dimensional_target_shape():
+    with pytest.raises(ValueError, match="length 2"):
+        interpolate_fourier(jnp.ones((4, 4)), (8,), "spatial", "spatial")
+    with pytest.raises(ValueError, match="positive integers"):
+        utils.interpolate_nearest(jnp.ones((4,)), (0,))
+
 
 def test_memory_helpers_and_array_str():
     x = jnp.zeros((2, 3), dtype=jnp.float32)

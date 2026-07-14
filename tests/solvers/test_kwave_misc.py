@@ -3,10 +3,11 @@ Unit tests for thin validation / dispatch paths in ``kwave_solver`` that the
 existing integration tests don't reach. Pure-Python, no k-Wave required.
 """
 
-
 import numpy as np
 import pytest
+import jax.numpy as jnp
 
+from beamax.geometry import Domain
 from beamax.solvers import kwave_solver as kwave_solver_module
 from beamax.solvers.kwave_solver import KWaveSolver
 
@@ -111,16 +112,16 @@ class TestCoerceSensorDataLayout:
                 op_name="test",
             )
 
-    def test_square_auto_layout_keeps_input(self):
-        """When Ns == Nt the layout is ambiguous; auto returns the input as-is."""
+    def test_square_auto_layout_requires_explicit_orientation(self):
+        """When Ns == Nt, auto cannot determine the data orientation safely."""
         data = np.arange(4.0).reshape(2, 2)
-        out = KWaveSolver._coerce_sensor_data_layout(
-            data,
-            self._mask(2),
-            data_layout="auto",
-            op_name="test",
-        )
-        assert np.array_equal(out, data)
+        with pytest.raises(ValueError, match="ambiguous square"):
+            KWaveSolver._coerce_sensor_data_layout(
+                data,
+                self._mask(2),
+                data_layout="auto",
+                op_name="test",
+            )
 
     def test_auto_layout_indeterminate_raises(self):
         """Auto-inference must fail for shapes that match neither orientation."""
@@ -153,6 +154,51 @@ def test_default_kwave_binary_path_returns_path_with_known_name(monkeypatch):
     out = kwave_solver_module._default_kwave_binary_path("cpu")
     assert out.name == "kspaceFirstOrder-OMP"
     assert str(out).startswith("/tmp/kwave_bin")
+
+
+def test_explicit_pml_options_are_honoured_and_defaults_are_safely_derived():
+    domain = Domain(N=(16, 32), dx=(0.1, 0.1), c=1.0, periodic=(False, False))
+    explicit = KWaveSolver(pml_inside=False, pml_size=3, backend="python")
+    explicit_kwargs = explicit._kwargs_for_domain(domain)
+    assert explicit_kwargs["pml_inside"] is False
+    assert explicit_kwargs["pml_size"] == 3
+
+    defaults = KWaveSolver()
+    default_kwargs = defaults._kwargs_for_domain(domain)
+    assert default_kwargs["pml_size"] == (7, 15)
+
+
+def test_run_simulation_evaluates_callable_absorption_fields(monkeypatch):
+    captured = {}
+
+    def fake_medium(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(kwave_solver_module, "kWaveMedium", fake_medium)
+    monkeypatch.setattr(
+        kwave_solver_module, "kspaceFirstOrder", lambda *args, **kwargs: {"p": None}
+    )
+    solver = KWaveSolver(backend="python")
+    monkeypatch.setattr(solver, "_create_kgrid", lambda domain, ts: object())
+    domain = Domain(
+        N=(4, 4),
+        dx=(0.1, 0.1),
+        c=lambda x: 1500.0 + 0.0 * x[..., 0],
+        alpha_coeff=lambda x: 0.2 + 0.0 * x[..., 0],
+        alpha_power=lambda x: 1.5 + 0.0 * x[..., 0],
+        periodic=(False, False),
+    )
+
+    solver._run_simulation(
+        domain,
+        jnp.linspace(0.0, 0.1, 3),
+        source=object(),
+        sensor=object(),
+    )
+
+    assert np.asarray(captured["alpha_coeff"]).shape == domain.N
+    assert np.asarray(captured["alpha_power"]).shape == domain.N
 
 
 if __name__ == "__main__":

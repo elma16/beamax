@@ -1,4 +1,3 @@
-import warnings
 from typing import Callable, Optional
 
 import jax
@@ -6,8 +5,6 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Complex, Float, Num
 
 from beamax.gb.gb_solvers import SolverConfig, SolverFn
-
-warnings.filterwarnings("ignore", module="equinox")
 
 __all__ = [
     "compute_gaussian_beam",

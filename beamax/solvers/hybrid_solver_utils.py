@@ -1,5 +1,6 @@
 import logging
 import math
+import jax
 from jax import vmap
 import jax.numpy as jnp
 from jax.lax import fori_loop
@@ -273,7 +274,7 @@ def are_opposing(corner1: int, corner2: int) -> bool:
     bool
         Whether the corner indices differ.
     """
-    return jnp.any(corner1 != corner2)
+    return corner1 != corner2
 
 
 def get_bounds(
@@ -353,8 +354,10 @@ def closest_power_of_two(size: int, max_size: int) -> int:
         ``max_size``.
     """
 
-    power_of_two = 2 ** jnp.ceil(jnp.log2(size)).astype(jnp.int32)
-    return jnp.minimum(power_of_two, max_size)
+    if size <= 0 or max_size <= 0:
+        raise ValueError("size and max_size must be positive.")
+    power_of_two = 1 << (int(size) - 1).bit_length()
+    return min(power_of_two, int(max_size))
 
 
 def downsample_p0(
@@ -377,10 +380,10 @@ def downsample_p0(
     jnp.ndarray
         Centred crop of ``p0_LF``.
     """
-    nonzero_size = jnp.min(jnp.array([int(stop - start) for start, stop in bd]))
+    nonzero_size = int(jnp.min(jnp.array([int(stop - start) for start, stop in bd])))
 
     if use_power_of_two:
-        slice_size = closest_power_of_two(nonzero_size, jnp.min(jnp.array(p0_LF.shape)))
+        slice_size = closest_power_of_two(nonzero_size, min(p0_LF.shape))
     else:
         slice_size = nonzero_size
 
@@ -419,8 +422,24 @@ def downsample_domain(domain: Domain, p0_LF_downsampled: jnp.ndarray) -> Domain:
 
     # assert jnp.allclose(dx_resized * (N_resized), domain.dx * (domain.N))
 
+    def resize_field(field):
+        if field is None or callable(field):
+            return field
+        values = jnp.asarray(field)
+        if values.ndim == 0:
+            return field
+        return jax.image.resize(values, N_resized, method="linear")
+
     domain_downsampled = Domain(
-        N=N_resized, dx=dx_resized, c=domain.c, periodic=domain.periodic, cfl=domain.cfl
+        N=N_resized,
+        dx=dx_resized,
+        c=resize_field(domain.c),
+        density=resize_field(domain.density),
+        alpha_coeff=resize_field(domain.alpha_coeff),
+        lam=domain.lam,
+        alpha_power=resize_field(domain.alpha_power),
+        periodic=domain.periodic,
+        cfl=domain.cfl,
     )
 
     return domain_downsampled
@@ -507,7 +526,7 @@ def split_frequency_components(
     elif box_corners is not None and cutoff_freq is None:
         # Use provided box_corners directly
         idx_box = get_indices_between_two_opposing_corners(
-            centers, box_corners[0], box_corners[1]
+            centers, int(box_corners[0]), int(box_corners[1])
         )
     else:
         raise ValueError("Exactly one of cutoff_freq or box_corners must be provided.")
@@ -537,8 +556,14 @@ def split_frequency_components(
     dom_downsample = domain
 
     if downsample:
+        assert box_corners is not None
         # Compute target bounds in spatial grid for LF.
-        bounds = get_bounds(wpt.dyadic_decomp, domain, box_corners[0], box_corners[1])
+        bounds = get_bounds(
+            wpt.dyadic_decomp,
+            domain,
+            int(box_corners[0]),
+            int(box_corners[1]),
+        )
 
         # Downsample LF Fourier data (implementation defines axis/layout).
         p0_LF_ft = downsample_p0(p0_LF_ft, bounds, use_pow2)
@@ -676,4 +701,4 @@ def interpolate_LF_soln(
     else:
         raise ValueError(f"Interpolation method {interpolation_method} not supported.")
 
-    return lf_upsampled
+    return jnp.asarray(lf_upsampled)

@@ -1,12 +1,9 @@
-import warnings
 from functools import partial
 from typing import Callable, Optional
 
 import jax.numpy as jnp
 from jax import grad, jit, vmap
 from jaxtyping import Array, Complex, Float, Num
-
-warnings.filterwarnings("ignore", module="equinox")
 
 __all__ = ["G", "Gx", "Gp", "check_M0", "prepare_M0", "is_diagonal"]
 

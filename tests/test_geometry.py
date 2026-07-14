@@ -182,5 +182,52 @@ def test_geom_c(d):
     assert jnp.allclose(domain.compute_min_speed(), 1.0)
 
 
+def test_grid_valued_sound_speed_is_interpolated_at_ray_points():
+    x = jnp.arange(4) * 0.1
+    y = jnp.arange(5) * 0.2
+    values = 1.0 + x[:, None] + 2.0 * y[None, :]
+    domain = Domain(
+        N=values.shape,
+        dx=(0.1, 0.2),
+        c=values,
+        periodic=(False, False),
+    )
+
+    points = jnp.array([[0.15, 0.30], [0.05, 0.10]])
+    assert jnp.allclose(domain.c_fn(points), 1.0 + points[:, 0] + 2.0 * points[:, 1])
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"N": (4.5,), "dx": (0.1,), "periodic": (False,)}, "integers"),
+        ({"N": (4,), "dx": (0.0,), "periodic": (False,)}, "positive"),
+        ({"N": (4,), "dx": (0.1, 0.2), "periodic": (False,)}, "length"),
+        ({"N": (4,), "dx": (0.1,), "periodic": ()}, "length"),
+        ({"N": (4,), "dx": (0.1,), "periodic": (False,), "c": -1}, "positive"),
+        (
+            {
+                "N": (4,),
+                "dx": (0.1,),
+                "periodic": (False,),
+                "density": jnp.ones((5,)),
+            },
+            "shape",
+        ),
+    ],
+)
+def test_domain_rejects_invalid_geometry_and_medium(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        Domain(**kwargs)
+
+
+def test_sensor_rejects_nonbinary_masks_and_quantised_duplicates():
+    domain = Domain(N=(4,), dx=(0.1,), c=1.0, periodic=(False,))
+    with pytest.raises(ValueError, match="binary values"):
+        Sensor(domain, binary_mask=jnp.array([0.0, 0.5, 0.0, 1.0]))
+    with pytest.raises(ValueError, match="distinct grid points"):
+        Sensor(domain, positions=jnp.array([[0.01], [0.02]]))
+
+
 if __name__ == "__main__":
     pytest.main(sys.argv)

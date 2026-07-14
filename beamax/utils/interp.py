@@ -212,12 +212,18 @@ def make_c_function_from_grid(
     )
 
     d = values.ndim
-    spacing_arr = jnp.array(spacing if spacing is not None else (1.0,) * d)
-    origin_arr = jnp.array(origin if origin is not None else (0.0,) * d)
-    if spacing_arr.shape != (d,):
-        raise ValueError(f"spacing must be length {d}, got shape {spacing_arr.shape}.")
-    if origin_arr.shape != (d,):
-        raise ValueError(f"origin must be length {d}, got shape {origin_arr.shape}.")
+    spacing_np = np.asarray(spacing if spacing is not None else (1.0,) * d, dtype=float)
+    origin_np = np.asarray(origin if origin is not None else (0.0,) * d, dtype=float)
+    if spacing_np.shape != (d,):
+        raise ValueError(f"spacing must be length {d}, got shape {spacing_np.shape}.")
+    if origin_np.shape != (d,):
+        raise ValueError(f"origin must be length {d}, got shape {origin_np.shape}.")
+    if not np.all(np.isfinite(spacing_np)) or np.any(spacing_np <= 0):
+        raise ValueError("spacing entries must be finite and strictly positive.")
+    if not np.all(np.isfinite(origin_np)):
+        raise ValueError("origin entries must be finite.")
+    spacing_arr = jnp.asarray(spacing_np)
+    origin_arr = jnp.asarray(origin_np)
 
     def c_fun(coords: jnp.ndarray) -> jnp.ndarray:
         """
@@ -234,6 +240,10 @@ def make_c_function_from_grid(
             Interpolated grid values.
         """
         coords = jnp.asarray(coords)
+        if coords.ndim == 0 or coords.shape[-1] != d:
+            raise ValueError(
+                f"coords must have final dimension {d}; got shape {coords.shape}."
+            )
         x = (coords - origin_arr) / spacing_arr  # (..., d) in index space
         i0 = jnp.floor(x)
         t = x - i0
@@ -289,7 +299,6 @@ class Interpolator:
         method: str = "linear",
         boundary: str = "clamp",
         smooth_sigma: Optional[float | Sequence[float]] = None,
-        **_,
     ):
         """
         Construct an interpolator from axis vectors and grid values.
@@ -303,9 +312,6 @@ class Interpolator:
             Grid values with dimensionality matching ``grid_points``.
         method, boundary, smooth_sigma
             Passed through to :func:`make_c_function_from_grid`.
-        **_ : dict
-            Ignored compatibility keyword arguments.
-
         Raises
         ------
         ValueError
@@ -316,16 +322,29 @@ class Interpolator:
             raise ValueError(
                 f"grid_points dims ({len(grid_points)}) must match values.ndim ({values.ndim})"
             )
-        self.grid_points = [jnp.asarray(g) for g in grid_points]
         self.values = jnp.asarray(values)
+        self.grid_points = [jnp.asarray(g) for g in grid_points]
+        expected_shape = tuple(int(g.size) for g in self.grid_points)
+        if tuple(self.values.shape) != expected_shape:
+            raise ValueError(
+                f"values must have shape {expected_shape}, got {self.values.shape}."
+            )
         # Infer uniform spacing + origin per axis
         spacings = []
         origins = []
         for g in self.grid_points:
             if g.ndim != 1 or g.size < 2:
                 raise ValueError("Each grid axis must be 1D with >=2 points.")
-            spacings.append(float(g[1] - g[0]))
-            origins.append(float(g[0]))
+            g_np = np.asarray(g, dtype=float)
+            if not np.all(np.isfinite(g_np)):
+                raise ValueError("Grid axes must contain only finite values.")
+            diffs = np.diff(g_np)
+            if np.any(diffs <= 0):
+                raise ValueError("Grid axes must be strictly increasing.")
+            if not np.allclose(diffs, diffs[0], rtol=1e-7, atol=1e-12):
+                raise ValueError("Grid axes must be uniformly spaced.")
+            spacings.append(float(diffs[0]))
+            origins.append(float(g_np[0]))
         self._c = make_c_function_from_grid(
             self.values,
             spacing=tuple(spacings),

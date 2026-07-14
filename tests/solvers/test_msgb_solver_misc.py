@@ -15,6 +15,7 @@ time-reversal, or sharding integration tests. In particular:
 """
 
 import os
+from types import SimpleNamespace
 
 # Force two host devices so we can build a Mesh and exercise sharding-spec helpers
 # even on a single-CPU CI runner.
@@ -295,6 +296,59 @@ class TestDiagnosticParamVariants:
         assert jnp.allclose(sensor_data, diagnostic_data, atol=1e-12)
         assert len(params) == 6
 
+    def test_3d_forward_preserves_sensor_position_order(self, monkeypatch):
+        """3D output channels must retain the order of ``sensor_positions``.
+
+        This guards against the legacy Fortran-order reshape that used to
+        compensate for k-Wave's standalone mask order.  Solver wrappers now
+        expose a common NumPy-C channel convention, so MSGB must return the
+        native order in which its sensor positions were supplied.
+        """
+
+        def fake_prepare(self, p0, dpdt, domain, wpt):
+            del self, p0, dpdt, domain, wpt
+            return (jnp.zeros((1,)),) * 6
+
+        def fake_forward_result(*, ts, sensors, **kwargs):
+            del kwargs
+            return jnp.arange(len(ts) * len(sensors), dtype=jnp.float64).reshape(
+                len(ts), len(sensors)
+            )
+
+        monkeypatch.setattr(MSGBSolver, "_prepare_forward_params_real", fake_prepare)
+        monkeypatch.setattr(
+            msgb_solver_module, "compute_forward_result", fake_forward_result
+        )
+
+        domain = geometry.Domain(
+            N=(2, 3, 4),
+            dx=(0.1, 0.1, 0.1),
+            c=_c_const,
+            periodic=(False, False, False),
+        )
+        positions = jnp.array(
+            [[i * 0.1, j * 0.1, 0.0] for i in range(2) for j in range(3)]
+        )
+        p0 = jnp.zeros(domain.N)
+        ts = jnp.arange(3, dtype=jnp.float64)
+        solver = MSGBSolver(
+            thr=1,
+            thr_strat="top_n",
+            batch_size=1,
+            input_type="spatial",
+            ode_solver=gb_solvers.solve_ODE_base,
+            sum_method="all_real",
+        )
+        expected = jnp.arange(18, dtype=jnp.float64).reshape(3, 6)
+        fake_wpt = SimpleNamespace(dyadic_decomp=SimpleNamespace(N=domain.N))
+
+        with jax.disable_jit():
+            actual, _ = solver.forward_with_params(
+                p0, domain, positions, ts, wpt=fake_wpt
+            )
+
+        assert jnp.array_equal(actual, expected)
+
     def test_oversized_real_top_n_matches_half_frame_cap(self):
         """Oversized requests must not propagate masked zero-amplitude rows."""
         N = (16,)
@@ -333,6 +387,61 @@ class TestDiagnosticParamVariants:
         assert jnp.allclose(oversized_data, capped_data, rtol=1e-12, atol=1e-12)
         for oversized, capped in zip(oversized_params, capped_params):
             assert jnp.allclose(oversized, capped, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "strategy,threshold",
+    [
+        ("hard", 0.0),
+        ("percentile", 50.0),
+        ("hard_reassign", 0.0),
+        ("bao_energy", 0.0),
+        ("perc_max_abs", 0.0),
+    ],
+)
+def test_data_dependent_threshold_strategies_run_through_public_forward(
+    strategy, threshold
+):
+    """Data-dependent selectors must execute outside compiled propagation."""
+    domain, wpt = _build_small_1d_setup(periodic=True)
+    sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(domain.N))
+    p0 = jnp.cos(2.0 * jnp.pi * jnp.arange(domain.N[0]) / domain.N[0])
+    ts = jnp.linspace(0.0, 0.01, 3)
+    solver = MSGBSolver(
+        thr=threshold,
+        thr_strat=strategy,
+        batch_size=8,
+        input_type="spatial",
+        ode_solver=gb_solvers.solve_ODE_base,
+        sum_method="all_real",
+    )
+
+    result = solver.forward(p0, domain, sensors, ts, wpt)
+
+    assert result.shape == (len(ts), len(sensors.positions))
+    assert bool(jnp.all(jnp.isfinite(result)))
+
+
+@pytest.mark.parametrize(
+    "threshold,strategy,match",
+    [
+        (0, "top_n", "positive integer"),
+        (1.5, "top_n", "positive integer"),
+        (-1.0, "hard", "non-negative"),
+        (101.0, "percentile", r"\[0, 100\]"),
+        (1.1, "perc_max_abs", r"\[0, 1\]"),
+    ],
+)
+def test_threshold_configuration_is_validated(threshold, strategy, match):
+    with pytest.raises(ValueError, match=match):
+        MSGBSolver(
+            thr=threshold,
+            thr_strat=strategy,
+            batch_size=4,
+            input_type="spatial",
+            ode_solver=gb_solvers.solve_ODE_base,
+            sum_method="all_real",
+        )
 
 
 # ---------------------------------------------------------------------------

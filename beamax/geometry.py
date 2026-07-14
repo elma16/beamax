@@ -3,12 +3,13 @@ from typing import Callable, Optional, Tuple, Union
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+from jax.tree_util import Partial
 from jaxtyping import Array, Float, Int, Num
 
 
 ScalarLike = Union[int, float, Float[Array, ""]]
 FieldFn = Callable[[Float[Array, "... d"]], Float[Array, "..."]]
-Param = Optional[Union[FieldFn, ScalarLike]]
+Param = Optional[Union[FieldFn, ScalarLike, Num[Array, "..."]]]
 
 
 class Domain(eqx.Module):
@@ -48,15 +49,101 @@ class Domain(eqx.Module):
     # geometry
     N: Tuple[int, ...] = eqx.field(static=True)
     dx: Tuple[float, ...] = eqx.field()
-    periodic: Tuple[bool, ...] = eqx.field()
+    periodic: Tuple[bool, ...] = eqx.field(static=True)
     cfl: float = eqx.field(default=0.3)
 
     # material parameters
-    c: Param = eqx.field(default=1500.0, static=True)  # speed of sound (m s⁻¹)
+    c: Param = eqx.field(default=1500.0)  # speed of sound (m s⁻¹)
     density: Param = eqx.field(default=1.0)  # ρ
     alpha_coeff: Param = eqx.field(default=None)  # α₀
     lam: float = eqx.field(default=0.0)  # absorption coefficient
     alpha_power: Param = eqx.field(default=None)  # y in α=α₀ fʸ
+
+    def __init__(
+        self,
+        N: Tuple[int, ...],
+        dx: Tuple[float, ...],
+        periodic: Tuple[bool, ...],
+        cfl: float = 0.3,
+        c: Param = 1500.0,
+        density: Param = 1.0,
+        alpha_coeff: Param = None,
+        lam: float = 0.0,
+        alpha_power: Param = None,
+    ) -> None:
+        """Construct and validate a computational domain."""
+        N_values = np.asarray(N)
+        if N_values.ndim != 1 or N_values.size == 0:
+            raise ValueError("N must contain at least one spatial dimension.")
+        if any(
+            isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer))
+            for n in N_values
+        ):
+            raise ValueError(f"N entries must be integers; got {N}.")
+        N = tuple(int(n) for n in N_values)
+        if any(n <= 0 for n in N):
+            raise ValueError(f"N entries must be positive; got {N}.")
+
+        if len(dx) != len(N):
+            raise ValueError(f"dx must have length {len(N)}, got {len(dx)}.")
+        dx_arr = np.asarray(dx, dtype=float)
+        if not np.all(np.isfinite(dx_arr)) or np.any(dx_arr <= 0):
+            raise ValueError(f"dx entries must be finite and positive; got {dx}.")
+
+        if len(periodic) != len(N):
+            raise ValueError(
+                f"periodic must have length {len(N)}, got {len(periodic)}."
+            )
+        if any(not isinstance(p, (bool, np.bool_)) for p in periodic):
+            raise ValueError(f"periodic entries must be boolean; got {periodic}.")
+
+        if not np.isfinite(cfl) or cfl <= 0:
+            raise ValueError(f"cfl must be finite and positive; got {cfl}.")
+        if not np.isfinite(lam) or lam < 0:
+            raise ValueError(f"lam must be finite and non-negative; got {lam}.")
+
+        def _validate_param(
+            name: str,
+            value: Param,
+            *,
+            allow_none: bool,
+            strictly_positive: bool,
+        ) -> Param:
+            if value is None:
+                if allow_none:
+                    return None
+                raise ValueError(f"{name} cannot be None.")
+            if callable(value):
+                return value if isinstance(value, Partial) else Partial(value)
+            arr = np.asarray(value)
+            if arr.ndim != 0 and tuple(arr.shape) != N:
+                raise ValueError(
+                    f"{name} must be scalar, callable, or have shape {N}; "
+                    f"got {arr.shape}."
+                )
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"{name} must contain only finite values.")
+            if strictly_positive and np.any(arr <= 0):
+                raise ValueError(f"{name} must be strictly positive.")
+            if not strictly_positive and np.any(arr < 0):
+                raise ValueError(f"{name} must be non-negative.")
+            return value if arr.ndim == 0 else jnp.asarray(value)
+
+        self.N = N
+        self.dx = tuple(float(x) for x in dx_arr)
+        self.periodic = tuple(bool(p) for p in periodic)
+        self.cfl = float(cfl)
+        self.c = _validate_param("c", c, allow_none=False, strictly_positive=True)
+        self.density = _validate_param(
+            "density", density, allow_none=True, strictly_positive=True
+        )
+        self.alpha_coeff = _validate_param(
+            "alpha_coeff", alpha_coeff, allow_none=True, strictly_positive=False
+        )
+        self.lam = float(lam)
+        self.alpha_power = _validate_param(
+            "alpha_power", alpha_power, allow_none=True, strictly_positive=False
+        )
 
     # ------------------------------------------------------------------
     # helpers
@@ -80,6 +167,10 @@ class Domain(eqx.Module):
         arr = jnp.asarray(p(self.grid) if callable(p) else p)
         if arr.ndim == 0:  # broadcast scalar
             arr = jnp.broadcast_to(arr, self.grid.shape[:-1])
+        elif tuple(arr.shape) != self.N:
+            raise ValueError(
+                f"Medium field evaluated to shape {arr.shape}; expected {self.N}."
+            )
         return arr
 
     @property
@@ -96,6 +187,20 @@ class Domain(eqx.Module):
         if callable(self.c):
             return self.c
         val = jnp.asarray(self.c)
+
+        if val.ndim > 0:
+            if tuple(val.shape) != self.N:
+                raise ValueError(
+                    f"Grid-valued c must have shape {self.N}; got {val.shape}."
+                )
+            from beamax.utils.interp import make_c_function_from_grid
+
+            return make_c_function_from_grid(
+                val,
+                spacing=self.dx,
+                origin=(0.0,) * self.ndim,
+                boundary="wrap" if all(self.periodic) else "clamp",
+            )
 
         def _const_c(x: Float[Array, "... d"]) -> Float[Array, "..."]:
             """
@@ -397,11 +502,19 @@ class Sensor(eqx.Module):
             )
 
         pos_np = np.asarray(positions)
+        if not np.all(np.isfinite(pos_np)):
+            raise ValueError("positions must contain only finite values.")
         lower = np.zeros(self.domain.ndim)
         upper = np.asarray(self.domain.grid_size)
         if np.any(pos_np < lower) or np.any(pos_np >= upper):
             raise ValueError(
                 "positions must lie inside the half-open domain [0, N*dx)."
+            )
+        indices = np.rint(pos_np / np.asarray(self.domain.dx)).astype(int)
+        indices = np.clip(indices, 0, np.asarray(self.domain.N) - 1)
+        if np.unique(indices, axis=0).shape[0] != indices.shape[0]:
+            raise ValueError(
+                "positions must map to distinct grid points after quantisation."
             )
         return positions
 
@@ -428,8 +541,15 @@ class Sensor(eqx.Module):
             raise ValueError(
                 f"binary_mask must have shape {self.domain.N}, got {mask.shape}."
             )
-        if not bool(np.any(np.asarray(mask) > 0)):
-            raise ValueError("binary_mask must contain at least one positive entry.")
+        mask_np = np.asarray(mask)
+        if not np.all(np.isfinite(mask_np)):
+            raise ValueError("binary_mask must contain only finite values.")
+        if not np.all((mask_np == 0) | (mask_np == 1)):
+            raise ValueError("binary_mask must contain only binary values 0 and 1.")
+        if not bool(np.any(mask_np == 1)):
+            raise ValueError(
+                "binary_mask must contain at least one positive active entry."
+            )
         return mask
 
     def _positions_to_mask(self, positions: Float[Array, "Ns d"]) -> Num[Array, "*N"]:

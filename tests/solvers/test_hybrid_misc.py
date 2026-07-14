@@ -26,6 +26,7 @@ from beamax.solvers.hybrid_solver import (
 )
 from beamax.solvers.hybrid_solver_utils import (
     are_opposing,
+    downsample_domain,
     find_bounding_corner_indices,
     get_indices_between_two_opposing_corners,
     get_indices_with_norm_less_than,
@@ -57,6 +58,24 @@ class TestHybridSolverConfigValidation:
                 box_corners=jnp.array([0, 1]),
                 window_type="hamming",
             )
+
+    @pytest.mark.parametrize(
+        "kwargs,match",
+        [
+            ({"box_corners": jnp.array([0.0, 1.0])}, "integer indices"),
+            ({"cutoff_freq": 0.0}, "positive"),
+            ({"box_corners": jnp.array([0, 1]), "input_type": "bad"}, "input_type"),
+            (
+                {"box_corners": jnp.array([0, 1]), "interp_method": "bad"},
+                "interp_method",
+            ),
+            ({"box_corners": jnp.array([0, 1]), "dt_oversample": -1}, "dt_oversample"),
+            ({"box_corners": jnp.array([0, 1]), "beta": 0.0}, "beta"),
+        ],
+    )
+    def test_invalid_numeric_and_enum_configuration_raises(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            HybridSolverConfig(**kwargs)
 
 
 class _DummySolver:
@@ -493,6 +512,46 @@ def test_apply_tukey_window_1d_input():
     out = solver._apply_tukey_window(data)
     assert out.shape == data.shape
     assert float(out[-1]) < 1.0
+
+
+@pytest.mark.parametrize("window_type", ["kaiser", "tukey"])
+def test_window_broadcasts_over_multidimensional_detector_data(window_type):
+    solver = HybridSolver(
+        hf_solver=_DummySolver(),
+        lf_backend=_dummy_backend(),
+        box_corners=jnp.array([0, 1]),
+        window_type=window_type,
+        dt_oversample=4,
+    )
+    data = jnp.ones((12, 3, 5))
+    out = solver._apply_window(data)
+    assert out.shape == data.shape
+    assert jnp.all(out[-1] < 1.0)
+
+
+def test_downsample_domain_preserves_and_resamples_medium_fields():
+    c = jnp.arange(16.0).reshape(4, 4) + 1500.0
+    alpha = jnp.linspace(0.1, 0.4, 16).reshape(4, 4)
+    domain = geometry.Domain(
+        N=(4, 4),
+        dx=(0.1, 0.2),
+        c=c,
+        density=1000.0,
+        alpha_coeff=alpha,
+        alpha_power=1.5,
+        lam=0.25,
+        periodic=(False, False),
+    )
+
+    coarse = downsample_domain(domain, jnp.ones((2, 2)))
+
+    assert coarse.N == (2, 2)
+    assert coarse.dx == pytest.approx((0.2, 0.4))
+    assert coarse.sound_speed_array.shape == (2, 2)
+    assert coarse.alpha_coeff_array.shape == (2, 2)
+    assert jnp.allclose(coarse.density_array, 1000.0)
+    assert jnp.allclose(coarse.alpha_power_array, 1.5)
+    assert coarse.lam == pytest.approx(0.25)
 
 
 # ---------------------------------------------------------------------------

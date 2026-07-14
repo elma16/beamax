@@ -80,7 +80,9 @@ def _threshold_top_n(coeff, val):
     values : jnp.ndarray
         Selected coefficient values.
     """
-    N = int(val)
+    N = min(int(val), int(coeff.shape[0]))
+    if N <= 0:
+        raise ValueError("top_n threshold must be a positive integer.")
     abs_c = jnp.abs(coeff)
     idx_unsorted = jnp.argpartition(abs_c, abs_c.size - N)[-N:]
     idx = idx_unsorted[jnp.argsort(abs_c[idx_unsorted])]
@@ -105,8 +107,12 @@ def _threshold_hard_reassign(coeff, val):
     values : jnp.ndarray
         Reassigned coefficient values.
     """
-    thr = jnp.where(jnp.abs(coeff) / jnp.max(jnp.abs(coeff)) >= val, coeff, 0)
-    ratio = jnp.sqrt(jnp.sum(jnp.abs(coeff) ** 2) / jnp.sum(jnp.abs(thr) ** 2))
+    max_abs = jnp.max(jnp.abs(coeff))
+    thr = jnp.where((max_abs > 0) & (jnp.abs(coeff) >= val * max_abs), coeff, 0)
+    retained_energy = jnp.sum(jnp.abs(thr) ** 2)
+    total_energy = jnp.sum(jnp.abs(coeff) ** 2)
+    ratio = jnp.sqrt(total_energy / jnp.where(retained_energy > 0, retained_energy, 1))
+    ratio = jnp.where(retained_energy > 0, ratio, 0)
     reassigned = thr * ratio
     idx = jnp.where(jnp.abs(reassigned) > 0)[0]
     return idx, reassigned[idx]
@@ -137,13 +143,13 @@ def _threshold_bao_energy(coeff, val, decomp, red):
     shapes = utils.compute_coeff_shapes(decomp, red, jnp.arange(decomp.num_levels))
     cumsum = jnp.r_[0, jnp.cumsum(decomp.num_boxes_ndim)]
     nn_level, nn_idx = utils.find_tensor_and_multiindex(
-        jnp.arange(4 * jnp.prod(jnp.array(decomp.N))), shapes
+        jnp.arange(coeff.shape[0]), shapes
     )
     box_idx = nn_idx[0, :] + cumsum[nn_level]
     normxi = jnp.linalg.norm(decomp.centres_ndim[box_idx], axis=1) ** decomp.ndim
-    energy = coeff * normxi
-    idx = jnp.where(jnp.abs(energy) > val)[0]
-    return idx, energy[idx]
+    weighted_coeff = coeff * normxi
+    idx = jnp.where(jnp.abs(weighted_coeff) > val)[0]
+    return idx, coeff[idx]
 
 
 def _threshold_perc_max_abs(coeff, val):
@@ -176,7 +182,7 @@ def threshold_coefficients(
     coeffs: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
     val: float,
     strategy: str = "hard",
-    wpt: MSWPT = None,
+    wpt: Optional[MSWPT] = None,
 ):
     """
     Apply thresholding to wavelet coefficients.
@@ -204,14 +210,18 @@ def threshold_coefficients(
     ValueError
         If ``strategy`` is unknown.
     """
+
+    def threshold_bao(c):
+        if wpt is None:
+            raise ValueError("bao_energy thresholding requires wpt.")
+        return _threshold_bao_energy(c, val, wpt.dyadic_decomp, wpt.redundancy)
+
     funcs = {
         "hard": lambda c: _threshold_hard(c, val),
         "top_n": lambda c: _threshold_top_n(c, val),
         "percentile": lambda c: _threshold_percentile(c, val),
         "hard_reassign": lambda c: _threshold_hard_reassign(c, val),
-        "bao_energy": lambda c: _threshold_bao_energy(
-            c, val, wpt.dyadic_decomp, wpt.redundancy
-        ),
+        "bao_energy": threshold_bao,
         "perc_max_abs": lambda c: _threshold_perc_max_abs(c, val),
     }
     if strategy not in funcs:
@@ -352,7 +362,14 @@ def compute_forward_parameters(
     if isinstance(significant_coeffs, tuple):
         pos = compute_params(significant_coeffs[0], 1)
         neg = compute_params(significant_coeffs[1], -1)
-        return tuple(jnp.concatenate((p, n), axis=0) for p, n in zip(pos, neg))
+        return (
+            jnp.concatenate((pos[0], neg[0]), axis=0),
+            jnp.concatenate((pos[1], neg[1]), axis=0),
+            jnp.concatenate((pos[2], neg[2]), axis=0),
+            jnp.concatenate((pos[3], neg[3]), axis=0),
+            jnp.concatenate((pos[4], neg[4]), axis=0),
+            jnp.concatenate((pos[5], neg[5]), axis=0),
+        )
     return compute_params(significant_coeffs, 1)
 
 
@@ -375,7 +392,8 @@ def compute_memory_requirements(b: int, N: Tuple, Nt: int) -> str:
         Human-readable memory estimate.
     """
     dims = (Nt,) + N + (b,)
-    dtype = jnp.float64 if jax.config.x64_enabled else jnp.float32
+    x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
+    dtype = jnp.float64 if x64_enabled else jnp.float32
     return utils.memory_estimate(jnp.array(dims), dtype)
 
 
@@ -526,7 +544,8 @@ def _aggregate_beams(
             init = jnp.zeros(init_shape)
         else:
             # Complex computation - respect JAX precision setting
-            complex_dtype = jnp.complex128 if jax.config.x64_enabled else jnp.complex64
+            x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
+            complex_dtype = jnp.complex128 if x64_enabled else jnp.complex64
             init = jnp.zeros(init_shape, dtype=complex_dtype)
 
         def scan_fn(carry, inp):

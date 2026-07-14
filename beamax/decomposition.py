@@ -25,6 +25,17 @@ def _all_even(N: Tuple[int, ...]) -> bool:
     return all((int(n) % 2) == 0 for n in N)
 
 
+def _is_integral(value: object) -> bool:
+    """Return whether ``value`` is a non-boolean integer-valued scalar."""
+    if isinstance(value, (bool, np.bool_)):
+        return False
+    if isinstance(value, (int, np.integer)):
+        return True
+    if isinstance(value, (float, np.floating)):
+        return bool(np.isfinite(value) and float(value).is_integer())
+    return False
+
+
 def _validate_boxes_per_dim_levels(
     boxes_per_dim_levels: Tuple[Tuple[int, ...], ...],
     num_levels: int,
@@ -57,6 +68,8 @@ def _validate_boxes_per_dim_levels(
             raise ValueError(
                 f"Level {lvl}: len(boxes_per_dim_levels[lvl])={len(b)} != ndim={ndim}."
             )
+        if any(not _is_integral(x) for x in b):
+            raise ValueError(f"Level {lvl}: boxes per axis must be integers; got {b}.")
         if any(int(x) <= 0 for x in b):
             raise ValueError(f"Level {lvl}: boxes per axis must be positive; got {b}.")
         if any((int(x) % 2) != 0 for x in b):
@@ -104,6 +117,8 @@ def validate_params(
     if not isinstance(num_levels, int) or num_levels < 1:
         raise ValueError(f"num_levels must be positive int; got {num_levels}.")
 
+    if not N or any(not _is_integral(x) for x in N):
+        raise ValueError(f"N entries must be integers; got {N}.")
     N = tuple(int(x) for x in N)
     if any(n <= 0 for n in N):
         raise ValueError(f"N must be positive; got {N}.")
@@ -112,16 +127,26 @@ def validate_params(
 
     ndim = len(N)
 
+    if any(not _is_integral(x) for x in box_aspect_ratio):
+        raise ValueError(
+            f"box_aspect_ratio entries must be integers; got {box_aspect_ratio}."
+        )
     bar = tuple(int(x) for x in box_aspect_ratio)
     if len(bar) == 0:
         raise ValueError("box_aspect_ratio must be non-empty.")
     if len(bar) != ndim:
         raise ValueError(f"len(box_aspect_ratio)={len(bar)} != ndim={ndim}.")
+    if any(x <= 0 for x in bar):
+        raise ValueError(f"box_aspect_ratio must be positive; got {bar}.")
     if not any(x == 1 for x in bar):
         raise ValueError("At least one aspect ratio component must equal 1.")
     if ndim == 1 and bar != (1,):
         raise ValueError("For 1D, box_aspect_ratio must be (1,).")
 
+    if any(not _is_integral(x) for x in num_boxes_levels):
+        raise ValueError(
+            f"num_boxes_levels entries must be integers; got {num_boxes_levels}."
+        )
     num_boxes_levels = tuple(int(x) for x in num_boxes_levels)
     if len(num_boxes_levels) != num_levels:
         raise ValueError(
@@ -151,6 +176,18 @@ def validate_params(
                 "boxes_per_dim_levels disagrees with num_boxes_levels on the smallest axis. "
                 f"Expected smallest-axis sequence {num_boxes_levels}, got {implied}."
             )
+    else:
+        N_arr = np.asarray(N, dtype=float)
+        bar_arr = np.asarray(bar, dtype=float)
+        scale = N_arr / float(min(N)) / bar_arr
+        for boxes in num_boxes_levels:
+            counts = boxes * scale
+            if not np.allclose(counts, np.rint(counts), rtol=0.0, atol=1e-12):
+                raise ValueError(
+                    "Derived boxes per axis are non-integral; provide a compatible "
+                    "box_aspect_ratio or explicit boxes_per_dim_levels. "
+                    f"Got counts {counts.tolist()} for {boxes} boxes."
+                )
 
     # Max levels given the innermost smallest-axis box count.
     N_ref = min(N)
@@ -324,10 +361,10 @@ class DyadicDecomposition(eqx.Module):
         Returns
         -------
         jnp.ndarray, shape (ndim,)
-            ``(N // min(N)) / box_aspect_ratio``.
+            ``(N / min(N)) / box_aspect_ratio``.
         """
         N_arr = jnp.asarray(self.N)
-        domain_aspect = N_arr // N_arr.min()
+        domain_aspect = N_arr / N_arr.min()
         return domain_aspect / jnp.asarray(self.box_aspect_ratio)
 
     @property
@@ -373,15 +410,17 @@ class DyadicDecomposition(eqx.Module):
         if self.boxes_per_dim_levels is not None:
             return np.asarray(self.boxes_per_dim_levels[lvl], dtype=np.int64)
 
-        # Original behaviour:
-        N_arr = np.asarray(self.N, dtype=np.int64)
-        domain_aspect = N_arr // int(N_arr.min())
-        bar = np.asarray(self.box_aspect_ratio, dtype=np.int64)
-        scaling = (domain_aspect / bar).astype(np.int64)  # truncates like before
-
+        N_arr = np.asarray(self.N, dtype=float)
+        domain_aspect = N_arr / float(N_arr.min())
+        bar = np.asarray(self.box_aspect_ratio, dtype=float)
         nb_outer = int(self.num_boxes_levels[lvl])
-        per_axis = nb_outer * scaling
-        return per_axis.astype(np.int64)
+        per_axis_float = nb_outer * domain_aspect / bar
+        per_axis = np.rint(per_axis_float).astype(np.int64)
+        if not np.allclose(per_axis_float, per_axis, rtol=0.0, atol=1e-12):
+            raise ValueError(
+                f"Level {lvl}: non-integral derived box counts {per_axis_float.tolist()}."
+            )
+        return per_axis
 
     def _compute_num_boxes_ndim_py(self) -> np.ndarray:
         """

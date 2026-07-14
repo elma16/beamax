@@ -20,7 +20,7 @@ pytest tests/test_gb.py # single file
 pytest -k "test_name"   # single test by name
 ```
 
-Some tests require optional dependencies such as k-Wave or j-Wave. These are
+Some tests require optional dependencies such as k-Wave. These are
 skipped automatically if the packages are not installed.
 The k-Wave C++ OMP binary tests are skipped on CI by default because hosted
 runners do not execute the bundled binaries reliably. Set

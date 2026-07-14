@@ -24,8 +24,6 @@ DATA_DIR = Path(ROOT_DIR / "tests/test-data")
 jax.config.update("jax_enable_x64", True)
 
 _SOLVER_KWARGS = dict(
-    pml_inside=False,
-    pml_size=20,
     smooth_p0=False,
     backend="cpp",
     device="cpu",
@@ -154,9 +152,9 @@ def test_kwave_converges():
     ).real * 2 ** (d / 2)
 
     slices = tuple(slice(None, None, 2) for _ in range(p0.ndim))
-    assert jnp.allclose(
-        p0, p0_refine[slices], atol=1e-6
-    ), f"p0 and p0_refine are not close: {jnp.max(jnp.abs(p0 - p0_refine[slices]))}"
+    assert jnp.allclose(p0, p0_refine[slices], atol=1e-6), (
+        f"p0 and p0_refine are not close: {jnp.max(jnp.abs(p0 - p0_refine[slices]))}"
+    )
 
     domain_refine = geometry.Domain(
         N=N_refine, dx=dx_refine, c=c, periodic=periodic, cfl=cfl
@@ -172,9 +170,9 @@ def test_kwave_converges():
         p0=p0_refine, domain=domain_refine, sensors=sensors_refine, ts=ts_refine
     )
 
-    assert jnp.allclose(
-        pt, pt_refine[slices], atol=2e-6
-    ), f"pt and pt_refine are not close: {jnp.max(jnp.abs(pt - pt_refine[slices]))}"
+    assert jnp.allclose(pt, pt_refine[slices], atol=2e-6), (
+        f"pt and pt_refine are not close: {jnp.max(jnp.abs(pt - pt_refine[slices]))}"
+    )
 
 
 @requires_kwave_cpp_binary
@@ -319,6 +317,99 @@ def test_build_adjoint_source_matches_matlab_shift_sum_fold():
         ]
     )
     assert np.array_equal(p_src, expected)
+
+
+def test_cpp_sensor_channels_are_reordered_to_c_order(monkeypatch):
+    """A 3D detector plane must not acquire a tangential-axis swap."""
+    shape = (2, 3, 4)
+    mask = np.zeros(shape, dtype=int)
+    mask[0, :, :] = 1
+    nt = 5
+
+    flat_f = np.flatnonzero(mask.ravel(order="F"))
+    coords_f = np.column_stack(np.unravel_index(flat_f, shape, order="F"))
+    channel_code = np.asarray([100 * i + 10 * j + k for i, j, k in coords_f])
+    raw_ns_nt = np.repeat(channel_code[:, None], nt, axis=1)
+
+    solver = KWaveSolver(backend="cpp")
+    monkeypatch.setattr(
+        solver,
+        "_run_simulation",
+        lambda *args, **kwargs: {"p": raw_ns_nt},
+    )
+    domain = geometry.Domain(
+        N=shape,
+        dx=(1.0, 1.0, 1.0),
+        c=1.0,
+        periodic=(False, False, False),
+    )
+    out = solver.forward(np.zeros(shape), domain, mask, np.arange(nt, dtype=float))
+
+    coords_c = np.argwhere(mask)
+    expected = np.asarray([100 * i + 10 * j + k for i, j, k in coords_c])
+    assert np.array_equal(out[0], expected)
+    assert np.array_equal(out, np.repeat(expected[None, :], nt, axis=0))
+
+
+def test_python_sensor_channels_keep_c_order(monkeypatch):
+    shape = (2, 3, 4)
+    mask = np.zeros(shape, dtype=int)
+    mask[0, :, :] = 1
+    nt = 3
+    expected = np.arange(np.count_nonzero(mask))
+    raw_ns_nt = np.repeat(expected[:, None], nt, axis=1)
+
+    solver = KWaveSolver(backend="python")
+    monkeypatch.setattr(
+        solver,
+        "_run_simulation",
+        lambda *args, **kwargs: {"p": raw_ns_nt},
+    )
+    domain = geometry.Domain(
+        N=shape,
+        dx=(1.0, 1.0, 1.0),
+        c=1.0,
+        periodic=(False, False, False),
+    )
+    out = solver.forward(np.zeros(shape), domain, mask, np.arange(nt, dtype=float))
+    assert np.array_equal(out, np.repeat(expected[None, :], nt, axis=0))
+
+
+@requires_kwave_cpp_binary
+def test_cpp_and_python_3d_planar_sensor_channels_agree():
+    """Integration regression for the C++ Fortran-order channel conversion."""
+    N = (14, 12, 10)
+    dx = (1e-4,) * 3
+    domain = geometry.Domain(
+        N=N,
+        dx=dx,
+        c=1500.0,
+        cfl=0.3,
+        periodic=(False, False, False),
+    )
+    ts = domain.generate_time_domain()
+    mask = jnp.zeros(N).at[0, :, :].set(1)
+    grid = np.meshgrid(*(np.arange(n) for n in N), indexing="ij")
+    p0 = np.exp(
+        -(
+            (grid[0] - 7.2) ** 2 / 5.0
+            + (grid[1] - 3.1) ** 2 / 3.0
+            + (grid[2] - 7.3) ** 2 / 2.0
+        )
+    )
+    kwargs = dict(
+        pml_inside=False,
+        pml_size=4,
+        smooth_p0=False,
+        device="cpu",
+        quiet=True,
+    )
+    cpp = np.asarray(KWaveSolver(**kwargs, backend="cpp").forward(p0, domain, mask, ts))
+    python = np.asarray(
+        KWaveSolver(**kwargs, backend="python").forward(p0, domain, mask, ts)
+    )
+    relative_error = np.linalg.norm(cpp - python) / np.linalg.norm(python)
+    assert relative_error < 1e-4
 
 
 def test_default_solver_kwargs():
@@ -511,10 +602,14 @@ def test_time_call_stdout_and_wall(monkeypatch):
         alpha_power=None,
     )
     solver = TimedKWaveSolver(mode="stdout")
-    out, secs = solver.forward(np.zeros((4, 4)), d, np.ones((1,)), np.linspace(0, 1, 4))
+    out, secs = solver.forward(
+        np.zeros((4, 4)), d, np.ones((4, 4)), np.linspace(0, 1, 4)
+    )
     assert out == "OK" and secs == pytest.approx(0.003, rel=1e-6)
     solver = TimedKWaveSolver(mode="wall")
-    out, secs = solver.forward(np.zeros((4, 4)), d, np.ones((1,)), np.linspace(0, 1, 4))
+    out, secs = solver.forward(
+        np.zeros((4, 4)), d, np.ones((4, 4)), np.linspace(0, 1, 4)
+    )
     assert out == "OK" and secs >= 0.0
 
 

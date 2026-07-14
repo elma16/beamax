@@ -354,6 +354,25 @@ def test_threshold_bao_energy_path():
     assert idx.ndim == 1 and val.ndim == 1
 
 
+@pytest.mark.parametrize("N", [(16,), (8, 8), (8, 8, 8)])
+def test_threshold_bao_energy_uses_transform_size_in_every_dimension(N):
+    decomp = DyadicDecomposition(
+        num_levels=1,
+        N=N,
+        num_boxes_levels=(2,),
+        box_aspect_ratio=(1,) * len(N),
+    )
+    wpt = MSWPT(decomp, redundancy=2, windowing="rectangular")
+    coeff = jnp.linspace(0, 1, wpt.total_coeffs)
+
+    idx, values = forward_solver_utils.threshold_coefficients(
+        coeff, 0.0, "bao_energy", wpt=wpt
+    )
+
+    assert idx.ndim == values.ndim == 1
+    assert bool(jnp.allclose(values, coeff[idx]))
+
+
 def test_get_indices_with_norm_less_than_and_downsample():
     centers = jnp.array([[0, 0], [1, 1], [2, 2]])
     idx = get_indices_with_norm_less_than(centers, 1.5)

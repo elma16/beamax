@@ -6,15 +6,7 @@
   "exclude": [
     "beamax/plotter.py",
     "**/__pycache__",
-    ".venv",
-
-    "beamax/solvers/kwave_solver.py",
-    "beamax/solvers/hybrid_solver_utils.py",
-    "beamax/solvers/msgb_solvers/tr_solver_utils.py",
-    "beamax/solvers/msgb_solvers/forward_solver_utils.py",
-    "beamax/solvers/msgb_solvers/adjoint_solver_utils.py",
-    "beamax/solvers/fno_solver_neurops.py",
-    "beamax/solvers/fno_solver_pdequinox.py"
+    ".venv"
   ],
   "reportMissingImports": "warning",
   "reportUnsupportedDunderAll": "none",

@@ -57,9 +57,11 @@ def compute_mT_linear_system(
     if mT_spc is None and mT_spc_time is None:
         raise ValueError("Either m_init or mT must be provided.")
     elif mT_spc_time is None:
+        assert mT_spc is not None
         return mT_forward(xT, pT, mT_spc, mode, c)
     elif mT_spc is None:
         return mT_inverse(xT, pT, mT_spc_time, mode, c)
+    raise ValueError("Provide exactly one of mT_spc and mT_spc_time.")
 
 
 def mT_forward(
@@ -679,7 +681,7 @@ def compute_TR_result(
     sensors: jnp.ndarray,
     domain_size: jnp.ndarray,
     periodic: jnp.ndarray,
-    ode_solver: SolverFn = None,
+    ode_solver: Optional[SolverFn] = None,
     aggregate_method: str = "scan",
     solver_config: Optional[SolverConfig] = None,
     dt0: float | None = None,

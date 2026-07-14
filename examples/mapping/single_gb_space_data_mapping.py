@@ -14,30 +14,31 @@ Geometry (chosen for visualisation, *not* the real PAT boundary geometry):
     * 2D, homogeneous medium (c = const), non-periodic.
     * A detector LINE through the MIDDLE of the domain at x_1 = x1_det
       (axis 0 = normal coordinate x_1, axis 1 = tangential coordinate x_*).
-    * A single pressure p_0 launched BELOW the detector at near-normal (17 deg
-      oblique) incidence; it d'Alembert-splits into a forward mode (+1, up,
-      crosses Gamma) and a
-      backward mode (-1, down, out the bottom).  Only the forward mode is
-      detected.  t_gamma is read off the solved beam-centre trajectory.
+    * A real pressure p_0 launched BELOW the detector at near-normal (17 deg
+      oblique) incidence.  Its d'Alembert split has a forward mode p_0^+
+      (+1, up, crossing Gamma) and a backward mode p_0^- (-1, down, leaving
+      through the bottom).  The branch-level correspondence follows p_0^+;
+      p_0^- is neither displayed nor reconstructed.  t_gamma is read off the
+      solved forward beam-centre trajectory.
 
-A single 4x3 figure, read row by row:
-    row 1  (image -> data) : p_0 | p(t) at t_gamma | g(x_*, t)
-    row 2  (data analysis) : MSWPT coeffs | asymptotic expansion (zoom) | asymptotic - g (zoom)
-    row 3  (data -> image) : top-K atoms (data) | recovered modes at t_gamma | p_{0,rec}
-    row 4  (error)         : p_0 - p_{0,rec}
+Two summary figures keep the two directions legible at thesis width:
+    image -> data (3x2): p_0^+ | p^+(t_gamma) | g | coefficients | p_gamma |
+                         p_gamma - g
+    data -> image (2x2): g_K | recovered modes at t_gamma | p_{0,rec}^+ |
+                         p_0^+ - p_{0,rec}^+
 
 Individual panels (also saved to OUT_DIR):
 
-    2d_01_p0.png             launch context p_0
+    2d_01_p0.png             forward-going launch component p_0^+
     2d_02_pt.png             beam when its centre intersects the detector
     2d_03_g.png              recorded data g(x_*, t), whole signal captured
-    2d_04_mswpt.png          MSWPT coefficients of the data
+    2d_04_mswpt.png          log-magnitude MSWPT coefficients of the data
     2d_05_asymptotic.png         Lemma 5.1 asymptotic expansion at the detector (zoom)
     2d_06_asymptotic_minus_g.png asymptotic - g restriction error (zoom)
     2d_07_topk.png           data reconstructed from the top-K kept atoms
     2d_08_recovered.png      top-K data-GBs mapped into the image domain at t_gamma
-    2d_09_p0_rec.png         back-propagated to the initial location
-    2d_10_diff.png           p_0 - p_{0,rec}
+    2d_09_p0_rec.png         back-propagated p_{0,rec}^+
+    2d_10_diff.png           p_0^+ - p_{0,rec}^+
 
 The Lemma 5.1 quadratic form M_tilde is exactly ``tr_solver_utils.mT_forward``.
 The data->image map of the MAIN figures is the top-K BVP route
@@ -72,8 +73,10 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from beamax import geometry, plotter, utils
 from beamax.decomposition import DyadicDecomposition
@@ -330,12 +333,44 @@ def _mark_centre(ax, centre, p_dir=None):
         )
 
 
+def _shared_norm(*fields):
+    """Linear colour normalisation shared by directly comparable fields."""
+    arrays = [np.asarray(field) for field in fields]
+    vmin = float(min(np.min(field) for field in arrays))
+    vmax = float(max(np.max(field) for field in arrays))
+    if vmin == vmax:
+        vmin -= 1.0
+        vmax += 1.0
+    return mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+
+def _add_colorbar(fig, ax, mappable):
+    """Append a colourbar with exactly the same height as the image axes."""
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="4.5%", pad=0.06)
+    return fig.colorbar(mappable, cax=cax)
+
+
 def _spatial_panel(
-    ax, fld, extent, title, *, centre=None, p_dir=None, zoom=None, cfg=CFG
+    ax,
+    fld,
+    extent,
+    title,
+    *,
+    centre=None,
+    p_dir=None,
+    zoom=None,
+    norm=None,
+    cfg=CFG,
 ):
     """viridis spatial field with detector line, beam centre, momentum arrow."""
     im = ax.imshow(
-        np.asarray(fld), origin="lower", extent=extent, cmap=FIELD_CMAP, aspect="equal"
+        np.asarray(fld),
+        origin="lower",
+        extent=extent,
+        cmap=FIELD_CMAP,
+        aspect="equal",
+        norm=norm,
     )
     ax.axhline(cfg.x1_det, color="red", ls="--", lw=1.2)
     _mark_centre(ax, centre, p_dir)
@@ -348,10 +383,15 @@ def _spatial_panel(
     return im
 
 
-def _data_panel(ax, fld, extent, title, *, centre=None, zoom=None):
+def _data_panel(ax, fld, extent, title, *, centre=None, zoom=None, norm=None):
     """viridis data-domain trace/packet."""
     im = ax.imshow(
-        np.asarray(fld), origin="lower", aspect="auto", extent=extent, cmap=FIELD_CMAP
+        np.asarray(fld),
+        origin="lower",
+        aspect="auto",
+        extent=extent,
+        cmap=FIELD_CMAP,
+        norm=norm,
     )
     _mark_centre(ax, centre)
     if zoom is not None:
@@ -394,16 +434,16 @@ def run_experiment(
 ) -> dict:
     """Run the full image->data->image pipeline for ``cfg``.
 
-    ``inverse`` selects which data->image map the MAIN row-3 panels use:
+    ``inverse`` selects which data->image map the inverse summary uses:
     ``"mswpt"`` (the default; the dominant data-frame elements turned into
     beams by ``compute_TR_parameters`` -- the Section 6 packet-beam matching)
     or ``"exact"`` (Lemma 5.1 ``mT_inverse`` + ODE
     back-propagation).  BOTH routes are always computed and reported, so the
     exact roundtrip serves as a validation baseline either way.
 
-    Returns a dict of relative-error metrics.  When ``save`` is True the 3x3
-    figure and the individual panels are also written to ``OUT_DIR``; the
-    frequency sweep calls with ``save=False`` to skip plotting.
+    Returns a dict of relative-error metrics.  When ``save`` is True the two
+    summary figures and the individual panels are also written to ``OUT_DIR``;
+    the frequency sweep calls with ``save=False`` to skip plotting.
     """
     ode_solver = gb_solvers.solve_hom_general
 
@@ -464,20 +504,30 @@ def run_experiment(
             )[0]
         )
 
-    field_init = field_at([0.0], x0, p0, M0, a0, omega0, mode, ode_solver)  # p_0
-    field_init_fwd = field_at(
+    # The internal plane sees only the + branch.  Every displayed reference,
+    # trace, reconstruction, and error therefore uses that same branch.
+    field_init_plus = field_at(
         [0.0], x0[:1], p0[:1], M0[:1], a0[:1], omega0[:1], mode[:1], ode_solver
-    )  # forward only
+    )
     # snapshot at t_gamma: the forward-mode CENTRE is exactly on the detector
-    field_gamma = field_at([t_gamma], x0, p0, M0, a0, omega0, mode, ode_solver)
+    field_gamma_plus = field_at(
+        [t_gamma],
+        x0[:1],
+        p0[:1],
+        M0[:1],
+        a0[:1],
+        omega0[:1],
+        mode[:1],
+        ode_solver,
+    )
     data = np.asarray(
         core.compute_gaussian_beam_real(
-            x0,
-            p0,
-            M0,
-            a0,
-            omega0,
-            mode,
+            x0[:1],
+            p0[:1],
+            M0[:1],
+            a0[:1],
+            omega0[:1],
+            mode[:1],
             sound_speed,
             0.0,
             ts_data,
@@ -539,13 +589,13 @@ def run_experiment(
     #    USE_KWAVE_FORWARD it is the TRUE wave solution and its departure from the
     #    smooth beam is the (small) space-asymptotic / beam-approximation error.
     diff_asymptotic_data = asymptotic_real - data  # time-asymptotic restriction error
-    wavefield_spatial = field_gamma  # image-domain p(x_1,x_*) at t_gamma
+    wavefield_spatial = field_gamma_plus  # image-domain p^+(x_1,x_*) at t_gamma
     if USE_KWAVE_FORWARD and save:
-        kw = kwave_spatial_field(field_init_fwd, domain, ts_data, t_gamma)
+        kw = kwave_spatial_field(field_init_plus, domain, ts_data, t_gamma)
         if kw is not None:
-            wavefield_spatial = scalar_match(field_gamma, kw) * kw
+            wavefield_spatial = scalar_match(field_gamma_plus, kw) * kw
     diff_wave_asymptotic = (
-        wavefield_spatial - field_gamma
+        wavefield_spatial - field_gamma_plus
     )  # space-asymptotic / beam error
 
     # data-domain MSWPT.  Shape (data_C * Nx, Nx) with time-elongated boxes of
@@ -569,7 +619,7 @@ def run_experiment(
     topk_idx = [int(i) for i in np.argsort(np.abs(coeffs_np))[::-1][:K]]
     topk_vals = coeffs_np[np.array(topk_idx)]  # (K,) complex
 
-    # row-3 col-1 panel: the data trace reconstructed from ONLY the K kept atoms
+    # Inverse-summary panel (a): reconstruct the data from ONLY the K kept atoms
     # (inverse-transform of the truncated coefficient vector) -- the top-K
     # generalisation of the old single "dominant component".
     single = jnp.zeros_like(coeffs)
@@ -625,7 +675,7 @@ def run_experiment(
         signum[:, 0],
         gb_solvers.solve_hom_general,
     )
-    # p_{0,rec}: per-beam back-propagation to t=0 + sum, via compute_TR_result
+    # p_{0,rec}^+: per-beam back-propagation to t=0 + sum, via compute_TR_result
     # (solve_ODE_batch_t handles each atom's variable emission time ts[:, 0]).
     # BATCHING (memory): with aggregate_method="all" the renderer materialises
     # the whole beam axis at once -- compute_gaussian_beam_real_TR returns
@@ -675,11 +725,15 @@ def run_experiment(
     # amplitudes carry a frame / TR normalisation; rescale each field by one
     # global scalar to the forward mode for an honest shape comparison (the
     # relative weighting of the K atoms already comes from their coefficients).
-    alpha_init = scalar_match(field_init_fwd, back_init_mswpt)
+    alpha_init = scalar_match(field_init_plus, back_init_mswpt)
     back_init_mswpt = alpha_init * back_init_mswpt
-    back_gamma_mswpt = scalar_match(field_gamma, back_gamma_mswpt) * back_gamma_mswpt
-    back_init_exact = scalar_match(field_init_fwd, back_init_exact) * back_init_exact
-    back_gamma_exact = scalar_match(field_gamma, back_gamma_exact) * back_gamma_exact
+    back_gamma_mswpt = (
+        scalar_match(field_gamma_plus, back_gamma_mswpt) * back_gamma_mswpt
+    )
+    back_init_exact = scalar_match(field_init_plus, back_init_exact) * back_init_exact
+    back_gamma_exact = (
+        scalar_match(field_gamma_plus, back_gamma_exact) * back_gamma_exact
+    )
     if inverse == "mswpt":
         field_back_init, field_back_gamma = back_init_mswpt, back_gamma_mswpt
     else:
@@ -694,32 +748,46 @@ def run_experiment(
     )
     p_plot = (float(p0[0, 1]), float(p0[0, 0]))  # (x_*, x_1) components
     launch_xy = (cfg.x0_tangential, cfg.x0_normal)
-    # launch->detector window: at omega0 ~ 100 the beam is invisible at full
-    # domain extent, so all spatial panels zoom onto the path while keeping the
-    # launch point AND the detector line in frame.
-    xs_lo = min(cfg.x0_tangential, xstar_gamma)
-    xs_hi = max(cfg.x0_tangential, xstar_gamma)
-    zoom_path = ((xs_lo - 1.5, xs_hi + 1.5), (cfg.x0_normal - 1.0, cfg.x1_det + 1.0))
+    # Local spatial views: a path-wide window makes this high-frequency beam
+    # nearly invisible at thesis width.  The adjacent launch/crossing panels
+    # already communicate the propagation, so centre each view on the field it
+    # is intended to show.  Use the same windows again in the inverse figure so
+    # the references and reconstructions remain visually comparable.
+    zoom_launch = (
+        (cfg.x0_tangential - zoom_w, cfg.x0_tangential + zoom_w),
+        (cfg.x0_normal - zoom_w, cfg.x0_normal + zoom_w),
+    )
+    zoom_crossing = (
+        (xstar_gamma - zoom_w, xstar_gamma + zoom_w),
+        (cfg.x1_det - zoom_w, cfg.x1_det + zoom_w),
+    )
 
-    # ===== panel definitions (shared by the grid and the individual saves) ===
+    # Directly comparable field panels share colour limits, including across
+    # the two summary figures.
+    data_norm = _shared_norm(data, asymptotic_real, topk_field)
+    launch_norm = _shared_norm(field_init_plus, field_back_init)
+    crossing_norm = _shared_norm(field_gamma_plus, field_back_gamma)
+
+    # ===== panel definitions (shared by summary and individual saves) =======
     def _mswpt_pf(ax):
         im = plotter.plot_mswpt_coeffs(ax, coeffs_array, data_decomp, log_scale=True)
-        ax.set_title("MSWPT coefficients")
+        ax.set_title(r"$\log |c_{\ell,j,k}|$")
         ax.set_xlabel(r"$\xi_*$")
         ax.set_ylabel(r"$\tau$")
         return im
 
-    panels = [
-        # row 1: image -> data
+    forward_panels = [
+        # row 1: forward-going image branch -> data
         (
             lambda ax: _spatial_panel(
                 ax,
-                field_init,
+                field_init_plus,
                 extent_xy,
-                r"$p_0$",
+                r"$p_0^+$",
                 centre=launch_xy,
                 p_dir=p_plot,
-                zoom=zoom_path,
+                zoom=zoom_launch,
+                norm=launch_norm,
             ),
             (0, 0),
             "2d_01_p0.png",
@@ -727,12 +795,13 @@ def run_experiment(
         (
             lambda ax: _spatial_panel(
                 ax,
-                field_gamma,
+                field_gamma_plus,
                 extent_xy,
-                rf"$p(t)$ at $t_\gamma={t_gamma:.2f}$",
+                r"$p^+(t_\gamma)$",
                 centre=(xstar_gamma, cfg.x1_det),
                 p_dir=p_plot,
-                zoom=zoom_path,
+                zoom=zoom_crossing,
+                norm=crossing_norm,
             ),
             (0, 1),
             "2d_02_pt.png",
@@ -742,25 +811,27 @@ def run_experiment(
                 ax,
                 data,
                 data_ext,
-                r"$g(x_*, t)$ (zoom)",
+                r"$g(x_*,t)$",
                 centre=(xstar_gamma, t_gamma),
                 zoom=zoom,
+                norm=data_norm,
             ),
-            (0, 2),
+            (1, 0),
             "2d_03_g.png",
         ),
-        # row 2: data-domain analysis (asymptotic panels zoomed on the crossing)
-        (_mswpt_pf, (1, 0), "2d_04_mswpt.png"),
+        # row 2: data-domain analysis, zoomed on the crossing
+        (_mswpt_pf, (1, 1), "2d_04_mswpt.png"),
         (
             lambda ax: _data_panel(
                 ax,
                 asymptotic_real,
                 data_ext,
-                "asymptotic expansion (zoom)",
+                r"$p_\gamma(t,x_*)$",
                 centre=(xstar_gamma, t_gamma),
                 zoom=zoom,
+                norm=data_norm,
             ),
-            (1, 1),
+            (2, 0),
             "2d_05_asymptotic.png",
         ),
         (
@@ -768,25 +839,29 @@ def run_experiment(
                 ax,
                 diff_asymptotic_data,
                 data_ext,
-                r"asymptotic $-\ g$ (zoom)",
+                r"$p_\gamma-g$",
                 spatial=False,
                 centre=(xstar_gamma, t_gamma),
                 zoom=zoom,
             ),
-            (1, 2),
+            (2, 1),
             "2d_06_asymptotic_minus_g.png",
         ),
-        # row 3: data -> image (top-K time reversal)
+    ]
+
+    inverse_panels = [
+        # top-K data -> forward-going image branch
         (
             lambda ax: _data_panel(
                 ax,
                 topk_field,
                 data_ext,
-                rf"top-$K$ atoms ($K={K}$, zoom)",
+                rf"$g_K$ ($K={K}$)",
                 centre=(xstar_gamma, t_gamma),
                 zoom=zoom,
+                norm=data_norm,
             ),
-            (2, 0),
+            (0, 0),
             "2d_07_topk.png",
         ),
         (
@@ -794,11 +869,12 @@ def run_experiment(
                 ax,
                 field_back_gamma,
                 extent_xy,
-                rf"recovered modes at $t_\gamma={t_gamma:.2f}$",
+                r"$p_K^+(t_\gamma)$",
                 centre=(xstar_gamma, cfg.x1_det),
-                zoom=zoom_path,
+                zoom=zoom_crossing,
+                norm=crossing_norm,
             ),
-            (2, 1),
+            (0, 1),
             "2d_08_recovered.png",
         ),
         (
@@ -806,28 +882,29 @@ def run_experiment(
                 ax,
                 field_back_init,
                 extent_xy,
-                r"$p_{0,\mathrm{rec}}$",
+                r"$p_{0,\mathrm{rec}}^+$",
                 centre=launch_xy,
-                zoom=zoom_path,
+                zoom=zoom_launch,
+                norm=launch_norm,
             ),
-            (2, 2),
+            (1, 0),
             "2d_09_p0_rec.png",
         ),
-        # row 4: reconstruction error
         (
             lambda ax: _diff_panel(
                 ax,
-                field_init_fwd - field_back_init,
+                field_init_plus - field_back_init,
                 extent_xy,
-                r"$p_0 - p_{0,\mathrm{rec}}$",
+                r"$p_0^+-p_{0,\mathrm{rec}}^+$",
                 spatial=True,
                 centre=launch_xy,
-                zoom=zoom_path,
+                zoom=zoom_launch,
             ),
-            (3, 0),
+            (1, 1),
             "2d_10_diff.png",
         ),
     ]
+    panels = forward_panels + inverse_panels
 
     # ----- relative-error metrics (returned for the frequency sweep) --------
     # relative_error(reference, candidate): normalise by the fixed reference so a
@@ -835,13 +912,13 @@ def run_experiment(
     errors = {
         "omega0": float(cfg.omega0),
         "asymptotic_vs_data": relative_error(data, asymptotic_real),
-        "space_asymptotic_err": relative_error(field_gamma, wavefield_spatial),
+        "space_asymptotic_err": relative_error(field_gamma_plus, wavefield_spatial),
         "topk_vs_trace": relative_error(data, topk_field),
         "topk_shape_score": topk_shape_score,
         "topk_corr": topk_corr,
-        "recon_vs_p0": relative_error(field_init_fwd, field_back_init),
-        "recon_vs_p0_mswpt": relative_error(field_init_fwd, back_init_mswpt),
-        "recon_vs_p0_exact": relative_error(field_init_fwd, back_init_exact),
+        "recon_vs_p0": relative_error(field_init_plus, field_back_init),
+        "recon_vs_p0_mswpt": relative_error(field_init_plus, back_init_mswpt),
+        "recon_vs_p0_exact": relative_error(field_init_plus, back_init_exact),
     }
 
     if not save:
@@ -850,7 +927,7 @@ def run_experiment(
     # ===== Berra's two asymptotic expansions, each in its own domain =============
     src = (
         "k-Wave"
-        if (USE_KWAVE_FORWARD and wavefield_spatial is not field_gamma)
+        if (USE_KWAVE_FORWARD and wavefield_spatial is not field_gamma_plus)
         else "GB beam"
     )
     cmark = (xstar_gamma, t_gamma)  # data-domain marker (x_*, t)
@@ -968,9 +1045,9 @@ def run_experiment(
             a,
             back_init_exact,
             extent_xy,
-            r"$p_{0,\mathrm{rec}}$ (exact $\widetilde{M}$ inverse)",
+            r"$p_{0,\mathrm{rec}}^+$ (exact $\widetilde{M}$ inverse)",
             centre=launch_xy,
-            zoom=zoom_path,
+            zoom=zoom_launch,
         ),
         ax=a,
         fraction=0.046,
@@ -982,12 +1059,12 @@ def run_experiment(
     f.colorbar(
         _diff_panel(
             a,
-            field_init_fwd - back_init_exact,
+            field_init_plus - back_init_exact,
             extent_xy,
-            r"$p_0 - p_{0,\mathrm{rec}}$ (exact)",
+            r"$p_0^+ - p_{0,\mathrm{rec}}^+$ (exact)",
             spatial=True,
             centre=launch_xy,
-            zoom=zoom_path,
+            zoom=zoom_launch,
         ),
         ax=a,
         fraction=0.046,
@@ -996,9 +1073,9 @@ def run_experiment(
     f.savefig(OUT_DIR / "2d_14_diff_exact.png")
     plt.close(f)
 
-    # supplementary individual panels (main grid owns 2d_01..2d_10):
+    # supplementary individual panels (the summaries own 2d_01..2d_10):
     #   2d_15 image-domain wavefield at Gamma (zoomed); 2d_16 the FULL-window
-    #   asymptotic - g restriction error (the zoomed twin is 2d_06 in the main grid).
+    #   asymptotic - g restriction error (the zoomed twin is summary panel 2d_06).
     f, a = plt.subplots(figsize=(4.8, 4.4), constrained_layout=True)
     f.colorbar(
         _zoomed_spatial(a, wavefield_spatial, rf"wavefield at $\Gamma$ ({src}, zoom)"),
@@ -1025,30 +1102,66 @@ def run_experiment(
     f.savefig(OUT_DIR / "2d_16_asymptotic_minus_g_full.png")
     plt.close(f)
 
-    # ===== single 4x3 mapping figure + individual panels ================
-    fig, axs = plt.subplots(4, 3, figsize=(12.5, 15.0), constrained_layout=True)
-    for idx, (pf, (i, j), fname) in enumerate(panels):
-        fig.colorbar(pf(axs[i, j]), ax=axs[i, j], fraction=0.046, pad=0.04)
-        axs[i, j].text(
-            0.035,
-            0.965,
-            f"({chr(97 + idx)})",
-            transform=axs[i, j].transAxes,
-            va="top",
-            ha="left",
-            fontsize=11,
-            fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.75),
+    # ===== thesis-width summary figures + individual panels =============
+    def _save_summary(panel_specs, shape, figsize, filename):
+        fig, axs = plt.subplots(*shape, figsize=figsize, constrained_layout=True)
+        fig.set_constrained_layout_pads(
+            w_pad=0.16,
+            h_pad=0.08,
+            wspace=0.32,
+            hspace=0.08,
         )
+        axs = np.asarray(axs).reshape(shape)
+        colorbar_pairs = []
+        for idx, (pf, (i, j), _) in enumerate(panel_specs):
+            colorbar = _add_colorbar(fig, axs[i, j], pf(axs[i, j]))
+            colorbar_pairs.append((axs[i, j], colorbar.ax))
+            axs[i, j].text(
+                0.035,
+                0.965,
+                f"({chr(97 + idx)})",
+                transform=axs[i, j].transAxes,
+                va="top",
+                ha="left",
+                fontsize=9.5,
+                fontweight="bold",
+                bbox=dict(
+                    boxstyle="round,pad=0.12",
+                    fc="white",
+                    ec="none",
+                    alpha=0.75,
+                ),
+            )
+        fig.canvas.draw()
+        for ax, cax in colorbar_pairs:
+            if not np.isclose(
+                ax.get_position().height,
+                cax.get_position().height,
+                rtol=0.0,
+                atol=1e-10,
+            ):
+                raise RuntimeError("mapping-panel colourbar height mismatch")
+        fig.savefig(OUT_DIR / filename)
+        plt.close(fig)
+
+    _save_summary(
+        forward_panels,
+        (3, 2),
+        (5.45, 7.15),
+        "single_gb_image_to_data.png",
+    )
+    _save_summary(
+        inverse_panels,
+        (2, 2),
+        (5.45, 5.3),
+        "single_gb_data_to_image.png",
+    )
+
+    for pf, _, fname in panels:
         f, a = plt.subplots(figsize=(4.8, 4.4), constrained_layout=True)
-        f.colorbar(pf(a), ax=a, fraction=0.046, pad=0.04)
+        _add_colorbar(f, a, pf(a))
         f.savefig(OUT_DIR / fname)
         plt.close(f)
-    # row 4 holds only p_0 - p_{0,rec}; blank the two unused cells.
-    axs[3, 1].axis("off")
-    axs[3, 2].axis("off")
-    fig.savefig(OUT_DIR / "single_gb_space_data_mapping.png")
-    plt.close(fig)
 
     # ----- console summary (errors, not percentages in figures) -------------
     print("-" * 70)
@@ -1065,7 +1178,7 @@ def run_experiment(
         f"  top-K (matched) - asymptotic  : {np.max(np.abs(diff_topk_asymptotic)):.3e}"
     )
     print(
-        f"  reconstruction - p_0      : {np.max(np.abs(field_back_init - field_init_fwd)):.3e}"
+        f"  reconstruction - p_0^+    : {np.max(np.abs(field_back_init - field_init_plus)):.3e}"
     )
     print("relative L2 errors (best-scalar-matched):")
     print(f"  asymptotic trace vs data      : {errors['asymptotic_vs_data']:.3e}")
@@ -1074,7 +1187,7 @@ def run_experiment(
     print(f"  best-scale shape score    : {100.0 * topk_shape_score:.1f} %")
     print(f"  correlation with trace    : {topk_corr:.3f}")
     print(f"  TR amplitude match alpha  : {alpha_init:.3f}  (frame normalisation)")
-    print("data->image reconstructions vs p_0 (relative L2):")
+    print("data->image reconstructions vs p_0^+ (relative L2):")
     print(
         f"  top-K TR (compute_TR_result): {errors['recon_vs_p0_mswpt']:.3e}  (best-scale shape error)"
     )

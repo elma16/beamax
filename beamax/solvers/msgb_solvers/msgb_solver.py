@@ -1,9 +1,11 @@
 import math
 from dataclasses import dataclass
+from numbers import Integral, Real
 from typing import Union, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import equinox as eqx
+import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec, Mesh
 
 from beamax.solvers.msgb_solvers.forward_solver_utils import (
@@ -26,6 +28,41 @@ from beamax.solvers.msgb_solvers.adjoint_solver_utils import compute_adj_paramet
 __all__ = ["MSGBSolver", "ShardingStrategy"]
 
 complex_dtypes = (jnp.complex64, jnp.complex128)
+
+# Coefficient selection is intentionally eager because hard/percentile
+# thresholds have data-dependent output sizes. The expensive propagation
+# remains compiled through these fixed-shape kernels.
+_original_compute_forward_result = compute_forward_result
+_original_compute_tr_result = compute_TR_result
+_compute_forward_result_jit = eqx.filter_jit(_original_compute_forward_result)
+_compute_tr_result_jit = eqx.filter_jit(_original_compute_tr_result)
+
+
+def _validate_time_grid(
+    ts: jnp.ndarray,
+    *,
+    allow_singleton: bool = False,
+) -> Optional[float]:
+    """Validate a finite, increasing, uniform time grid and return ``dt``.
+
+    A singleton grid is useful for evaluating a forward solution only at
+    ``t=0``. In that case there is no time step to return.
+    """
+    ts_np = np.asarray(ts)
+    if ts_np.ndim != 1 or ts_np.size == 0:
+        raise ValueError("ts must be a non-empty one-dimensional array.")
+    if not np.all(np.isfinite(ts_np)):
+        raise ValueError("ts must contain only finite values.")
+    if ts_np.size == 1:
+        if allow_singleton:
+            return None
+        raise ValueError("ts must be one-dimensional with at least two points.")
+    diffs = np.diff(ts_np)
+    if np.any(diffs <= 0) or not np.allclose(diffs, diffs[0], rtol=1e-6, atol=0.0):
+        raise ValueError(
+            "ts must be finite, strictly increasing, and uniformly spaced."
+        )
+    return float(diffs[0])
 
 
 def _form_adjoint_source(
@@ -106,6 +143,15 @@ class ShardingStrategy:
     mesh: Mesh
     beam_axis: str = "x"
 
+    def _validate_beam_count(self, count: int) -> None:
+        """Require an even partition over the configured device axis."""
+        devices = int(self.mesh.shape[self.beam_axis])
+        if count % devices != 0:
+            raise ValueError(
+                f"Beam count {count} is not divisible by {devices} devices on "
+                f"mesh axis {self.beam_axis!r}. Adjust top_n or use batching."
+            )
+
     def _beam_sharding_spec(self, ndim: int, *, is_batched: bool) -> PartitionSpec:
         """
         Build a partition spec for beam parameters.
@@ -178,6 +224,8 @@ class ShardingStrategy:
             Device-placed arrays with sharding specifications applied.
         """
         is_batched = p0.ndim == 3
+        if not is_batched:
+            self._validate_beam_count(p0.shape[0])
 
         return (
             jax.device_put(
@@ -256,6 +304,8 @@ class ShardingStrategy:
             Device-placed arrays with sharding specifications applied.
         """
         is_batched = pts.ndim == 3
+        if not is_batched:
+            self._validate_beam_count(pts.shape[0])
 
         return (
             jax.device_put(
@@ -416,6 +466,26 @@ class MSGBSolver(eqx.Module):
         if thr_strat not in valid_thresholds:
             allowed = ", ".join(sorted(valid_thresholds))
             raise ValueError(f"thr_strat must be one of {allowed}; got {thr_strat!r}.")
+        if isinstance(thr, bool) or not isinstance(thr, Real):
+            raise ValueError(f"thr must be a finite real scalar; got {thr!r}.")
+        if not math.isfinite(float(thr)):
+            raise ValueError(f"thr must be finite; got {thr!r}.")
+        if thr_strat == "top_n":
+            if not isinstance(thr, Integral) or int(thr) <= 0:
+                raise ValueError("top_n threshold must be a positive integer.")
+            thr = int(thr)
+        elif thr_strat == "percentile":
+            if not 0 <= float(thr) <= 100:
+                raise ValueError("percentile threshold must lie in [0, 100].")
+            thr = float(thr)
+        elif thr_strat in {"hard_reassign", "perc_max_abs"}:
+            if not 0 <= float(thr) <= 1:
+                raise ValueError(f"{thr_strat} threshold must lie in [0, 1].")
+            thr = float(thr)
+        else:
+            if float(thr) < 0:
+                raise ValueError(f"{thr_strat} threshold must be non-negative.")
+            thr = float(thr)
         if input_type not in {"spatial", "fourier"}:
             raise ValueError(
                 f"input_type must be 'spatial' or 'fourier'; got {input_type!r}."
@@ -462,6 +532,21 @@ class MSGBSolver(eqx.Module):
             self.aggregate_method = "vmap"
         else:
             self.aggregate_method = "all"
+
+    def _effective_top_n(
+        self, wpt: MSWPT, *, half_frame: bool = False
+    ) -> Union[int, float]:
+        """Clamp a top-n request to the static coefficient capacity."""
+        if self.thr_strat != "top_n":
+            return self.thr
+        if half_frame:
+            capacity = sum(
+                (end - start) // 2
+                for start, end in zip(wpt.coeffs_cumsum[:-1], wpt.coeffs_cumsum[1:])
+            )
+        else:
+            capacity = getattr(wpt, "total_coeffs", int(self.thr))
+        return min(int(self.thr), int(capacity))
 
     def _replicate_array(self, arr: jnp.ndarray) -> jnp.ndarray:
         """
@@ -515,11 +600,7 @@ class MSGBSolver(eqx.Module):
             # used to select zero coefficients and propagate zero-amplitude
             # beams.  Clamp to the exact static capacity of ``_half_mask``;
             # this removes wasted trajectories without changing the field.
-            frequency_half_capacity = sum(
-                (end - start) // 2
-                for start, end in zip(wpt.coeffs_cumsum[:-1], wpt.coeffs_cumsum[1:])
-            )
-            threshold = min(self.thr, frequency_half_capacity)
+            threshold = self._effective_top_n(wpt, half_frame=True)
 
         coeff_pos_idx, max_pos_coeffs = threshold_coefficients(
             c_pos, threshold, self.thr_strat, wpt
@@ -578,8 +659,12 @@ class MSGBSolver(eqx.Module):
         )
 
         (coeff_pos_idx, max_pos_coeffs), (coeff_neg_idx, max_neg_coeffs) = (
-            threshold_coefficients(c_pos, self.thr, self.thr_strat, wpt),
-            threshold_coefficients(c_neg, self.thr, self.thr_strat, wpt),
+            threshold_coefficients(
+                c_pos, self._effective_top_n(wpt), self.thr_strat, wpt
+            ),
+            threshold_coefficients(
+                c_neg, self._effective_top_n(wpt), self.thr_strat, wpt
+            ),
         )
 
         p0s, M0s, x0s, ωs, a0s, modes = compute_forward_parameters(
@@ -604,7 +689,12 @@ class MSGBSolver(eqx.Module):
         return (p0s, M0s, x0s, ωs, a0s, modes)
 
     def _prepare_tr_params(
-        self, data: jnp.ndarray, data_domain: Domain, data_wpt: MSWPT, sources
+        self,
+        data: jnp.ndarray,
+        data_domain: Domain,
+        data_wpt: MSWPT,
+        sources,
+        ts: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, ...]:
         """
         Prepare beam parameters for a time-reversal solve.
@@ -626,6 +716,7 @@ class MSGBSolver(eqx.Module):
             Time-reversal beam parameters
             ``(pts, Mts, xts, omegas, ats, signum, ts)``.
         """
+        self._validate_boundary_data(data, data_domain, sources, ts=ts)
         dpdt = jnp.zeros_like(data)
 
         c_pos, _ = compute_coefficients(
@@ -633,7 +724,7 @@ class MSGBSolver(eqx.Module):
         )
 
         coeff_idx, max_coeffs = threshold_coefficients(
-            c_pos, self.thr, self.thr_strat, data_wpt
+            c_pos, self._effective_top_n(data_wpt), self.thr_strat, data_wpt
         )
 
         pts, Mts, xts, ωts, ats, signum, ts = compute_TR_parameters(
@@ -712,6 +803,58 @@ class MSGBSolver(eqx.Module):
 
         return surface, axis, coord
 
+    def _validate_boundary_data(
+        self,
+        data: jnp.ndarray,
+        data_domain: Domain,
+        sources: Sensor,
+        *,
+        ts: Optional[jnp.ndarray] = None,
+    ) -> None:
+        """Validate the regular axis-aligned detector grid assumed by MSGB."""
+        if tuple(data.shape) != data_domain.N:
+            raise ValueError(
+                f"Boundary data must have shape {data_domain.N}; got {data.shape}."
+            )
+        if ts is not None:
+            _validate_time_grid(ts)
+            data_span = (data.shape[0] - 1) * data_domain.dx[0]
+            acquisition_span = float(np.asarray(ts)[-1] - np.asarray(ts)[0])
+            if not np.isclose(acquisition_span, data_span, rtol=1e-6, atol=1e-12):
+                raise ValueError(
+                    f"ts spans {acquisition_span}, but data_domain spans {data_span}."
+                )
+        if not isinstance(sources, Sensor):
+            raise ValueError("sources must be a Sensor on a regular planar grid.")
+
+        positions = np.asarray(sources.positions)
+        stds = np.std(positions, axis=0)
+        normal_axis = int(np.argmin(stds))
+        tolerance = 1e-7 * max(1.0, float(np.max(sources.domain.grid_size)))
+        if stds[normal_axis] > tolerance:
+            raise ValueError("sources must lie on an axis-aligned planar surface.")
+
+        tangential_axes = [ax for ax in range(positions.shape[1]) if ax != normal_axis]
+        counts = []
+        for axis in tangential_axes:
+            values = np.unique(positions[:, axis])
+            if values.size > 2 and not np.allclose(
+                np.diff(values), np.diff(values)[0], rtol=1e-6, atol=tolerance
+            ):
+                raise ValueError(
+                    "sources must be uniformly spaced on the detector plane."
+                )
+            counts.append(int(values.size))
+        expected_detector_shape = tuple(counts) if counts else (1,)
+        actual_detector_shape = tuple(data.shape[1:]) or (1,)
+        if actual_detector_shape != expected_detector_shape:
+            raise ValueError(
+                "Boundary data detector axes do not match the source grid: "
+                f"got {actual_detector_shape}, expected {expected_detector_shape}."
+            )
+        if math.prod(expected_detector_shape) != positions.shape[0]:
+            raise ValueError("sources must form a complete Cartesian detector grid.")
+
     def forward(
         self,
         p0: jnp.ndarray,
@@ -755,7 +898,6 @@ class MSGBSolver(eqx.Module):
         )
         return sensor_data
 
-    @eqx.filter_jit
     def forward_with_params(
         self,
         p0: jnp.ndarray,
@@ -782,6 +924,14 @@ class MSGBSolver(eqx.Module):
         """
         if dpdt is None:
             dpdt = jnp.zeros_like(p0)
+        if tuple(p0.shape) != domain.N or tuple(dpdt.shape) != domain.N:
+            raise ValueError(
+                f"p0 and dpdt must both have shape {domain.N}; got "
+                f"{p0.shape} and {dpdt.shape}."
+            )
+        if wpt.dyadic_decomp.N != domain.N:
+            raise ValueError("wpt grid shape must match domain.N.")
+        _validate_time_grid(ts, allow_singleton=True)
 
         use_sharding = self.sharding is not None and self.aggregate_method == "all"
 
@@ -807,7 +957,12 @@ class MSGBSolver(eqx.Module):
             params = self.sharding.shard_beam_params(*params)
 
         # Compute forward solution
-        sensor_data = compute_forward_result(
+        result_fn = (
+            _compute_forward_result_jit
+            if compute_forward_result is _original_compute_forward_result
+            else compute_forward_result
+        )
+        sensor_data = result_fn(
             params=params,
             c=domain.c_fn,
             lam=domain.lam,
@@ -820,12 +975,6 @@ class MSGBSolver(eqx.Module):
             aggregate_method=self.aggregate_method,
             solver_config=self.ode_config,
         )
-
-        if len(p0.shape) == 3:
-            Nt = len(ts)
-            sensor_data = sensor_data.reshape(
-                Nt, p0.shape[0], p0.shape[1], order="F"
-            ).reshape(Nt, p0.shape[0] * p0.shape[1])
 
         if use_sharding:
             sensor_data = self._replicate_array(sensor_data)
@@ -887,7 +1036,6 @@ class MSGBSolver(eqx.Module):
         )
         return p0_recon
 
-    @eqx.filter_jit
     def time_reversal_with_params(
         self,
         data: jnp.ndarray,
@@ -932,13 +1080,18 @@ class MSGBSolver(eqx.Module):
             raise ValueError("Unsupported sensor type")
 
         # Prepare TR parameters on host
-        params = self._prepare_tr_params(data, data_domain, data_wpt, sources)
+        params = self._prepare_tr_params(data, data_domain, data_wpt, sources, ts)
 
         if use_sharding:
             assert self.sharding is not None  # implied by `use_sharding`
             params = self.sharding.shard_tr_params(*params)
 
-        p0_recon = compute_TR_result(
+        result_fn = (
+            _compute_tr_result_jit
+            if compute_TR_result is _original_compute_tr_result
+            else compute_TR_result
+        )
+        p0_recon = result_fn(
             params=params,
             c=domain.c_fn,
             lam=domain.lam,
@@ -1047,7 +1200,10 @@ class MSGBSolver(eqx.Module):
         source_coeffs = data_wpt.forward(source, self.input_type)
 
         coeff_idx, max_coeffs = threshold_coefficients(
-            source_coeffs, self.thr, self.thr_strat, data_wpt
+            source_coeffs,
+            self._effective_top_n(data_wpt),
+            self.thr_strat,
+            data_wpt,
         )
 
         pts, Mts, xts, omegas, ats, signum, ts = compute_adj_parameters(
@@ -1140,7 +1296,6 @@ class MSGBSolver(eqx.Module):
         )
         return q_T
 
-    @eqx.filter_jit
     def adjoint_with_params(
         self,
         data: jnp.ndarray,
@@ -1189,7 +1344,8 @@ class MSGBSolver(eqx.Module):
         #    F_acq = -c_Gamma^2 d_s(window * r).
         # ------------------------------------------------------------------
 
-        dt = float(data_domain.dx[0])
+        self._validate_boundary_data(data, data_domain, sources, ts=ts)
+        dt = data_domain.dx[0]
         # The acquisition geometry owns the boundary medium. Using the image
         # domain here could make the c_Gamma^2 source inconsistent with the TR
         # geometry and B^{-1} multiplier when the two Domain objects differ.
@@ -1208,7 +1364,12 @@ class MSGBSolver(eqx.Module):
         #    domain, and apply the c^{-2} image weight required by the
         #    unweighted L2 image pairing.
         # ------------------------------------------------------------------
-        q_T = compute_TR_result(
+        result_fn = (
+            _compute_tr_result_jit
+            if compute_TR_result is _original_compute_tr_result
+            else compute_TR_result
+        )
+        q_T = result_fn(
             params=params,
             c=domain.c_fn,
             lam=domain.lam,

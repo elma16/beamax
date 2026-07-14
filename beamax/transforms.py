@@ -192,7 +192,7 @@ vmap_filter_coord = vmap(single_filter_coord, in_axes=(0, 0, None, None, None, N
 
 def compute_frame_phase(
     dyadic_decomp: DyadicDecomposition,
-    boxidx: int,
+    boxidx: Union[int, Int[Array, "..."]],
     k: Int[Array, "... d"],
     redundancy: int,
 ) -> Num[Array, "..."]:
@@ -294,7 +294,15 @@ def compute_gh_filters(
         redundancy,
         windowing,
     )
-    hfilt = gfilt / jnp.sum(gfilt**2, axis=0)
+    sum_gsquare = jnp.sum(gfilt**2, axis=0)
+    if not bool(jnp.all(jnp.isfinite(sum_gsquare))) or not bool(
+        jnp.all(sum_gsquare > 0)
+    ):
+        raise ValueError(
+            "The dyadic decomposition leaves uncovered Fourier bins; "
+            "the dual filters are undefined."
+        )
+    hfilt = gfilt / sum_gsquare
     return gfilt, hfilt
 
 
@@ -435,7 +443,15 @@ class MSWPT(eqx.Module):
         self.dyadic_decomp = dyadic_decomp
         self.redundancy = redundancy
         self.windowing = windowing
-        self.sum_gsquare = self._compute_sum_gsquare()
+        sum_gsquare = self._compute_sum_gsquare()
+        if not bool(jnp.all(jnp.isfinite(sum_gsquare))) or not bool(
+            jnp.all(sum_gsquare > 0)
+        ):
+            raise ValueError(
+                "The dyadic decomposition leaves uncovered Fourier bins; "
+                "choose compatible grid, box counts, and aspect ratios."
+            )
+        self.sum_gsquare = sum_gsquare
         # `jax.config.x64_enabled` is a dynamically-attached attribute that
         # pyright cannot see; access it via getattr to keep the type-checker happy.
         x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
@@ -677,7 +693,7 @@ class MSWPT(eqx.Module):
 
         return all_coeffs
 
-    @eqx.filter_jit(donate="all")
+    @eqx.filter_jit(donate="all-except-first")
     def forward(
         self, data: Num[Array, "*N"], input_type: str
     ) -> Num[Array, " total_coeffs"]:
@@ -701,7 +717,8 @@ class MSWPT(eqx.Module):
         - Converts to Fourier (`utils.unitary_fft`) if needed.
         - Divides by Σ g^2 to apply the pointwise canonical-dual analysis
           filters for this painless frame construction.
-        - JIT-compiled via `@eqx.filter_jit(donate="all")`.
+        - JIT-compiled while preserving the reusable transform state. The
+          input data buffer may still be donated for memory efficiency.
         """
         if self.windowing == "none":
             raise ValueError(
@@ -715,7 +732,7 @@ class MSWPT(eqx.Module):
         coeffs = self._compute_coeffs(ft_sum_gsq)
         return coeffs
 
-    @eqx.filter_jit(donate="all")
+    @eqx.filter_jit(donate="all-except-first")
     def inverse(
         self, coeffs: Num[Array, " total_coeffs"], output_type: str
     ) -> Num[Array, "*N"]:

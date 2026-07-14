@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Union, Tuple
+from typing import Any, Union, Tuple
 import os
 import re
 import sys
@@ -186,13 +186,16 @@ class KWaveSolver(Solver):
             Unified keyword options forwarded to
             :func:`kwave.kspaceFirstOrder`.
         """
+        self._solver_kwargs: dict[str, Any]
         if simulation_options is not None:
             # Legacy path: convert old option objects to unified kwargs
             self._solver_kwargs = options_to_kwargs(
                 simulation_options, execution_options
             )
+            self._explicit_solver_options = set(self._solver_kwargs)
         elif kwargs:
-            self._solver_kwargs = kwargs
+            self._solver_kwargs = dict(kwargs)
+            self._explicit_solver_options = set(kwargs)
         else:
             self._solver_kwargs = dict(
                 pml_inside=False,
@@ -202,8 +205,9 @@ class KWaveSolver(Solver):
                 device="cpu",
                 debug=True,
             )
+            self._explicit_solver_options = set()
 
-    def _create_kgrid(self, domain: Domain, ts: np.ndarray) -> kWaveGrid:
+    def _create_kgrid(self, domain: Domain, ts: Array) -> kWaveGrid:
         """
         Build and configure k-Wave grid from `Domain` and time vector.
 
@@ -217,36 +221,62 @@ class KWaveSolver(Solver):
         kWaveGrid
         """
 
-        dtype = ts.dtype if jax.config.x64_enabled else np.float64
-        ts = np.array(ts, dtype=dtype)
+        x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
+        dtype = np.float64 if x64_enabled else np.float32
+        ts = np.asarray(ts, dtype=dtype)
+        if ts.ndim != 1 or ts.size < 2:
+            raise ValueError("ts must be one-dimensional with at least two points.")
+        dt_values = np.diff(ts)
+        if (
+            not np.all(np.isfinite(ts))
+            or np.any(dt_values <= 0)
+            or not np.allclose(dt_values, dt_values[0], rtol=1e-6, atol=0.0)
+        ):
+            raise ValueError(
+                "ts must be finite, strictly increasing, and uniformly spaced."
+            )
         kgrid = kWaveGrid(N=domain.N, spacing=domain.dx)
 
-        # pml related to periodicity
-        # NB: pml_inside = False fails in the case where one dimension has size 1.
-        self._solver_kwargs["pml_inside"] = all(domain.periodic)
-        # Cap PML size so that 2*pml < N per dimension (v0.6.1 validation)
-        max_pml = 20
-        pml_sizes = [
-            0 if p else min(max_pml, n // 2 - 1)
-            for p, n in zip(domain.periodic, domain.N)
-        ]
-        self._solver_kwargs["pml_size"] = (
-            pml_sizes[0] if len(set(pml_sizes)) == 1 else tuple(pml_sizes)
-        )
-
-        dt = ts[1] - ts[0]
-        kgrid.setTime(len(ts), dt)
+        kgrid.setTime(len(ts), dt_values[0])
         return kgrid
+
+    def _kwargs_for_domain(self, domain: Domain) -> dict[str, Any]:
+        """Return solver options with safe domain-derived PML defaults."""
+        kwargs = dict(self._solver_kwargs)
+        if "pml_inside" not in self._explicit_solver_options:
+            kwargs["pml_inside"] = all(domain.periodic) or any(n == 1 for n in domain.N)
+        if "pml_size" not in self._explicit_solver_options:
+            max_pml = 20
+            pml_sizes = [
+                0 if p or n == 1 else max(0, min(max_pml, n // 2 - 1))
+                for p, n in zip(domain.periodic, domain.N)
+            ]
+            kwargs["pml_size"] = (
+                pml_sizes[0] if len(set(pml_sizes)) == 1 else tuple(pml_sizes)
+            )
+        return kwargs
+
+    @staticmethod
+    def _validate_mask(mask: np.ndarray, domain: Domain, *, name: str) -> np.ndarray:
+        """Validate a grid-aligned binary k-Wave mask."""
+        mask = np.asarray(mask)
+        if tuple(mask.shape) != domain.N:
+            raise ValueError(f"{name} must have shape {domain.N}; got {mask.shape}.")
+        if not np.all(np.isfinite(mask)) or not np.all((mask == 0) | (mask == 1)):
+            raise ValueError(f"{name} must contain only finite binary values 0 and 1.")
+        if not np.any(mask == 1):
+            raise ValueError(f"{name} must contain at least one active point.")
+        return mask
 
     def _run_simulation(
         self,
         domain: Domain,
-        ts: np.ndarray,
+        ts: Array,
         source: kSource,
         sensor: kSensor,
         *,
         force_python: bool = False,
-    ) -> np.ndarray:
+    ) -> dict[str, Any]:
         """
         Run K-Wave simulation with current configuration.
 
@@ -273,15 +303,27 @@ class KWaveSolver(Solver):
         """
         kgrid = self._create_kgrid(domain, ts)
 
-        kwargs = dict(self._solver_kwargs)
+        kwargs = self._kwargs_for_domain(domain)
         if force_python:
             kwargs["backend"] = "python"
 
         medium = kWaveMedium(
-            sound_speed=domain.sound_speed_array,
-            density=domain.density_array,
-            alpha_coeff=domain.alpha_coeff,
-            alpha_power=domain.alpha_power,
+            sound_speed=np.asarray(domain.sound_speed_array),
+            density=(
+                None
+                if domain.density_array is None
+                else np.asarray(domain.density_array)
+            ),
+            alpha_coeff=(
+                None
+                if domain.alpha_coeff_array is None
+                else np.asarray(domain.alpha_coeff_array)
+            ),
+            alpha_power=(
+                None
+                if domain.alpha_power_array is None
+                else np.asarray(domain.alpha_power_array)
+            ),
         )
 
         if kwargs.get("backend") == "cpp":
@@ -323,13 +365,26 @@ class KWaveSolver(Solver):
         Returns
         -------
         np.ndarray
-            Sensor time series `(Nt, Ns)` or solver-specific shape.
+            Sensor time series ``(Nt, Ns)``. Sensor channels follow NumPy C
+            mask order for both the Python and standalone C++/CUDA backends.
         """
+        p0_array = np.asarray(p0)
+        if tuple(p0_array.shape) != domain.N:
+            raise ValueError(f"p0 must have shape {domain.N}; got {p0_array.shape}.")
+        if not np.all(np.isfinite(p0_array)):
+            raise ValueError("p0 must contain only finite values.")
         source = kSource()
-        source.p0 = np.array(p0)
+        source.p0 = p0_array
 
-        sensor_mask = np.array(sensors)
-        sensor = kSensor(mask=sensor_mask, record=[record])
+        sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
+        backend = str(self._solver_kwargs.get("backend", "cpp")).lower()
+        if backend == "cpp" and record != "p":
+            raise ValueError("The standalone C++ backend supports record='p' only.")
+        sensor = (
+            kSensor(mask=sensor_mask)
+            if backend == "cpp"
+            else kSensor(mask=sensor_mask, record=[record])
+        )
 
         result = self._run_simulation(domain, ts, source, sensor)
 
@@ -339,11 +394,37 @@ class KWaveSolver(Solver):
         if out.ndim == 2 and out.shape == (ns, nt):
             out = out.T
 
+        # The standalone C++/CUDA binaries enumerate mask points using
+        # MATLAB/Fortran linear order, whereas the Python backend and
+        # ``Sensor.positions`` use NumPy C order.  Leaving the C++ channels in
+        # Fortran order is invisible for a 2D detector line, but swaps the two
+        # tangential axes of a 3D detector plane when those data are injected
+        # by the Python TR/adjoint backend or consumed by MSGB.  Expose one
+        # canonical (C-order) channel convention from the public wrapper.
+        if backend == "cpp" and out.ndim == 2 and out.shape == (nt, ns):
+            out = out[:, self._cpp_sensor_channels_to_c_order(sensor_mask)]
+
         return out
 
     @staticmethod
+    def _cpp_sensor_channels_to_c_order(sensor_mask: np.ndarray) -> np.ndarray:
+        """Return indices that reorder C++ mask channels into NumPy C order.
+
+        k-Wave's standalone binaries follow MATLAB/Fortran linear indexing for
+        mask points.  The returned permutation ``perm`` is intended for
+        ``data[..., perm]`` when the final data axis is currently in that
+        Fortran order.
+        """
+        mask = np.asarray(sensor_mask) != 0
+        coords_c = np.argwhere(mask)
+        flat_f = np.flatnonzero(mask.ravel(order="F"))
+        coords_f = np.column_stack(np.unravel_index(flat_f, mask.shape, order="F"))
+        f_lookup = {tuple(coord): idx for idx, coord in enumerate(coords_f)}
+        return np.asarray([f_lookup[tuple(coord)] for coord in coords_c], dtype=int)
+
+    @staticmethod
     def _coerce_sensor_data_layout(
-        data: np.ndarray,
+        data: Array,
         source_mask: np.ndarray,
         *,
         data_layout: str,
@@ -409,8 +490,10 @@ class KWaveSolver(Solver):
         if cols_match and not rows_match:
             return sensor_data.T
         if rows_match and cols_match:
-            # Ambiguous square case (Ns == Nt): keep backward-compatible default.
-            return sensor_data
+            raise ValueError(
+                f"{op_name} received ambiguous square data with Ns=Nt={ns}; "
+                "pass data_layout='ns_nt' or 'nt_ns'."
+            )
 
         raise ValueError(
             f"{op_name} could not infer data layout for shape {sensor_data.shape} "
@@ -441,6 +524,11 @@ class KWaveSolver(Solver):
             p_src = p_adj(:, 1:end-1)
         where r is the time-reversed measurement residual.
         """
+        sensor_data_ns_nt = np.asarray(sensor_data_ns_nt)
+        if sensor_data_ns_nt.ndim != 2 or sensor_data_ns_nt.shape[1] < 2:
+            raise ValueError(
+                "Adjoint source data must have shape (Ns, Nt) with Nt >= 2."
+            )
         s_rev = np.flip(sensor_data_ns_nt, axis=1)
         zeros_col = np.zeros((s_rev.shape[0], 1), dtype=s_rev.dtype)
         p_adj = np.concatenate([s_rev, zeros_col], axis=1) + np.concatenate(
@@ -489,8 +577,8 @@ class KWaveSolver(Solver):
         -----
         Enforces ``p(x_s, t) = sensor_data(t, x_s)`` as a Dirichlet source.
         """
-        sensor_mask = np.array(sensors)
-        source_mask = np.array(sources)
+        sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
+        source_mask = self._validate_mask(np.asarray(sources), domain, name="sources")
         sensor_data = self._coerce_sensor_data_layout(
             data,
             source_mask,
@@ -501,8 +589,8 @@ class KWaveSolver(Solver):
         sensor_data_rev = np.flip(sensor_data, axis=1)
 
         src = kSource()
-        src.p = sensor_data_rev
-        src.p_mask = source_mask
+        setattr(src, "p", sensor_data_rev)
+        setattr(src, "p_mask", source_mask)
         src.p_mode = "dirichlet"
 
         sensor = kSensor(mask=sensor_mask, record=[record])
@@ -546,8 +634,8 @@ class KWaveSolver(Solver):
 
         Based off the original MATLAB k-Wave adjoint example: https://github.com/ucl-bug/k-wave/blob/main/k-Wave/examples/example_pr_2D_adjoint.m
         """
-        source_mask = np.array(sources)
-        sensor_mask = np.array(sensors)
+        source_mask = self._validate_mask(np.asarray(sources), domain, name="sources")
+        sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
         sensor_data = self._coerce_sensor_data_layout(
             data,
             source_mask,
@@ -557,8 +645,8 @@ class KWaveSolver(Solver):
         p_src = self._build_adjoint_source(sensor_data)
 
         src = kSource()
-        src.p = p_src
-        src.p_mask = source_mask
+        setattr(src, "p", p_src)
+        setattr(src, "p_mask", source_mask)
         src.p_mode = "additive"
 
         sensor = kSensor(mask=sensor_mask, record=[record])

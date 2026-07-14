@@ -372,7 +372,7 @@ def test_single_coeff_eq_frame(
 
     periodic = (False,) * ndim
 
-    domain = Domain(N, dx, c, periodic)
+    domain = Domain(N=N, dx=dx, c=c, periodic=periodic)
     _, fourier_space = domain.generate_meshgrid()
 
     KXY = jnp.stack(fourier_space, axis=-1)
