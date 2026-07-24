@@ -258,6 +258,27 @@ class KWaveSolver(Solver):
         return kwargs
 
     @staticmethod
+    def _alpha_power_for_kwave(domain: Domain) -> float | None:
+        """Return k-Wave's spatially constant absorption exponent.
+
+        ``Domain`` permits medium fields to be scalar, array-valued, or
+        callable. k-Wave permits a heterogeneous ``alpha_coeff`` but requires
+        ``alpha_power`` to be one scalar. Accept a field representation only
+        when it is constant, and collapse it before constructing
+        :class:`kWaveMedium`.
+        """
+        values = domain.alpha_power_array
+        if values is None:
+            return None
+        array = np.asarray(values)
+        first = float(array.reshape(-1)[0])
+        if not np.allclose(array, first, rtol=0.0, atol=0.0):
+            raise ValueError(
+                "k-Wave requires domain.alpha_power to be spatially constant."
+            )
+        return first
+
+    @staticmethod
     def _validate_mask(mask: np.ndarray, domain: Domain, *, name: str) -> np.ndarray:
         """Validate a grid-aligned binary k-Wave mask."""
         mask = np.asarray(mask)
@@ -320,11 +341,7 @@ class KWaveSolver(Solver):
                 if domain.alpha_coeff_array is None
                 else np.asarray(domain.alpha_coeff_array)
             ),
-            alpha_power=(
-                None
-                if domain.alpha_power_array is None
-                else np.asarray(domain.alpha_power_array)
-            ),
+            alpha_power=(self._alpha_power_for_kwave(domain)),
         )
 
         if kwargs.get("backend") == "cpp":

@@ -21,7 +21,6 @@ script's directory under `examples/`.
 ### Forward propagation
 
 - [`custom_lf_spectral_backend.py`](forward/custom_lf_spectral_backend.py) — Custom low-frequency backend for HybridSolver. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/custom_lf_spectral_backend.ipynb)
-- [`2d_forward.py`](forward/2d_forward.py) — 2D photoacoustic forward comparison with MSGB, Hybrid, and k-Wave. _(optional; requires `beamax[kwave,viz-mpl]`; skipped by default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/main/examples/forward/2d_forward.ipynb)
 
 ### Reconstruction
 
@@ -51,7 +50,6 @@ python tools/run_examples.py --directory examples --include-optional --silent-fi
 
 Optional examples skipped by default:
 
-- [`forward/2d_forward.py`](forward/2d_forward.py) — requires `beamax[kwave,viz-mpl]`.
 - [`rays/2d_rays_autodiff.py`](rays/2d_rays_autodiff.py) — requires `beamax[viz-mpl,autodiff]`.
 - [`reconstruction/2d_time_reversal_and_adjoint.py`](reconstruction/2d_time_reversal_and_adjoint.py) — requires `beamax[kwave,viz-mpl]`.
 - [`single-gaussian-beam/single_gaussian_beam_absorption.py`](single-gaussian-beam/single_gaussian_beam_absorption.py) — requires `beamax[kwave,viz-mpl]`.

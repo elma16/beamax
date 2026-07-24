@@ -198,7 +198,28 @@ def test_run_simulation_evaluates_callable_absorption_fields(monkeypatch):
     )
 
     assert np.asarray(captured["alpha_coeff"]).shape == domain.N
-    assert np.asarray(captured["alpha_power"]).shape == domain.N
+    assert captured["alpha_power"] == 1.5
+
+
+def test_run_simulation_rejects_spatially_varying_alpha_power(monkeypatch):
+    solver = KWaveSolver(backend="python")
+    monkeypatch.setattr(solver, "_create_kgrid", lambda domain, ts: object())
+    domain = Domain(
+        N=(4, 4),
+        dx=(0.1, 0.1),
+        c=1500.0,
+        alpha_coeff=0.2,
+        alpha_power=lambda x: 1.5 + x[..., 0],
+        periodic=(False, False),
+    )
+
+    with pytest.raises(ValueError, match="alpha_power to be spatially constant"):
+        solver._run_simulation(
+            domain,
+            jnp.linspace(0.0, 0.1, 3),
+            source=object(),
+            sensor=object(),
+        )
 
 
 def test_adjoint_applies_appendix_b_source_and_terminal_scalings(monkeypatch):

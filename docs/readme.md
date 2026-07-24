@@ -42,7 +42,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from beamax import Domain, Sensor, DyadicDecomposition, MSWPT
-from beamax import transforms, utils
 from beamax.gb import gb_solvers
 from beamax.solvers import MSGBSolver
 
@@ -50,29 +49,18 @@ from beamax.solvers import MSGBSolver
 jax.config.update("jax_enable_x64", True)
 
 
-# Build the same two-packet $p_0$ used by examples/forward/2d_forward.py.
-def make_initial_pressure(dyadic):
-    grid = dyadic.fourier_meshgrid
-    high = transforms.compute_frames(
-        dyadic,
-        125,
-        jnp.array([11, 6]),
-        grid,
-        redundancy=2,
-        windowing="none",
+# Build a compact modulated-Gaussian $p_0$.
+def make_initial_pressure(domain):
+    grid = domain.grid
+    centre = 0.5 * jnp.asarray(domain.grid_size)
+    sigma = 0.12 * min(domain.grid_size)
+    envelope = jnp.exp(
+        -jnp.sum((grid - centre) ** 2, axis=-1) / (2.0 * sigma**2)
     )
-    low = transforms.compute_frames(
-        dyadic,
-        44,
-        jnp.array([11, 3]),
-        grid,
-        redundancy=2,
-        windowing="none",
-    )
-
-    p0 = utils.unitary_ifft(high) + utils.unitary_ifft(low)
-    p0 = p0 / jnp.max(jnp.abs(p0))
-    return p0.T.real
+    wavelength = 8.0 * domain.dx[0]
+    carrier = jnp.cos(2.0 * jnp.pi * (grid[..., 0] - centre[0]) / wavelength)
+    p0 = envelope * carrier
+    return p0 / jnp.max(jnp.abs(p0))
 
 
 # 1. Define a 128 x 128 PAT domain with homogeneous sound speed.
@@ -93,7 +81,7 @@ decomp = DyadicDecomposition(
     box_aspect_ratio=(1, 1),
 )
 wpt = MSWPT(decomp, redundancy=2, windowing="rectangular_mirror")
-p0 = make_initial_pressure(decomp)
+p0 = make_initial_pressure(domain)
 
 # 3. Choose a time grid and put a one-sided detector line on the lower boundary.
 ts = domain.generate_time_domain()
@@ -140,13 +128,6 @@ axes[1].set_yticks([])
 plt.show()
 ```
 
-This produces:
-
-![Output from the 2D photoacoustic forward example](assets/2d_forward.png)
-
-For a fuller k-Wave/MSGB/Hybrid comparison, see
-[`examples/forward/2d_forward.py`](https://github.com/elma16/beamax/blob/main/examples/forward/2d_forward.py).
-
 ## Running examples
 
 The public examples are listed in the [examples gallery](examples/index.md).
@@ -156,7 +137,7 @@ runtime.
 From a local checkout, for example:
 
 ```bash
-python examples/forward/2d_forward.py
+python examples/forward/custom_lf_spectral_backend.py
 ```
 
 Example figures are written under `plots/<category>/`, matching the script's

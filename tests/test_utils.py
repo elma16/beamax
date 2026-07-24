@@ -327,7 +327,7 @@ def test_detect_root_falls_back_to_cwd_for_installed_layout(monkeypatch, tmp_pat
 
 def test_example_plot_dir_uses_public_example_category(monkeypatch, tmp_path):
     monkeypatch.setenv("BEAMAX_ROOT", str(tmp_path))
-    example_path = tmp_path / "examples" / "forward" / "2d_forward.py"
+    example_path = tmp_path / "examples" / "forward" / "custom_lf_spectral_backend.py"
 
     plot_dir = device_utils.example_plot_dir(example_path)
 

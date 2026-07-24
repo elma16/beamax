@@ -162,7 +162,7 @@ def example_plot_dir(example_file: str | os.PathLike[str]) -> Path:
 
     Examples mirror their first directory under ``examples/``:
 
-    - ``examples/forward/2d_forward.py`` -> ``<root>/plots/forward``
+    - ``examples/forward/custom_lf_spectral_backend.py`` -> ``<root>/plots/forward``
     - ``examples/rays/2d_ray_bending.py`` -> ``<root>/plots/rays``
 
     If ``example_file`` is outside the detected checkout's ``examples`` tree,

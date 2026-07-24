@@ -21,7 +21,6 @@ Notebooks that ship alongside the public scripts carry an **Open in Colab** badg
 ### Forward propagation
 
 - [Custom low-frequency backend](forward.md#custom-low-frequency-backend) — plug a pure-JAX LF backend into the hybrid solver.
-- [2D photoacoustic forward](forward.md#2d-photoacoustic-forward) — optional PAT sensor-data comparison against k-Wave.
 
 ### Reconstruction
 
