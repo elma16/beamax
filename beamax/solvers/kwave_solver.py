@@ -151,10 +151,11 @@ class KWaveSolver(Solver):
     - Requires the ``[kwave]`` extra (``pip install 'beamax[kwave]'``).
     - Boundary handling uses a PML; :attr:`Domain.periodic` flags control
       PML-inside vs. PML-outside placement via the k-Wave options.
-    - Forward solves run on the C++ backend by default; time-reversal and
-      adjoint currently fall back to the pure-Python backend until the
-      upstream ``CppSimulation`` path ships source preprocessing for
-      time-varying pressure sources.
+    - Forward solves run on the C++ backend by default. Time-reversal falls
+      back to the pure-Python backend until the upstream ``CppSimulation``
+      path ships source preprocessing for time-varying pressure sources.
+      The adjoint also uses the Python backend and applies the Appendix-B
+      source and terminal-field scalings needed for the discrete transpose.
     - ``binary_path`` can be supplied directly or via
       ``BEAMAX_KWAVE_BINARY_PATH``. Direct kwargs take precedence.
 
@@ -612,7 +613,7 @@ class KWaveSolver(Solver):
         data_layout: str = "auto",
     ) -> np.ndarray:
         """
-        k-Wave adjoint following MATLAB demo convention.
+        Discrete k-Wave adjoint following Arridge et al., Appendix B.
 
         Parameters
         ----------
@@ -624,16 +625,75 @@ class KWaveSolver(Solver):
         sources : array
             Source mask.
         ts : array, shape (Nt,)
-        record : str
-            What to record at the end (e.g., "p_final").
+        record : {"p_final"}
+            Terminal pressure field. Other records cannot be converted to the
+            initial-pressure transpose and are therefore rejected.
 
         Returns
         -------
         np.ndarray
-            Adjoint image `(N...)`.
+            Euclidean discrete adjoint image ``A.T @ data`` with shape
+            ``domain.N``.
 
-        Based off the original MATLAB k-Wave adjoint example: https://github.com/ucl-bug/k-wave/blob/main/k-Wave/examples/example_pr_2D_adjoint.m
+        Notes
+        -----
+        The returned field is the algebraic transpose under unweighted
+        discrete sums. To represent a one-cell planar detector under the
+        thesis's continuous surface and volume rectangle rules, multiply this
+        result by ``dt / dx_normal``.
+
+        The source is Eq. (B.2) of Arridge et al. (2016). k-Wave's additive
+        pressure-source preprocessing multiplies a user source by
+        ``2*dt/(d*c*dx)`` before adding it to each split density field.
+        Consequently the user source must be
+
+        ``rho_source*c_source*dx/(4*dt) * beta``,
+
+        and the terminal pressure must be divided pointwise by
+        ``c**2*rho``. ``additive-no-correction`` is intentional: the optional
+        cosine k-space filter on the injected source is not part of Eq. (B.2).
+        This mode still applies k-Wave's additive-source amplitude scaling and
+        does not disable the sinc k-space correction used by the propagation
+        operators.
+
+        The current k-wave-python Python backend uses a different pressure
+        scaling for each spatial axis on anisotropic grids. A single scalar
+        pressure signal cannot then create the equal split-density increments
+        required by Eq. (B.2), so this implementation requires isotropic grid
+        spacing.
         """
+        if record != "p_final":
+            raise ValueError(
+                f"The scaled k-Wave adjoint requires record='p_final'; got {record!r}."
+            )
+        if bool(self._kwargs_for_domain(domain).get("smooth_p0", True)):
+            raise ValueError(
+                "The discrete k-Wave adjoint requires smooth_p0=False. "
+                "k-Wave's restore-max p0 smoothing is nonlinear and therefore "
+                "does not have the transpose implemented here."
+            )
+
+        spacings = np.asarray(domain.dx, dtype=float)
+        if not np.allclose(spacings, spacings[0], rtol=1e-12, atol=0.0):
+            raise NotImplementedError(
+                "The scaled k-Wave adjoint currently requires isotropic grid "
+                f"spacing; got domain.dx={domain.dx}."
+            )
+
+        ts_array = np.asarray(ts, dtype=float)
+        if ts_array.ndim != 1 or ts_array.size < 2:
+            raise ValueError("ts must be one-dimensional with at least two points.")
+        dt_values = np.diff(ts_array)
+        if (
+            not np.all(np.isfinite(ts_array))
+            or np.any(dt_values <= 0.0)
+            or not np.allclose(dt_values, dt_values[0], rtol=1e-6, atol=0.0)
+        ):
+            raise ValueError(
+                "ts must be finite, strictly increasing, and uniformly spaced."
+            )
+        dt = float(dt_values[0])
+
         source_mask = self._validate_mask(np.asarray(sources), domain, name="sources")
         sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
         sensor_data = self._coerce_sensor_data_layout(
@@ -642,19 +702,43 @@ class KWaveSolver(Solver):
             data_layout=data_layout,
             op_name="adjoint",
         )
-        p_src = self._build_adjoint_source(sensor_data)
+        beta = self._build_adjoint_source(sensor_data)
+
+        sound_speed = np.asarray(domain.sound_speed_array, dtype=float)
+        density_array = domain.density_array
+        density = (
+            np.full(domain.N, 1000.0, dtype=float)
+            if density_array is None
+            else np.asarray(density_array, dtype=float)
+        )
+        source_points = source_mask.astype(bool)
+        source_scale = (
+            density[source_points]
+            * sound_speed[source_points]
+            * spacings[0]
+            / (4.0 * dt)
+        )
+        p_src = source_scale[:, None] * beta
 
         src = kSource()
         setattr(src, "p", p_src)
         setattr(src, "p_mask", source_mask)
-        src.p_mode = "additive"
+        src.p_mode = "additive-no-correction"
 
         sensor = kSensor(mask=sensor_mask, record=[record])
 
-        # v0.6.1 cpp backend lacks source-term scaling for time-varying
-        # sources; force python backend until upstream fix.
+        # k-wave-python 0.6.2's unified C++ path writes source.p directly to
+        # HDF5 and does not request p_final. The Python backend performs the
+        # documented time-varying source preprocessing and returns the
+        # terminal field needed by the Appendix-B construction.
         out = self._run_simulation(domain, ts, src, sensor, force_python=True)
-        return out[record]
+        terminal_pressure = np.asarray(out[record])
+        if tuple(terminal_pressure.shape) != domain.N:
+            raise ValueError(
+                "k-Wave returned an adjoint field with unexpected shape "
+                f"{terminal_pressure.shape}; expected {domain.N}."
+            )
+        return terminal_pressure / (sound_speed**2 * density)
 
 
 class TimedKWaveSolver(KWaveSolver):

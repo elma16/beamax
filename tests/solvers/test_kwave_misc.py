@@ -201,5 +201,84 @@ def test_run_simulation_evaluates_callable_absorption_fields(monkeypatch):
     assert np.asarray(captured["alpha_power"]).shape == domain.N
 
 
+def test_adjoint_applies_appendix_b_source_and_terminal_scalings(monkeypatch):
+    """The wrapper should expose the Euclidean transpose, not raw p_final."""
+    solver = KWaveSolver(backend="python", smooth_p0=False)
+    domain = Domain(
+        N=(3, 2),
+        dx=(0.1, 0.1),
+        c=2.0,
+        density=3.0,
+        periodic=(False, False),
+    )
+    source_mask = np.zeros(domain.N)
+    source_mask[0, :] = 1
+    captured = {}
+
+    def fake_run(domain_arg, ts, source, sensor, *, force_python=False):
+        captured["source"] = source
+        captured["force_python"] = force_python
+        return {"p_final": np.full(domain_arg.N, 120.0)}
+
+    monkeypatch.setattr(solver, "_run_simulation", fake_run)
+    data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    out = solver.adjoint(
+        data,
+        domain,
+        np.ones(domain.N),
+        source_mask,
+        np.array([0.0, 0.01, 0.02]),
+        data_layout="ns_nt",
+    )
+
+    beta = np.array([[3.0, 5.0, 4.0], [6.0, 11.0, 13.0]])
+    # rho*c*dx/(4*dt) = 3*2*0.1/(4*0.01) = 15.
+    np.testing.assert_allclose(captured["source"].p, 15.0 * beta)
+    assert captured["source"].p_mode == "additive-no-correction"
+    assert captured["force_python"] is True
+    # p_final/(c^2*rho) = 120/(4*3) = 10.
+    np.testing.assert_allclose(out, 10.0)
+
+
+def test_adjoint_rejects_anisotropic_grid_spacing():
+    solver = KWaveSolver(backend="python", smooth_p0=False)
+    domain = Domain(
+        N=(3, 2),
+        dx=(0.1, 0.2),
+        c=2.0,
+        periodic=(False, False),
+    )
+    mask = np.ones(domain.N)
+    with pytest.raises(NotImplementedError, match="isotropic"):
+        solver.adjoint(
+            np.ones((mask.size, 3)),
+            domain,
+            mask,
+            mask,
+            np.array([0.0, 0.01, 0.02]),
+            data_layout="ns_nt",
+        )
+
+
+def test_adjoint_rejects_nonlinear_restore_max_smoothing():
+    solver = KWaveSolver(backend="python", smooth_p0=True)
+    domain = Domain(
+        N=(3, 2),
+        dx=(0.1, 0.1),
+        c=2.0,
+        periodic=(False, False),
+    )
+    mask = np.ones(domain.N)
+    with pytest.raises(ValueError, match="smooth_p0=False"):
+        solver.adjoint(
+            np.ones((mask.size, 3)),
+            domain,
+            mask,
+            mask,
+            np.array([0.0, 0.01, 0.02]),
+            data_layout="ns_nt",
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

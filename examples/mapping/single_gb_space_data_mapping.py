@@ -61,7 +61,9 @@ Run (from the beamax repo, public venv)::
 
     python examples/mapping/single_gb_space_data_mapping.py
 
-The figures are written to ``outputs/`` next to this script.
+The figures are written to ``outputs/`` next to this script, or to
+``$BEAMAX_EXAMPLE_OUTPUT_DIR`` when that generic example-output override is
+set.
 
 Example smoke: false
 """
@@ -69,6 +71,7 @@ Example smoke: false
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import jax
@@ -86,7 +89,12 @@ from beamax.transforms import MSWPT
 
 jax.config.update("jax_enable_x64", True)
 
-OUT_DIR = Path(__file__).resolve().parent / "outputs"
+OUT_DIR = Path(
+    os.environ.get(
+        "BEAMAX_EXAMPLE_OUTPUT_DIR",
+        Path(__file__).resolve().parent / "outputs",
+    )
+).expanduser()
 OUT_DIR.mkdir(exist_ok=True)
 
 FIELD_CMAP = "viridis"  # fields / traces / packets

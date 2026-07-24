@@ -238,15 +238,24 @@ def test_kwave_matches_matlab_reference():
 
     assert jnp.allclose(meas_py, meas_mat, atol=tol)
     assert jnp.allclose(tr_py, tr_mat, atol=tol)
-    assert jnp.allclose(adj_py, adj_mat, atol=tol)
+    # The stored MATLAB field follows example_pr_2D_adjoint.m: it uses the
+    # filtered additive source and omits the Appendix-B source and terminal
+    # normalizations. It is therefore a useful spatial-profile regression but
+    # not an absolute-scale reference for the discrete transpose.
+    adj_scale = jnp.vdot(adj_py, adj_mat).real / jnp.vdot(adj_py, adj_py).real
+    adj_profile_error = jnp.linalg.norm(adj_scale * adj_py - adj_mat) / jnp.linalg.norm(
+        adj_mat
+    )
+    assert adj_profile_error < 1e-2
 
 
 def test_kwave_adjoint_dot_product():
     """
-    Numerical adjoint check: <A x, y>_D ~= <x, A^T y>_X.
+    Numerical adjoint check: <A x, y> = <x, A^T y>.
 
-    Uses the python backend for both forward and adjoint to ensure
-    consistent sensor ordering (cpp uses F-order, python uses C-order).
+    Both propagations use the Python backend. The adjoint method includes the
+    Appendix-B source/terminal scalings, so this comparison needs no fitted or
+    empirical normalization.
     """
     N = (48, 24)
     dx = (1e-4, 1e-4)
@@ -258,9 +267,6 @@ def test_kwave_adjoint_dot_product():
 
     domain = geometry.Domain(N=N, dx=dx, c=c, cfl=cfl, periodic=periodic)
     ts = domain.generate_time_domain()
-    dt = float(ts[1] - ts[0])
-    dA = float(np.prod(np.array(dx)))
-
     sensor_mask = jnp.zeros(N)
     sensor_mask = sensor_mask.at[0, :].set(1)
     sensor_mask = sensor_mask.at[:, 0].set(1)
@@ -287,13 +293,65 @@ def test_kwave_adjoint_dot_product():
     )
     Aty = _match_image_shape(Aty, x.shape)
 
-    lhs = float(np.sum(Ax * y) * dt)
-    # Empirical discrete scaling for this k-wave-python setup:
-    # the pair is closest under 2*dA (PML + finite time window effects).
-    rhs = float(np.sum(x * Aty) * (2.0 * dA))
+    lhs = float(np.sum(Ax * y))
+    rhs = float(np.sum(x * Aty))
     rel_err = abs(lhs - rhs) / max(abs(lhs), abs(rhs), np.finfo(float).eps)
 
-    assert rel_err < 1.5e-1
+    assert rel_err < 3e-5
+
+
+def test_kwave_adjoint_dot_product_3d():
+    """The same unfitted transpose check must hold for a 3D detector plane."""
+    N = (18, 14, 12)
+    dx = (1e-4,) * 3
+    c0 = 1500.0
+    dt = 0.25 * dx[0] / c0
+    nt = 36
+    domain = geometry.Domain(
+        N=N,
+        dx=dx,
+        c=c0,
+        density=1000.0,
+        periodic=(False,) * 3,
+    )
+    ts = np.arange(nt, dtype=float) * dt
+    sensor_mask = np.zeros(N)
+    sensor_mask[3, :, :] = 1
+
+    grid = np.meshgrid(*(np.arange(n) for n in N), indexing="ij")
+    x = np.exp(
+        -sum(
+            ((grid[axis] - (N[axis] / 2 + 0.15 * axis)) / (2.0 + 0.3 * axis)) ** 2
+            for axis in range(3)
+        )
+    )
+    solver = KWaveSolver(
+        backend="python",
+        device="cpu",
+        pml_inside=False,
+        pml_size=4,
+        smooth_p0=False,
+        quiet=True,
+    )
+    Ax = np.asarray(solver.forward(x, domain, sensor_mask, ts)).T
+    rng = np.random.default_rng(8)
+    y = rng.standard_normal(Ax.shape)
+    y *= np.sin(np.pi * np.arange(nt) / (nt - 1)) ** 2
+    Aty = np.asarray(
+        solver.adjoint(
+            y,
+            domain,
+            np.ones(N),
+            sensor_mask,
+            ts,
+            data_layout="ns_nt",
+        )
+    )
+
+    lhs = float(np.vdot(Ax, y).real)
+    rhs = float(np.vdot(x, Aty).real)
+    rel_err = abs(lhs - rhs) / max(abs(lhs), abs(rhs), np.finfo(float).eps)
+    assert rel_err < 1e-6
 
 
 def test_build_adjoint_source_matches_matlab_shift_sum_fold():
