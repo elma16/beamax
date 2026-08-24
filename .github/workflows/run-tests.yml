@@ -11,11 +11,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.11", "3.12"]
-        exclude:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
           - os: macos-latest
-            python-version: "3.11"
+            python-version: "3.12"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,16 +35,22 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,kwave,viz,autodiff]"
+          python -m pip install -e ".[dev,kwave,viz-mpl,autodiff]"
 
       - name: Lint with ruff
-        run: ruff check beamax tests tools examples
+        run: |
+          ruff check beamax tests tools examples
+          ruff format --check beamax tests tools examples
 
       - name: Type-check with pyright
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: pyright
+
+      - name: Check generated example gallery
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: |
-          python -m pip install pyright
-          pyright
+          python tools/finalize_examples.py --check
+          python tools/gen_examples_readme.py --check
 
       - name: Check lockfile and distributions
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
@@ -52,10 +60,10 @@ jobs:
           python -m venv --system-site-packages /tmp/beamax-wheel-smoke
           /tmp/beamax-wheel-smoke/bin/pip install --no-deps dist/*.whl
           cd /tmp
-          /tmp/beamax-wheel-smoke/bin/python -c "import beamax; assert beamax.__version__ == '0.2.2'"
+          /tmp/beamax-wheel-smoke/bin/python -c "import beamax; assert beamax.__version__ == '0.3.0'"
 
       - name: Test with pytest
-        run: pytest --cov=beamax --cov-report=term-missing --cov-report=xml -q
+        run: pytest --cov=beamax --cov-report=term-missing --cov-report=xml --cov-fail-under=90 -q
 
       - name: Test two-device sharding contract
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
@@ -79,9 +87,4 @@ jobs:
           fail_ci_if_error: false
 
       - name: Run example smoke tests
-        env:
-          MPLBACKEND: Agg
-          MPLCONFIGDIR: /tmp/mplconfig
-        run: |
-          mkdir -p "$MPLCONFIGDIR"
-          python tools/run_examples.py --directory examples --include-optional --fail-fast --silent-figures
+        run: python tools/run_examples.py --directory examples --include-optional --fail-fast --silent-figures

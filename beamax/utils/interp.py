@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 from collections.abc import Sequence
+from typing import List, Optional, Tuple
+
 import jax.numpy as jnp
 import numpy as np
+from jax import grad, hessian
 from scipy import ndimage
-from typing import Optional, Tuple, List
-from jax import hessian, grad
 
 
 _BOUNDARY_ALIASES = {
@@ -17,8 +19,12 @@ _BOUNDARY_ALIASES = {
     "periodic": "wrap",
 }
 
+BoundarySpec = str | Sequence[str]
+
 
 def _canonical_boundary(boundary: str) -> str:
+    if not isinstance(boundary, str):
+        raise ValueError(f"Boundary entries must be strings; got {boundary!r}.")
     try:
         return _BOUNDARY_ALIASES[boundary]
     except KeyError as exc:
@@ -28,11 +34,33 @@ def _canonical_boundary(boundary: str) -> str:
         ) from exc
 
 
+def _canonical_boundaries(boundary: BoundarySpec, ndim: int) -> Tuple[str, ...]:
+    """Return one canonical boundary mode per grid axis."""
+    if isinstance(boundary, str):
+        return (_canonical_boundary(boundary),) * ndim
+    try:
+        boundaries = tuple(boundary)
+    except TypeError as exc:
+        raise ValueError(
+            "boundary must be a string or a sequence with one entry per axis."
+        ) from exc
+    if len(boundaries) != ndim:
+        raise ValueError(
+            f"boundary must contain one entry per axis ({ndim}); got {len(boundaries)}."
+        )
+    return tuple(_canonical_boundary(value) for value in boundaries)
+
+
+def _scipy_boundary(boundary: str) -> str:
+    """Translate modulo-index wrapping to SciPy's matching grid mode."""
+    return "grid-wrap" if boundary == "wrap" else boundary
+
+
 def _prepare_grid(
     c_map: jnp.ndarray,
     *,
     method: str,
-    boundary: str,
+    boundary: Tuple[str, ...],
     smooth_sigma: Optional[float | Sequence[float]],
 ) -> jnp.ndarray:
     """Return grid values or spline coefficients used by the evaluator."""
@@ -54,22 +82,29 @@ def _prepare_grid(
             raise ValueError("smooth_sigma entries must be non-negative.")
 
         arr = np.asarray(values)
-        prepared_np = ndimage.gaussian_filter(
-            arr,
-            sigma=tuple(float(s) for s in sigma),
-            mode=boundary,
-        )
+        prepared_np = arr
+        for axis, (axis_sigma, axis_boundary) in enumerate(zip(sigma, boundary)):
+            if axis_sigma > 0:
+                prepared_np = ndimage.gaussian_filter1d(
+                    prepared_np,
+                    sigma=float(axis_sigma),
+                    axis=axis,
+                    mode=_scipy_boundary(axis_boundary),
+                )
         prepared = jnp.asarray(prepared_np, dtype=values.dtype)
 
     if method == "linear":
         return prepared
 
     if method == "bspline3":
-        coeff_np = ndimage.spline_filter(
-            np.asarray(prepared),
-            order=3,
-            mode=boundary,
-        )
+        coeff_np = np.asarray(prepared)
+        for axis, axis_boundary in enumerate(boundary):
+            coeff_np = ndimage.spline_filter1d(
+                coeff_np,
+                order=3,
+                axis=axis,
+                mode=_scipy_boundary(axis_boundary),
+            )
         return jnp.asarray(coeff_np, dtype=values.dtype)
 
     raise ValueError("method must be 'linear' or 'bspline3'.")
@@ -122,7 +157,7 @@ def _tensor_product_eval(
     values: jnp.ndarray,
     x: jnp.ndarray,
     *,
-    boundary: str,
+    boundary: Tuple[str, ...],
     offsets: Tuple[int, ...],
     weights: jnp.ndarray,
 ) -> jnp.ndarray:
@@ -144,7 +179,7 @@ def _tensor_product_eval(
             local = rem % n_offsets
             rem //= n_offsets
             sample_idx = i0[..., ax] + offsets[local]
-            mapped_idx = _map_indices(sample_idx, shp[ax], boundary)
+            mapped_idx = _map_indices(sample_idx, shp[ax], boundary[ax])
             gather_indices.append(mapped_idx)
             wt = wt * weights[..., ax, local]
 
@@ -161,7 +196,7 @@ def make_c_function_from_grid(
     origin: Optional[Tuple[float, ...]] = None,
     *,
     method: str = "linear",
-    boundary: str = "clamp",
+    boundary: BoundarySpec = "clamp",
     smooth_sigma: Optional[float | Sequence[float]] = None,
 ):
     """
@@ -180,9 +215,11 @@ def make_c_function_from_grid(
         behaviour. ``"bspline3"`` builds a tensor-product cubic B-spline
         interpolant whose value, gradient, and Hessian are continuous away from
         boundary handling.
-    boundary : {"clamp", "nearest", "reflect", "mirror", "wrap", "periodic"}, default "clamp"
-        Boundary extension used by the interpolant. ``"clamp"`` is an alias for
-        nearest-edge extension; ``"periodic"`` is an alias for ``"wrap"``.
+    boundary : str | sequence of str, default "clamp"
+        Boundary extension for every axis, or one mode per axis. Supported
+        modes are ``"clamp"``, ``"nearest"``, ``"reflect"``, ``"mirror"``,
+        ``"wrap"``, and ``"periodic"``. ``"clamp"`` aliases nearest-edge
+        extension and ``"periodic"`` aliases ``"wrap"``.
     smooth_sigma : float | sequence of float | None, default None
         Optional Gaussian pre-smoothing of the grid values, with standard
         deviation measured in grid cells. Smoothing is applied once when the
@@ -196,18 +233,21 @@ def make_c_function_from_grid(
     Notes
     -----
     - The default ``method="linear"`` path is piecewise-linear and
-      differentiable a.e.
+      differentiable almost everywhere.
     - The ``method="bspline3"`` path precomputes cubic spline coefficients
       using SciPy, then evaluates the spline using JAX operations so
       ``jax.grad`` and ``jax.hessian`` can differentiate with respect to query
       coordinates.
     """
     method = method.lower()
-    boundary = _canonical_boundary(boundary)
+    raw_values = jnp.asarray(c_map)
+    if raw_values.ndim == 0:
+        raise ValueError("c_map must have at least one dimension.")
+    boundaries = _canonical_boundaries(boundary, raw_values.ndim)
     values = _prepare_grid(
-        c_map,
+        raw_values,
         method=method,
-        boundary=boundary,
+        boundary=boundaries,
         smooth_sigma=smooth_sigma,
     )
 
@@ -253,7 +293,7 @@ def make_c_function_from_grid(
             return _tensor_product_eval(
                 values,
                 x,
-                boundary=boundary,
+                boundary=boundaries,
                 offsets=(0, 1),
                 weights=weights,
             )
@@ -262,7 +302,7 @@ def make_c_function_from_grid(
         return _tensor_product_eval(
             values,
             x,
-            boundary=boundary,
+            boundary=boundaries,
             offsets=(-1, 0, 1, 2),
             weights=weights,
         )
@@ -271,7 +311,7 @@ def make_c_function_from_grid(
 
 
 class Interpolator:
-    """
+    r"""
     Thin wrapper around `make_c_function_from_grid` using axis vectors.
 
     Parameters
@@ -286,9 +326,9 @@ class Interpolator:
     __call__(x)
         Evaluate interpolant at `x` (shape `(..., d)`).
     grad(x)
-        Gradient `∇c(x)`.
+        Gradient $\nabla c(\mathbf{x})$.
     hessian(x)
-        Hessian `∇²c(x)`.
+        Hessian $\nabla^2 c(\mathbf{x})$.
     """
 
     def __init__(
@@ -297,7 +337,7 @@ class Interpolator:
         values: jnp.ndarray,
         *,
         method: str = "linear",
-        boundary: str = "clamp",
+        boundary: BoundarySpec = "clamp",
         smooth_sigma: Optional[float | Sequence[float]] = None,
     ):
         """
@@ -329,7 +369,6 @@ class Interpolator:
             raise ValueError(
                 f"values must have shape {expected_shape}, got {self.values.shape}."
             )
-        # Infer uniform spacing + origin per axis
         spacings = []
         origins = []
         for g in self.grid_points:

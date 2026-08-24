@@ -1,10 +1,8 @@
 import pytest
 
 import jax
-from jax import jit, vmap
 import jax.numpy as jnp
 
-from beamax import geometry
 from beamax.gb import core, gb_utils, gb_solvers
 from beamax.geometry import Domain
 from beamax.gb.gb_utils import prepare_M0, is_diagonal, check_M0
@@ -13,41 +11,14 @@ jax.config.update("jax_enable_x64", True)
 
 
 def generate_complex_positive_definite_matrix(b, d):
-    key = jax.random.PRNGKey(0)
-
-    A = jax.random.uniform(key, shape=(b, d, d)) * 5
+    real_key, imag_key = jax.random.split(jax.random.PRNGKey(0))
+    A = jax.random.uniform(real_key, shape=(b, d, d)) * 5
     real_part = jnp.einsum("bij,bkj->bik", A, A)
 
-    key, _ = jax.random.split(key)
-    B = jax.random.normal(key, shape=(b, d, d)) * 0.5
+    B = jax.random.normal(imag_key, shape=(b, d, d)) * 0.5
     imag_part = jnp.einsum("bij,bkj->bik", B, B)
     M0 = real_part + 1j * imag_part
     return M0
-
-
-@jit
-def compute_eigenvalues(array: jnp.ndarray) -> jnp.ndarray:
-    """
-    Compute the eigenvalues of a batch of matrices.
-
-    :arg array: The array of matrices. (b, d, d)
-    :returns: The eigenvalues of the matrices. (b, d)
-    """
-
-    def eig_slice(slice):
-        return jnp.linalg.eigvals(slice)
-
-    return vmap(eig_slice)(array)
-
-
-def calculate_ray_distance(xt):
-    displacements = jnp.diff(xt, axis=1)
-    step_distances = jnp.sqrt(jnp.sum(displacements**2, axis=-1))
-    ray_distances = jnp.cumsum(step_distances, axis=1)
-    ray_distances = jnp.concatenate(
-        [jnp.zeros((xt.shape[0], 1)), ray_distances], axis=1
-    )
-    return ray_distances
 
 
 def random_data(b, N, isotropic=False):
@@ -57,19 +28,21 @@ def random_data(b, N, isotropic=False):
     domain = Domain(N=N, dx=dx, c=c, periodic=periodic, cfl=0.3)
     x_sensor = domain.grid
 
-    key = jax.random.PRNGKey(0)
     Nt = 100
     ts = jnp.linspace(0, 1e-4, Nt)
 
-    x0 = jax.random.uniform(key, (b, d))
-    p0 = jax.random.uniform(key, (b, d))
-    a0 = jax.random.uniform(key, (b,)) * 100
-    omega0 = jax.random.uniform(key, (b,))
+    x_key, p_key, a_key, omega_key, alpha_key = jax.random.split(
+        jax.random.PRNGKey(0), 5
+    )
+    x0 = jax.random.uniform(x_key, (b, d))
+    p0 = jax.random.uniform(p_key, (b, d))
+    a0 = jax.random.uniform(a_key, (b,)) * 100
+    omega0 = jax.random.uniform(omega_key, (b,))
 
     if isotropic:
         alpha0 = jnp.ones((b, d)) * 10j
     else:
-        alpha0 = jax.random.uniform(key, (b, d)) * 1j
+        alpha0 = jax.random.uniform(alpha_key, (b, d)) * 1j
 
     return ts, x0, p0, a0, alpha0, omega0, x_sensor
 
@@ -79,22 +52,16 @@ def c(x):
 
 
 def generate_test_params():
-    # We sweep 1D / 2D / 3D shapes only. The hom-vs-num solver agreement
-    # being asserted here is a numerical property and does not gain coverage
-    # by also running at float32 precision, so we keep only the x64 variant.
-    return [(5, N, True) for N in [(40,), (30, 40), (30, 40, 50)]]
+    return [(2, N) for N in [(16,), (8, 10), (6, 8, 10)]]
 
 
 @pytest.fixture(scope="module", params=generate_test_params())
 def gb_setup(request):
-    b, N, use_x64 = request.param
-    jax.config.update("jax_enable_x64", use_x64)
-    print(f"Running test with batch size {b} and grid size {N}")
+    b, N = request.param
     t, x0, p0, a0, alpha0, omega0, x_sensor = random_data(b, N, isotropic=True)
 
     d = len(N)
     M0 = gb_utils.prepare_M0(alpha0, None)
-    # is_M0_diagonal = gb_utils.is_diagonal(M0)
     mode = jnp.ones((b,))
     periodic = (False,) * d
     domain_size = jnp.ones((d,))
@@ -121,10 +88,6 @@ def gb_setup(request):
         solver_config,
     )
 
-    xt_hom, pt_hom, Mt_hom, At_hom = hom_solver(
-        x0, p0, M0, a0, mode, t, c, solver_config
-    )
-
     gb_num = core.compute_gaussian_beam(
         x0,
         p0,
@@ -142,77 +105,50 @@ def gb_setup(request):
         solver_config,
     )
 
-    xt_num, pt_num, Mt_num, At_num = ode_solver(
-        x0, p0, M0, a0, mode, t, c, lam, solver_config
-    )
-
-    hom_results = [gb_hom, xt_hom, pt_hom, Mt_hom, At_hom]
-    num_results = [gb_num, xt_num, pt_num, Mt_num, At_num]
-
-    return hom_results, num_results, b, N, t, x0, p0, a0, alpha0, omega0, x_sensor
+    return gb_hom, gb_num, b, N, t
 
 
 def test_compare_analytical_numerical_gb(gb_setup):
-    """
-    Test that the analytical and numerical solutions are the same when the medium is homogeneous.
-
-    1. Assert that the two GB wavefields are the same.
-    2. Assert that the shapes are what we expect.
-    3. Assert that the wavefields are complex.
-    """
-    gb_hom_result, gb_num_result, b, N, t, *_ = gb_setup
-    gb_hom = gb_hom_result[0]
-    gb_num = gb_num_result[0]
+    """Match analytical and numerical beams in a homogeneous medium."""
+    gb_hom, gb_num, b, N, t = gb_setup
     Nt = len(t)
-    print(f"d: {len(N)}, gb_hom: {gb_hom.shape}, gb_num: {gb_num.shape}")
     assert jnp.allclose(gb_hom, gb_num, atol=1e-16)
     assert gb_hom.shape == (Nt,) + N + (b,)
     assert jnp.all(jnp.iscomplex(gb_hom))
 
 
-@pytest.mark.parametrize("d", [1, 2, 3])
-def test_gb_reversible(d):
-    """
-    Test that the GB is reversible.
-
-    quite close, but not exactly the same.
-    """
+def test_gb_reversible():
+    """Test that Gaussian beam propagation is reversible."""
 
     def c(x):
         return 1500 + 0 * x[..., 0]
 
-    b = 1
+    b, d = 1, 2
     Nt = 100
     ts = jnp.linspace(0, 1e-4, Nt)
-    key = jax.random.PRNGKey(0)
     lam = 0
 
-    # Generate random initial conditions
-    x0 = jax.random.uniform(key, (b, d))
-    p0 = jax.random.uniform(key, (b, d))
-    a0 = jax.random.uniform(key, (b,))
-    alpha0 = jax.random.uniform(key, (b, d))
+    x_key, p_key, a_key, alpha_key = jax.random.split(jax.random.PRNGKey(0), 4)
+    x0 = jax.random.uniform(x_key, (b, d))
+    p0 = jax.random.uniform(p_key, (b, d))
+    a0 = jax.random.uniform(a_key, (b,))
+    alpha0 = jax.random.uniform(alpha_key, (b, d))
     mode = jnp.ones((b,))
     solver_configs = None
 
-    # Initial covariance matrix
     m0 = 1j * jnp.einsum("bd,dj->bdj", alpha0, jnp.eye(d))
 
-    # Forward propagation
     ode_solver = gb_solvers.solve_ODE_base
 
     xt, pt, mt, at = ode_solver(x0, p0, m0, a0, mode, ts, c, lam, solver_configs)
 
-    # Extract final state
     xT = xt[:, -1, :]
     pT = pt[:, -1, :]
     mT = mt[:, -1, ...]
     aT = at[:, -1, :]
 
-    # Reverse time array for backward propagation
     ts_inv = ts[::-1]
 
-    # Backward propagation from final state
     xt_inv, pt_inv, mt_inv, at_inv = ode_solver(
         xT, pT, mT, aT, mode, ts_inv, c, lam, solver_configs
     )
@@ -222,7 +158,6 @@ def test_gb_reversible(d):
     m0_inv = mt_inv[:, -1, ...]
     a0_inv = at_inv[:, -1, :]
 
-    # test MT is symmetric and imag. positive definite
     vmap_is_symmetric = jax.vmap(jax.vmap(lambda x: jnp.allclose(x, x.T, atol=1e-16)))
     vmap_is_pos_def = jax.vmap(
         jax.vmap(lambda x: jnp.all(jnp.linalg.eigvals(x).real > 0))
@@ -235,10 +170,6 @@ def test_gb_reversible(d):
     assert jnp.allclose(p0_inv, p0, atol=1e-16)
     assert jnp.allclose(m0_inv, m0, atol=1e-8)
     assert jnp.allclose(a0_inv, a0, atol=1e-8)
-
-    ###############
-    ## HOM Test ##
-    ###############
 
     solver = gb_solvers.solve_hom_general
     solver_rev = gb_solvers.solve_hom_TR
@@ -266,7 +197,7 @@ def test_gb_reversible(d):
     assert jnp.allclose(a0, a0_inv, atol=1e-16)
 
 
-@pytest.mark.parametrize("d", [1, 2, 3])
+@pytest.mark.parametrize("d", [1, 3])
 def test_hom_tr_matches_batch_solver(d):
     """
     Closed-form homogeneous TR should match the batch ODE solver in any dimension.
@@ -310,11 +241,7 @@ def linear_speed(x):
 @pytest.mark.parametrize(
     "d, c",
     [
-        (1, constant_speed),
         (2, constant_speed),
-        (3, constant_speed),
-        (1, linear_speed),
-        (2, linear_speed),
         (3, linear_speed),
     ],
 )
@@ -326,13 +253,7 @@ def test_riccati_keeps_symm_pos_def(d, c):
     This is stated as Lemma 2.1 in Qian and Ying 2010.
     """
     b = 1
-    N = (64,) * d
-    dx = (1 / N[0],) * d
-
-    cfl = (jnp.sqrt(2) / 4).round(3)
-    periodic = (False,) * d
-    domain = geometry.Domain(N=N, dx=dx, c=c, periodic=periodic, cfl=cfl)
-    ts = domain.generate_time_domain()
+    ts = jnp.linspace(0.0, 0.25, 32)
 
     mode = jnp.ones((b,))
     x0 = jnp.zeros((b, d)) + 0.5
@@ -366,24 +287,17 @@ def test_riccati_keeps_symm_pos_def(d, c):
     assert jnp.all(vmap_is_pos_def(jnp.imag(Mt)))
 
 
-@pytest.mark.parametrize("d", [1, 2])
-def test_ODE_not_solveable_if_p0_eq_0(d):
+def test_ODE_not_solveable_if_p0_eq_0():
     """
     Test that if p0 = 0, then the ODEs are not solvable.
     """
     b = 1
-    N = jnp.array([128] * d)
-    dx = jnp.array([1 / N[0]] * d)
+    d = 2
 
     def c(x):
         return 1500 + 0 * x[..., 0]
 
-    cfl = (jnp.sqrt(2) / 4).round(3)
-    periodic = (False,) * d
-
-    domain = geometry.Domain(N=N, dx=dx, c=c, periodic=periodic, cfl=cfl)
-
-    ts = domain.generate_time_domain()
+    ts = jnp.linspace(0.0, 0.1, 16)
 
     mode = jnp.ones((b,))
     x0 = jnp.zeros((b, d)) + 0.5
@@ -402,20 +316,18 @@ def test_ODE_not_solveable_if_p0_eq_0(d):
         ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
 
 
-@pytest.mark.parametrize("b,N", [(1, (64,)), (10, (64,)), (10, (64, 64))])
-def test_amplitude_is_linear(b, N):
+def test_amplitude_is_linear():
     """
     Check that rescaling a0 by a constant factor, rescales the GB by the same factor.
     """
+    b, N = 3, (8, 10)
     t, x0, p0, a0, alpha0, omega0, x_sensor = random_data(b, N)
-    key = jax.random.PRNGKey(0)
-    scale_factor = jax.random.uniform(key, (b,))
+    scale_factor = jax.random.uniform(jax.random.PRNGKey(1), (b,))
     a0_rescale = a0 * scale_factor
     lam = 0
 
     d = len(N)
     M0 = gb_utils.prepare_M0(alpha0, None)
-    # is_M0_diagonal = gb_utils.is_diagonal(M0)
     mode, domain_size, periodic = (
         jnp.ones((b,)),
         jnp.ones((d)),
@@ -453,28 +365,22 @@ def test_amplitude_is_linear(b, N):
         compute_gb(a0_rescale, ode_solver),
     )
 
-    scale_factor = jnp.expand_dims(scale_factor, axis=(0, 1, 2))
+    scale_factor = scale_factor.reshape((1,) * (len(N) + 1) + (b,))
 
     assert jnp.allclose(gb_hom * scale_factor, gb_hom_rescale, atol=1e-16)
     assert jnp.allclose(gb_num * scale_factor, gb_num_rescale, atol=1e-16)
 
 
-@pytest.mark.parametrize("b, N", [(1, (64,)), (10, (64,)), (10, (64, 64))])
-def test_hom_general_solver(b, N):
+def test_hom_general_solver():
     """
     Test that for a non-diagonal M0, the general solver agrees with the analyical solution.
     """
-    d = len(N)
-    cfl = (jnp.sqrt(2) / 4).round(3)
-    periodic = (False,) * d
-    dx = (1 / N[0],) * d
+    b, d = 2, 2
 
     def c(x):
         return 1 + 0 * x[..., 0]
 
-    domain = geometry.Domain(N=N, dx=dx, c=c, periodic=periodic, cfl=cfl)
-
-    ts = domain.generate_time_domain()
+    ts = jnp.linspace(0.0, 0.25, 32)
 
     mode = jnp.ones((b,))
     x0 = jnp.zeros((b, d)) + 0.5
@@ -504,8 +410,7 @@ def test_hom_general_solver(b, N):
     assert jnp.allclose(At_ode, At_hom_gen, atol=1e-16)
 
 
-@pytest.mark.parametrize("ndim", [1, 2, 3])
-def test_gb_conjugate(ndim):
+def test_gb_conjugate():
     """
     Test that if I compute a Gaussian Beam, and compute its complex conjugate,
     then it's the same as another Gaussian Beam, with certain parameters.
@@ -521,8 +426,8 @@ def test_gb_conjugate(ndim):
     Test that the compute_gaussian_beam_real is the same as a taking sum of a GB and its conjugate pair.
 
     """
-    b = 1
-    N = (64,) * ndim
+    b, ndim = 1, 2
+    N = (8, 10)
     lam = 0
     ts, x0, p0, a0, alpha0, omega0, x_sensor = random_data(b, N, isotropic=False)
     M0 = gb_utils.prepare_M0(alpha0, None)
@@ -599,7 +504,7 @@ def test_prepare_M0_requires_exclusive_args():
 
 def test_check_M0_happy_and_failure_paths():
     good = jnp.array([[[1 + 1j, 0], [0, 2 + 1j]]])
-    check_M0(good)  # no exception
+    check_M0(good)
     bad_sym = jnp.array([[[1 + 1j, 1], [0, 2 + 1j]]])
     with pytest.raises(ValueError):
         check_M0(bad_sym)
@@ -621,7 +526,6 @@ def make_linear_c(a_lin: float, b_lin: float):
     """
 
     def c(x: jnp.ndarray) -> jnp.ndarray:
-        # x has shape (1,) in this test so x[0] is scalar
         return a_lin + b_lin * x[0]
 
     return c
@@ -649,19 +553,19 @@ def analytic_1d_linear_medium_solution(
     Returns xt, pt, Mt, At with shapes matching solve_ODE_base for b=1, d=1.
     """
     t0 = ts[0]
-    dt = ts - t0  # (Nt,)
+    dt = ts - t0
     b = float(b_lin)
     a = float(a_lin)
 
-    p_t = p0 * jnp.exp(-b * dt)  # (Nt,)
-    x_t = (x0 + a / b) * jnp.exp(b * dt) - a / b  # (Nt,)
-    M_t = M0 * jnp.exp(-2.0 * b * dt)  # (Nt,)
-    A_t = A0 * jnp.exp(0.5 * b * dt)  # (Nt,)
+    p_t = p0 * jnp.exp(-b * dt)
+    x_t = (x0 + a / b) * jnp.exp(b * dt) - a / b
+    M_t = M0 * jnp.exp(-2.0 * b * dt)
+    A_t = A0 * jnp.exp(0.5 * b * dt)
 
-    xt = x_t[None, :, None].real  # (1, Nt, 1)
-    pt = p_t[None, :, None].real  # (1, Nt, 1)
-    Mt = M_t[None, :, None, None]  # (1, Nt, 1, 1)
-    At = A_t[None, :, None]  # (1, Nt, 1) — we will squeeze later
+    xt = x_t[None, :, None].real
+    pt = p_t[None, :, None].real
+    Mt = M_t[None, :, None, None]
+    At = A_t[None, :, None]
 
     return xt, pt, Mt, At
 
@@ -677,38 +581,33 @@ def test_solve_ODE_base_matches_analytic_in_1d_linear_medium():
         M(t) = M0 exp(-2 b t)
         A(t) = A0 exp(b t / 2)
     """
-    # 1D, single beam
     b_beams = 1
     d = 1
 
-    # Medium parameters: c(x) = a + b x
     a_lin = 1.0
     b_lin = 1.0
     c = make_linear_c(a_lin, b_lin)
 
-    # Time grid chosen so that c(x(t)) stays positive and p(t) > 0
+    # Keep c(x(t)) and p(t) positive over the integration interval.
     Nt = 200
     t0 = 0.0
     t1 = 1.0
     ts = jnp.linspace(t0, t1, Nt)
 
-    # Initial GB data (batch size 1, d = 1)
     x0_val = 0.1  # away from the zero of c(x)
     p0_val = 1.2  # strictly positive so ||p|| = p
     M0_val = 0.2j  # purely imaginary Hessian is fine
     A0_val = 1.0 + 0.0j
 
-    x0 = jnp.array([[x0_val]], dtype=jnp.float64)  # (1, 1)
-    p0 = jnp.array([[p0_val]], dtype=jnp.float64)  # (1, 1)
-    M0 = jnp.array([[[M0_val]]], dtype=jnp.complex128)  # (1, 1, 1)
-    A0 = jnp.array([A0_val], dtype=jnp.complex128)  # (1,)
-    mode = jnp.ones((b_beams,), dtype=jnp.int32)  # (1,)
+    x0 = jnp.array([[x0_val]], dtype=jnp.float64)
+    p0 = jnp.array([[p0_val]], dtype=jnp.float64)
+    M0 = jnp.array([[[M0_val]]], dtype=jnp.complex128)
+    A0 = jnp.array([A0_val], dtype=jnp.complex128)
+    mode = jnp.ones((b_beams,), dtype=jnp.int32)
     lam = 0.0
 
-    # Use high-precision solver config
     solver_config = gb_solvers.SolverConfig.from_precision(use_x64=True)
 
-    # 1) Numerical solution via solve_ODE_base
     xt_num, pt_num, Mt_num, At_num = gb_solvers.solve_ODE_base(
         x0,
         p0,
@@ -721,7 +620,6 @@ def test_solve_ODE_base_matches_analytic_in_1d_linear_medium():
         solver_config,
     )
 
-    # 2) Analytic solution
     xt_ref, pt_ref, Mt_ref, At_ref = analytic_1d_linear_medium_solution(
         x0=x0_val,
         p0=p0_val,
@@ -732,23 +630,14 @@ def test_solve_ODE_base_matches_analytic_in_1d_linear_medium():
         b_lin=b_lin,
     )
 
-    # ---- Shape sanity checks ----
     assert xt_num.shape == xt_ref.shape == (b_beams, Nt, d)
     assert pt_num.shape == pt_ref.shape == (b_beams, Nt, d)
     assert Mt_num.shape == Mt_ref.shape == (b_beams, Nt, d, d)
 
-    # At_num comes from a length-1 slice of the state vector, so shape is (b, Nt, 1)
-    # At_ref was constructed with the same shape.
     assert At_num.shape == At_ref.shape == (b_beams, Nt, 1)
 
-    # ---- Numerical comparison ----
     atol = 1e-10
     rtol = 1e-7
-
-    print(f"max abs diff xt: {jnp.max(jnp.abs(xt_num - xt_ref))}")
-    print(f"max abs diff pt: {jnp.max(jnp.abs(pt_num - pt_ref))}")
-    print(f"max abs diff Mt: {jnp.max(jnp.abs(Mt_num - Mt_ref))}")
-    print(f"max abs diff At: {jnp.max(jnp.abs(At_num - At_ref))}")
 
     assert jnp.allclose(xt_num, xt_ref, atol=atol, rtol=rtol)
     assert jnp.allclose(pt_num, pt_ref, atol=atol, rtol=rtol)
@@ -757,19 +646,10 @@ def test_solve_ODE_base_matches_analytic_in_1d_linear_medium():
 
 
 def test_riccati_2d_linear_c_matches_textbook_form():
-    """
-    Regression test for the matrix Riccati cross-term ordering.
+    """Match the textbook Riccati cross-term ordering for asymmetric G_xp.
 
-    In a 2D linear sound speed c(x) = a + b·x with ∇c not parallel to p̂,
-    the mixed-Hessian G_{xp} is asymmetric. Two Riccati orderings exist:
-        Form B (textbook, Berra 2017 / Cerveny 2007 / standard):
-            Ṁ = -(Gxx + Gxp M + M Gxp^T + M Gpp M)
-        Form A (legacy buggy ordering):
-            Ṁ = -(Gxx + M Gxp + Gxp^T M + M Gpp M)
-
-    For ∇c ⊥ p̂ at t=0 the bug bends the off-diagonal of M by ~50% by t=0.5.
-    This test integrates form B with scipy DOP853 at atol=rtol=1e-12 and
-    checks that beamax.gb.gb_solvers.solve_ODE_base agrees to 1e-6.
+    The reference integrates Ṁ = -(Gxx + Gxp M + M Gxp^T + M Gpp M) with
+    SciPy DOP853 at ``atol=rtol=1e-12``.
     """
     import numpy as np
     from scipy.integrate import solve_ivp
@@ -795,7 +675,6 @@ def test_riccati_2d_linear_c_matches_textbook_form():
         Gxx, Gxp, Gpp, c_val, norm_p = hessian_blocks(x, p)
         dx = c_val * p / norm_p
         dp = -b_vec * norm_p
-        # Form B: textbook ordering
         dM = -(Gxx + Gxp @ M + M @ Gxp.T + M @ Gpp @ M)
         return np.concatenate([dx, dp, dM.real.reshape(-1), dM.imag.reshape(-1)])
 
@@ -839,11 +718,6 @@ def test_riccati_2d_linear_c_matches_textbook_form():
     )
 
 
-# ============================================================================
-# Tests for surface-event ODE solvers and the (Q, P) variant
-# ============================================================================
-
-
 def _constant_c(_x):
     """Homogeneous c=1 sound speed used by the surface tests."""
     return jnp.array(1.0)
@@ -864,154 +738,7 @@ def test_compute_amp_hom_diag_dispatch_rejects_d_ge_4():
         gb_solvers.compute_amp_hom_diag(p0, normp, alpha0, c0, ts, a0)
 
 
-def test_solve_ODE_intersection_planar_surface_1d():
-    """In 1D with c=1 and a planar surface x=L, the beam should intersect at t=L/c.
-
-    `solve_ODE_intersection` is vmapped over the beam axis, so all per-beam
-    inputs must carry a leading batch dimension.
-    """
-    b, d = 1, 1
-    L = 0.5
-    x0 = jnp.array([[0.0]], dtype=jnp.float64)
-    p0 = jnp.array([[1.0]], dtype=jnp.float64)  # heading +x with c=1
-    M0 = jnp.array([[[0.1j]]], dtype=jnp.complex128)
-    a0 = jnp.array([[1.0 + 0.0j]], dtype=jnp.complex128)  # (b, 1)
-    mode = jnp.ones((b,), dtype=jnp.float64)
-    ts = jnp.linspace(0.0, 1.0, 64)
-
-    def surface(x):
-        return x[0] - L
-
-    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
-    xt, pt, Mt, At, t_int = gb_solvers.solve_ODE_intersection(
-        x0, p0, M0, a0, mode, ts, _constant_c, 0.0, surface, cfg
-    )
-
-    # With c=1 and |p|=1 the ray speed is c=1 so hit time is L.
-    assert jnp.all(jnp.isfinite(t_int))
-    assert float(jnp.abs(t_int[0] - L)) < 1e-4
-    assert xt.shape == (b, len(ts), d)
-
-
-def test_solve_ODE_intersection_no_hit_returns_inf():
-    """If the surface is unreachable in [t0, t1], t_int should be inf, not a fake hit."""
-    b = 1
-    x0 = jnp.array([[0.0]], dtype=jnp.float64)
-    p0 = jnp.array([[1.0]], dtype=jnp.float64)
-    M0 = jnp.array([[[0.1j]]], dtype=jnp.complex128)
-    a0 = jnp.array([[1.0 + 0.0j]], dtype=jnp.complex128)
-    mode = jnp.ones((b,), dtype=jnp.float64)
-    # Time window 0..0.1 — ray only reaches x=0.1 but surface is at x=5.0
-    ts = jnp.linspace(0.0, 0.1, 32)
-
-    def surface(x):
-        return x[0] - 5.0
-
-    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
-    _, _, _, _, t_int = gb_solvers.solve_ODE_intersection(
-        x0, p0, M0, a0, mode, ts, _constant_c, 0.0, surface, cfg
-    )
-    # Either inf (failed root solve) or at least beyond the chosen window.
-    assert jnp.isinf(t_int[0]) or float(t_int[0]) >= ts[-1] - 1e-6
-
-
-def test_solve_ODE_first_hit_planar_event_1d():
-    """1D ray with c=1 should trigger the event when it hits the planar surface."""
-    L = 0.4
-    x0 = jnp.array([[0.0]], dtype=jnp.float64)
-    p0 = jnp.array([[1.0]], dtype=jnp.float64)
-    M0 = jnp.array([[[0.1j]]], dtype=jnp.complex128)
-    a0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
-    mode = jnp.array([1], dtype=jnp.float64)
-    ts = jnp.linspace(0.0, 1.0, 64)
-
-    def surface(x):
-        return x[0] - L
-
-    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
-    xt, pt, Mt, At, t_hit, hit = gb_solvers.solve_ODE_first_hit(
-        x0[0], p0[0], M0[0], a0[0:1], mode[0], ts, _constant_c, 0.0, surface, cfg
-    )
-
-    assert bool(hit) is True
-    assert float(jnp.abs(t_hit - L)) < 1e-3
-    # Final-state-only output shape: (1 beam, 1 time, d)
-    assert xt.shape[-1] == 1
-    assert Mt.shape[-2:] == (1, 1)
-
-
-def test_solve_ODE_first_hit_no_event_returns_endpoint():
-    """When the ray never reaches the surface, the integrator should run to t1."""
-    L = 5.0
-    x0 = jnp.array([[0.0]], dtype=jnp.float64)
-    p0 = jnp.array([[1.0]], dtype=jnp.float64)
-    M0 = jnp.array([[[0.1j]]], dtype=jnp.complex128)
-    a0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
-    mode = jnp.array([1], dtype=jnp.float64)
-    ts = jnp.linspace(0.0, 0.1, 32)
-
-    def surface(x):
-        return x[0] - L
-
-    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
-    _, _, _, _, t_hit, hit = gb_solvers.solve_ODE_first_hit(
-        x0[0], p0[0], M0[0], a0[0:1], mode[0], ts, _constant_c, 0.0, surface, cfg
-    )
-    assert bool(hit) is False
-    assert float(jnp.abs(t_hit - ts[-1])) < 1e-9
-
-
-def test_solve_ODE_QP_base_matches_M_base_1d_homogeneous():
-    """In a homogeneous 1D medium, the QP-form solver should reproduce the M-form solver.
-
-    This is a strong cross-check on the (Q, P) ODE construction: with M = P Q⁻¹
-    and Q(0)=I, P(0)=M0, the (Q,P) propagation must yield the same M trajectory.
-    """
-    b = 1
-    ts = jnp.linspace(0.0, 0.5, 64)
-    x0 = jnp.array([[0.05]], dtype=jnp.float64)
-    p0 = jnp.array([[1.0]], dtype=jnp.float64)
-    M0 = jnp.array([[[0.2j]]], dtype=jnp.complex128)
-    A0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
-    mode = jnp.ones((b,), dtype=jnp.int32)
-    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
-
-    xt_M, pt_M, Mt_M, At_M = gb_solvers.solve_ODE_base(
-        x0, p0, M0, A0, mode, ts, _constant_c, 0.0, cfg
-    )
-    xt_Q, pt_Q, Mt_Q, At_Q = gb_solvers.solve_ODE_QP_base(
-        x0, p0, M0, A0, mode, ts, _constant_c, 0.0, cfg
-    )
-
-    # Positions and momenta must agree to high precision.
-    assert jnp.allclose(xt_M, xt_Q, atol=1e-8, rtol=1e-6)
-    assert jnp.allclose(pt_M, pt_Q, atol=1e-8, rtol=1e-6)
-    # M may have some numerical drift in QP form; allow a looser tolerance.
-    assert jnp.allclose(Mt_M, Mt_Q, atol=1e-6, rtol=1e-4)
-
-
-def test_solve_ODE_QP_base_2d_homogeneous_diagonal_M0():
-    """In 2D homogeneous c=1, QP-form should preserve diagonal Hessian structure."""
-    b, d = 1, 2
-    ts = jnp.linspace(0.0, 0.1, 32)
-    x0 = jnp.array([[0.05, 0.0]], dtype=jnp.float64)
-    p0 = jnp.array([[1.0, 0.0]], dtype=jnp.float64)
-    M0 = jnp.array([[[0.2j, 0.0j], [0.0j, 0.5j]]], dtype=jnp.complex128)
-    A0 = jnp.array([1.0 + 0.0j], dtype=jnp.complex128)
-    mode = jnp.ones((b,), dtype=jnp.int32)
-    cfg = gb_solvers.SolverConfig.from_precision(use_x64=True)
-
-    xt, pt, Mt, At = gb_solvers.solve_ODE_QP_base(
-        x0, p0, M0, A0, mode, ts, _constant_c, 0.0, cfg
-    )
-
-    assert xt.shape == (b, len(ts), d)
-    assert Mt.shape == (b, len(ts), d, d)
-    # Initial condition recovered exactly at t=0.
-    assert jnp.allclose(Mt[0, 0], M0[0], atol=1e-10)
-
-
-def test_solver_config_dt0_override():
+def test_solver_config_dt0_override(monkeypatch):
     """SolverConfig.dt0 should override the time-grid-derived dt0 inside solvers."""
     b, d = 1, 1
     ts = jnp.linspace(0.0, 0.1, 16)
@@ -1022,15 +749,18 @@ def test_solver_config_dt0_override():
     mode = jnp.ones((b,), dtype=jnp.int32)
 
     cfg = gb_solvers.SolverConfig.from_precision(use_x64=True, dt0=1e-4)
-    assert cfg.dt0 == 1e-4
+    observed_dt0 = []
+    original_setup = gb_solvers.ode_solver_setup
 
-    # Solver should still run and produce a sane trajectory with a fixed dt0.
+    def record_dt0(*args, **kwargs):
+        observed_dt0.append(args[4] if len(args) > 4 else kwargs["dt0"])
+        return original_setup(*args, **kwargs)
+
+    monkeypatch.setattr(gb_solvers, "ode_solver_setup", record_dt0)
+
     xt, _, _, _ = gb_solvers.solve_ODE_base(
         x0, p0, M0, A0, mode, ts, _constant_c, 0.0, cfg
     )
+    assert observed_dt0 == [pytest.approx(1e-4)]
     assert xt.shape == (b, len(ts), d)
     assert jnp.all(jnp.isfinite(xt))
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

@@ -1,26 +1,29 @@
+import math
+
 import jax
-from jax import vmap, lax
+from jax import lax
 import jax.numpy as jnp
 from einops import rearrange
-from typing import Callable, Union, Tuple, Optional
+from typing import Callable, Literal, Optional, Tuple, Union, overload
 
 from beamax import utils
 from beamax.gb import core, gb_utils
-from beamax.gb.gb_solvers import SolverFn, SolverConfig
+from beamax.gb.gb_solvers import SolverFn, SolverConfig, solve_hom_diag
+from beamax.gb.pallas_config import PallasConfig
 from beamax.transforms import MSWPT, compute_frame_phase
 from beamax.geometry import Domain
 
 
 def _threshold_hard(coeff, val):
-    """
-    Select coefficients whose magnitude is strictly greater than a threshold.
+    r"""
+    Select coefficients $c_j$ satisfying $|c_j|>\lambda$.
 
     Parameters
     ----------
     coeff : jnp.ndarray
         Coefficient vector.
     val : float
-        Absolute magnitude threshold.
+        Absolute magnitude threshold $\lambda$.
 
     Returns
     -------
@@ -31,35 +34,6 @@ def _threshold_hard(coeff, val):
     """
     idx = jnp.where(jnp.abs(coeff) > val)[0]
     return idx, coeff[idx]
-
-
-def _threshold_percentile(coeff, val, max_size=None):
-    """
-    Select coefficients above a magnitude percentile.
-
-    Parameters
-    ----------
-    coeff : jnp.ndarray
-        Coefficient vector.
-    val : float
-        Percentile threshold in ``[0, 100]``.
-    max_size : int, optional
-        Fixed output size for ``jnp.nonzero``. Defaults to ``len(coeff)``.
-
-    Returns
-    -------
-    idx : jnp.ndarray
-        Selected indices, padded with ``-1`` if needed.
-    values : jnp.ndarray
-        Selected values, padded with zeros if needed.
-    """
-    if max_size is None:
-        max_size = coeff.shape[0]
-    thresh = jnp.percentile(jnp.abs(coeff), val)
-    mask = jnp.abs(coeff) > thresh
-    idx = jnp.nonzero(mask, size=max_size, fill_value=-1)[0]
-    values = jnp.where(idx >= 0, coeff[idx], 0.0)
-    return idx, values
 
 
 def _threshold_top_n(coeff, val):
@@ -89,121 +63,26 @@ def _threshold_top_n(coeff, val):
     return idx, coeff[idx]
 
 
-def _threshold_hard_reassign(coeff, val):
-    """
-    Hard-threshold coefficients and rescale retained energy.
-
-    Parameters
-    ----------
-    coeff : jnp.ndarray
-        Coefficient vector.
-    val : float
-        Relative threshold as a fraction of the maximum magnitude.
-
-    Returns
-    -------
-    idx : jnp.ndarray
-        Selected indices.
-    values : jnp.ndarray
-        Reassigned coefficient values.
-    """
-    max_abs = jnp.max(jnp.abs(coeff))
-    thr = jnp.where((max_abs > 0) & (jnp.abs(coeff) >= val * max_abs), coeff, 0)
-    retained_energy = jnp.sum(jnp.abs(thr) ** 2)
-    total_energy = jnp.sum(jnp.abs(coeff) ** 2)
-    ratio = jnp.sqrt(total_energy / jnp.where(retained_energy > 0, retained_energy, 1))
-    ratio = jnp.where(retained_energy > 0, ratio, 0)
-    reassigned = thr * ratio
-    idx = jnp.where(jnp.abs(reassigned) > 0)[0]
-    return idx, reassigned[idx]
-
-
-def _threshold_bao_energy(coeff, val, decomp, red):
-    """
-    Threshold coefficients by Bao-style frequency-weighted energy.
-
-    Parameters
-    ----------
-    coeff : jnp.ndarray
-        Coefficient vector.
-    val : float
-        Weighted-energy threshold.
-    decomp : DyadicDecomposition
-        Dyadic decomposition used to map coefficients to boxes.
-    red : int
-        Transform redundancy.
-
-    Returns
-    -------
-    idx : jnp.ndarray
-        Selected indices.
-    values : jnp.ndarray
-        Weighted coefficient values.
-    """
-    shapes = utils.compute_coeff_shapes(decomp, red, jnp.arange(decomp.num_levels))
-    cumsum = jnp.r_[0, jnp.cumsum(decomp.num_boxes_ndim)]
-    nn_level, nn_idx = utils.find_tensor_and_multiindex(
-        jnp.arange(coeff.shape[0]), shapes
-    )
-    box_idx = nn_idx[0, :] + cumsum[nn_level]
-    normxi = jnp.linalg.norm(decomp.centres_ndim[box_idx], axis=1) ** decomp.ndim
-    weighted_coeff = coeff * normxi
-    idx = jnp.where(jnp.abs(weighted_coeff) > val)[0]
-    return idx, coeff[idx]
-
-
-def _threshold_perc_max_abs(coeff, val):
-    """
-    Select coefficients above a fraction of the maximum magnitude.
-
-    Parameters
-    ----------
-    coeff : jnp.ndarray
-        Coefficient vector.
-    val : float
-        Fraction of ``max(abs(coeff))`` used as the threshold.
-
-    Returns
-    -------
-    idx : jnp.ndarray
-        Selected indices, padded with ``-1`` if needed.
-    values : jnp.ndarray
-        Selected values, padded with zeros if needed.
-    """
-    thresh = jnp.max(jnp.abs(coeff)) * val
-    mask = jnp.abs(coeff) > thresh
-    size = int(coeff.shape[0])
-    idx = jnp.nonzero(mask, size=size, fill_value=-1)[0]
-    values = jnp.where(idx >= 0, coeff[idx], 0.0)
-    return idx, values
-
-
 def threshold_coefficients(
-    coeffs: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+    coeffs: jnp.ndarray,
     val: float,
     strategy: str = "hard",
-    wpt: Optional[MSWPT] = None,
-):
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     Apply thresholding to wavelet coefficients.
 
     Parameters
     ----------
-    coeffs : jnp.ndarray or Tuple[jnp.ndarray, jnp.ndarray]
+    coeffs : jnp.ndarray
         Coefficients to threshold.
     val : float
         Threshold value.
     strategy : str, default="hard"
         Thresholding strategy.
-    wpt : MSWPT, optional
-        Wave-packet transform required by strategies that depend on the
-        dyadic layout.
-
     Returns
     -------
-    Tuple[jnp.ndarray, jnp.ndarray] or Tuple[Tuple[jnp.ndarray, jnp.ndarray], ...]
-        Selected indices and values. If ``coeffs`` is a tuple, returns one
-        ``(idx, values)`` pair for each coefficient vector.
+    Tuple[jnp.ndarray, jnp.ndarray]
+        Selected indices and values.
 
     Raises
     ------
@@ -211,23 +90,13 @@ def threshold_coefficients(
         If ``strategy`` is unknown.
     """
 
-    def threshold_bao(c):
-        if wpt is None:
-            raise ValueError("bao_energy thresholding requires wpt.")
-        return _threshold_bao_energy(c, val, wpt.dyadic_decomp, wpt.redundancy)
-
     funcs = {
         "hard": lambda c: _threshold_hard(c, val),
         "top_n": lambda c: _threshold_top_n(c, val),
-        "percentile": lambda c: _threshold_percentile(c, val),
-        "hard_reassign": lambda c: _threshold_hard_reassign(c, val),
-        "bao_energy": threshold_bao,
-        "perc_max_abs": lambda c: _threshold_perc_max_abs(c, val),
     }
     if strategy not in funcs:
         raise ValueError(f"Invalid thresholding strategy: {strategy}")
-    f = funcs[strategy]
-    return (f(coeffs[0]), f(coeffs[1])) if isinstance(coeffs, tuple) else f(coeffs)
+    return funcs[strategy](coeffs)
 
 
 def _coefficient_positions(
@@ -236,12 +105,12 @@ def _coefficient_positions(
     wpt: MSWPT,
     domain: Domain,
 ) -> jnp.ndarray:
-    """Map local MSWPT coefficient indices to physical packet centres.
+    r"""Map local MSWPT coefficient indices to physical packet centres.
 
-    A level's coefficient block is the inverse FFT of a support whose length
-    on axis ``s`` is ``redundancy * box_length * box_aspect_ratio[s]``.
-    Consequently index ``k_s`` represents the physical position
-    ``k_s * domain_size_s / support_length_s``.
+    Writing $r$ for the redundancy, $b_\ell$ for the level's box length,
+    and $a_s$ for its aspect ratio, the support length on axis $s$ is
+    $S_{\ell,s}=r b_\ell a_s$. Index $k_s$ maps to
+    $x_s=k_sL_s/S_{\ell,s}$.
     """
     local_indices = jnp.stack(nn_idx[1:, :], axis=-1)
     box_lengths = jnp.asarray(wpt.dyadic_decomp.box_lengths)
@@ -326,17 +195,14 @@ def compute_forward_parameters(
         nn_level, nn_idx = utils.find_tensor_and_multiindex(coeffs, shapes)
         box_idx = nn_idx[0, :] + cumsum[nn_level]
 
-        # Compute normalized centres and momenta
         centres = wpt.dyadic_decomp.centres_ndim[box_idx, :] / grid_size
         norm = jnp.linalg.norm(centres, axis=-1, keepdims=True)
         p0s = 2 * jnp.pi * centres / norm
 
-        # Compute box parameters
         bl = rearrange(box_lengths[nn_level], "j -> j 1") / grid_size * box_aspect_ratio
         Lls = bl * wpt.redundancy
         sigmas = bl / 2
 
-        # Compute beam parameters
         αs = 2j * (jnp.pi * sigmas) ** 2 / norm
         M0s = gb_utils.prepare_M0(αs, None)
         a0s = jnp.prod(
@@ -371,30 +237,6 @@ def compute_forward_parameters(
             jnp.concatenate((pos[5], neg[5]), axis=0),
         )
     return compute_params(significant_coeffs, 1)
-
-
-def compute_memory_requirements(b: int, N: Tuple, Nt: int) -> str:
-    """
-    Estimate memory requirements for Gaussian beam computation.
-
-    Parameters
-    ----------
-    b : int
-        Number of beams.
-    N : Tuple[int, ...]
-        Grid dimensions.
-    Nt : int
-        Number of time points.
-
-    Returns
-    -------
-    str
-        Human-readable memory estimate.
-    """
-    dims = (Nt,) + N + (b,)
-    x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
-    dtype = jnp.float64 if x64_enabled else jnp.float32
-    return utils.memory_estimate(jnp.array(dims), dtype)
 
 
 def _compute_beams(
@@ -495,15 +337,16 @@ def _aggregate_beams(
     periodic: jnp.ndarray,
     ode_solver: SolverFn,
     solver_config: Optional[SolverConfig] = None,
+    pallas_config: PallasConfig | None = None,
 ):
     """
-    Generic beam aggregation supporting scan, vmap, or direct computation.
+    Generic beam aggregation supporting scan, vmap, Pallas, or direct computation.
 
     Parameters
     ----------
     params : Tuple[jnp.ndarray, ...]
         Beam parameter tuple ``(p0, M0, x0, omega, a0, mode)``.
-    aggregate_method : {"scan", "vmap", "all"}
+    aggregate_method : {"scan", "pallas", "pallas_fused_hom_diag_3d", "all"}
         Aggregation strategy.
     init_shape : Tuple[int, ...]
         Shape of the running accumulated field.
@@ -538,95 +381,113 @@ def _aggregate_beams(
     """
     p0_batches, M0_batches, x0_batches, ω_batches, a0_batches, mode_batches = params
 
-    if aggregate_method == "scan":
-        # Initialize with correct dtype based on use_real flag
+    pallas_methods = {"pallas", "pallas_fused_hom_diag_3d"}
+    if aggregate_method in pallas_methods and not use_real:
+        raise ValueError("Pallas aggregation is only available for real-valued fields.")
+
+    if aggregate_method in {"scan", *pallas_methods}:
+        effective_pallas_config = pallas_config or PallasConfig()
+        fused_pallas_carry = (
+            aggregate_method in pallas_methods and jax.default_backend() != "tpu"
+        )
+        num_flat_sensors = math.prod(sensors.shape[:-1])
+        padded_sensors = (
+            math.ceil(num_flat_sensors / effective_pallas_config.sensor_block_size)
+            * effective_pallas_config.sensor_block_size
+        )
+        padded_times = (
+            math.ceil(ts.shape[0] / effective_pallas_config.gpu_time_block_size)
+            * effective_pallas_config.gpu_time_block_size
+            if aggregate_method == "pallas_fused_hom_diag_3d"
+            else ts.shape[0]
+        )
         if use_real:
-            init = jnp.zeros(init_shape)
+            if fused_pallas_carry:
+                init = jnp.zeros((padded_times, padded_sensors), dtype=x0_batches.dtype)
+            else:
+                init = jnp.zeros(init_shape, dtype=x0_batches.dtype)
         else:
-            # Complex computation - respect JAX precision setting
             x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
             complex_dtype = jnp.complex128 if x64_enabled else jnp.complex64
             init = jnp.zeros(init_shape, dtype=complex_dtype)
 
         def scan_fn(carry, inp):
-            """
-            Accumulate one beam batch into the scanned field.
-
-            Parameters
-            ----------
-            carry : jnp.ndarray
-                Running accumulated field.
-            inp : Tuple[jnp.ndarray, ...]
-                One batch of beam parameters.
-
-            Returns
-            -------
-            carry : jnp.ndarray
-                Updated accumulated field.
-            aux : None
-                Empty scan output.
-            """
+            """Accumulate one beam batch."""
             p0, M0, x0, ω, a0, mode = inp
-            batch_result = _compute_beams(
-                x0,
-                p0,
-                M0,
-                a0,
-                ω,
-                mode,
-                c,
-                lam,
-                ts,
-                sensors,
-                domain_size,
-                periodic,
-                ode_solver,
-                use_real,
-                sum_beams=False,
-                solver_config=solver_config,
-            )
-            # Real version already summed over beams, complex version has beam axis
+            if aggregate_method == "pallas":
+                batch_result = core.compute_gaussian_beam_real_pallas(
+                    x0=x0,
+                    p0=p0,
+                    M0=M0,
+                    a0=a0,
+                    omega0=ω,
+                    mode=mode,
+                    c=c,
+                    lam=lam,
+                    ts=ts,
+                    sensors=sensors,
+                    domain_size=domain_size,
+                    periodic=periodic,
+                    ode_solver=ode_solver,
+                    solver_config=solver_config,
+                    pallas_config=effective_pallas_config,
+                    initial_field=carry if fused_pallas_carry else None,
+                    return_padded=fused_pallas_carry,
+                )
+            elif aggregate_method == "pallas_fused_hom_diag_3d":
+                from beamax.gb.pallas_kernels import (
+                    sum_gaussian_beam_real_hom_diag_3d_pallas,
+                )
+
+                c0 = jnp.asarray(c(jnp.zeros((3,), dtype=x0.dtype)), dtype=x0.dtype)
+                batch_result = sum_gaussian_beam_real_hom_diag_3d_pallas(
+                    x0=x0,
+                    p0=p0,
+                    M0=M0,
+                    a0=a0,
+                    omega0=ω,
+                    mode=mode,
+                    c0=c0,
+                    ts=ts,
+                    sensors=sensors,
+                    domain_size=domain_size,
+                    periodic=periodic,
+                    config=effective_pallas_config,
+                    initial_field=carry if fused_pallas_carry else None,
+                    return_padded=fused_pallas_carry,
+                )
+            else:
+                batch_result = _compute_beams(
+                    x0,
+                    p0,
+                    M0,
+                    a0,
+                    ω,
+                    mode,
+                    c,
+                    lam,
+                    ts,
+                    sensors,
+                    domain_size,
+                    periodic,
+                    ode_solver,
+                    use_real,
+                    sum_beams=False,
+                    solver_config=solver_config,
+                )
             if use_real:
-                # batch_result shape: (Nt, *S) - no beam axis
+                if fused_pallas_carry:
+                    return batch_result, None
                 return carry + batch_result, None
             else:
-                # batch_result shape: (Nt, *S, b) - has beam axis
                 return carry + jnp.sum(batch_result, axis=-1), None
 
         result, _ = lax.scan(scan_fn, init, params)
+        if fused_pallas_carry:
+            return result[: ts.shape[0], :num_flat_sensors].reshape(init_shape)
         return result
 
-    elif aggregate_method == "vmap":
-        beam_sums = vmap(
-            lambda p0, M0, x0, ω, a0, mode: _compute_beams(
-                x0,
-                p0,
-                M0,
-                a0,
-                ω,
-                mode,
-                c,
-                lam,
-                ts,
-                sensors,
-                domain_size,
-                periodic,
-                ode_solver,
-                use_real,
-                sum_beams=False,
-                solver_config=solver_config,
-            )
-        )(p0_batches, M0_batches, x0_batches, ω_batches, a0_batches, mode_batches)
-        # Real version: beam_sums shape (num_batches, Nt, *S)
-        # Complex version: beam_sums shape (num_batches, Nt, *S, batch_size)
-        if use_real:
-            return jnp.sum(beam_sums, axis=0)  # sum over batches
-        else:
-            return jnp.sum(
-                jnp.sum(beam_sums, axis=-1), axis=0
-            )  # sum over beams, then batches
-
-    else:  # "all"
+    else:
         beams = _compute_beams(
             x0_batches,
             p0_batches,
@@ -645,7 +506,6 @@ def _aggregate_beams(
             sum_beams=False,
             solver_config=solver_config,
         )
-        # Real version already summed, complex version has beam axis
         return beams if use_real else jnp.sum(beams, axis=-1)
 
 
@@ -661,6 +521,7 @@ def compute_forward_result(
     use_real: bool = True,
     aggregate_method: str = "scan",
     solver_config: Optional[SolverConfig] = None,
+    pallas_config: PallasConfig | None = None,
 ) -> jnp.ndarray:
     """
     Compute forward solution to the wave equation using Gaussian beams.
@@ -685,7 +546,7 @@ def compute_forward_result(
         Boundary periodicity flags.
     use_real : bool, default=True
         Whether to use real-valued beam computation.
-    aggregate_method : {"scan", "vmap", "all"}, default="scan"
+    aggregate_method : {"scan", "pallas", "pallas_fused_hom_diag_3d", "all"}, default="scan"
         Beam aggregation method.
     solver_config : SolverConfig, optional
         Numerical ODE configuration.
@@ -695,6 +556,11 @@ def compute_forward_result(
     jnp.ndarray
         Forward solution at sensor locations.
     """
+    if (
+        aggregate_method == "pallas_fused_hom_diag_3d"
+        and ode_solver is not solve_hom_diag
+    ):
+        raise ValueError("pallas_fused_hom_diag_3d requires ode_solver=solve_hom_diag.")
     init_shape = ts.shape + sensors.shape[:-1]
 
     return _aggregate_beams(
@@ -710,7 +576,30 @@ def compute_forward_result(
         periodic=periodic,
         ode_solver=ode_solver,
         solver_config=solver_config,
+        pallas_config=pallas_config,
     )
+
+
+@overload
+def compute_coefficients(
+    p0: jnp.ndarray,
+    dpdt: jnp.ndarray,
+    input_type: str,
+    domain: Domain,
+    wpt: MSWPT,
+    mode: Literal["pos_only"],
+) -> jnp.ndarray: ...
+
+
+@overload
+def compute_coefficients(
+    p0: jnp.ndarray,
+    dpdt: jnp.ndarray,
+    input_type: str,
+    domain: Domain,
+    wpt: MSWPT,
+    mode: Literal["both"] = "both",
+) -> Tuple[jnp.ndarray, jnp.ndarray]: ...
 
 
 def compute_coefficients(
@@ -751,11 +640,9 @@ def compute_coefficients(
     ValueError
         If ``mode`` is invalid.
     """
-    # Compute wavelet transforms
     a_coeff = wpt.forward(p0, input_type)
     b_coeff = wpt.forward(dpdt, input_type)
 
-    # Compute geometric information
     shapes = utils.compute_coeff_shapes(
         wpt.dyadic_decomp, wpt.redundancy, jnp.arange(wpt.dyadic_decomp.num_levels)
     )
@@ -770,15 +657,12 @@ def compute_coefficients(
     p_b = 2 * jnp.pi * centres
     mode_b = jnp.ones(b)
 
-    # Compute group velocity
     vg = gb_utils.vmap_g(x_b, p_b, mode_b, domain.c_fn)
 
-    # Compute positive and negative frequency coefficients
     cpos = 0.5 * (a_coeff + 1j * b_coeff / vg)
 
     if mode == "pos_only":
-        # Return masked positive coefficients only
-        return cpos * wpt._half_mask
+        return cpos * wpt.half_mask
     elif mode == "both":
         cneg = 0.5 * (a_coeff - 1j * b_coeff / vg)
         return cpos, cneg

@@ -15,8 +15,9 @@ def G(
     mode: Num[Array, "..."],
     c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
 ) -> Float[Array, "..."]:
-    """
-    Hamiltonian for acoustics: `G(x,p) = mode * c(x) * ||p||`.
+    r"""
+    Hamiltonian for acoustics: $G(x,p)=\sigma c(x)\lVert p\rVert$, where
+    $\sigma=\mathtt{mode}\in\{-1,1\}$.
 
     Parameters
     ----------
@@ -25,9 +26,9 @@ def G(
     p : jnp.ndarray, shape (..., d)
         Momenta.
     mode : jnp.ndarray, shape (...,)
-        ±1 branch selector.
+        Branch selector $\sigma\in\{-1,1\}$.
     c : Callable[[jnp.ndarray], jnp.ndarray]
-        Speed of sound `c(x)`.
+        Speed of sound $c(x)$.
 
     Returns
     -------
@@ -51,8 +52,9 @@ def Gx(
     mode: Num[Array, "..."],
     c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
 ) -> Float[Array, "... d"]:
-    """
-    ∂G/∂x for `G(x,p) = mode * c(x) * ||p||`.
+    r"""
+    Gradient $\partial G/\partial x$ for
+    $G(x,p)=\sigma c(x)\lVert p\rVert$.
 
     Parameters
     ----------
@@ -64,7 +66,7 @@ def Gx(
     Returns
     -------
     jnp.ndarray, shape (..., d)
-        mode * ∇c(x) * ||p||.
+        $\sigma\nabla c(x)\lVert p\rVert$.
     """
     grad_c = grad(c)(x)
     return mode * grad_c * jnp.linalg.norm(p, axis=-1)
@@ -80,8 +82,9 @@ def Gp(
     mode: Num[Array, "..."],
     c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
 ) -> Float[Array, "... d"]:
-    """
-    ∂G/∂p for `G(x,p) = mode * c(x) * ||p||`.
+    r"""
+    Gradient $\partial G/\partial p$ for
+    $G(x,p)=\sigma c(x)\lVert p\rVert$.
 
     Parameters
     ----------
@@ -93,7 +96,7 @@ def Gp(
     Returns
     -------
     jnp.ndarray, shape (..., d)
-        mode * c(x) * p / ||p||.
+        $\sigma c(x)p/\lVert p\rVert$.
     """
 
     return mode * c(x) * p / jnp.linalg.norm(p, axis=-1)
@@ -103,8 +106,9 @@ vmap_gp = vmap(Gp, in_axes=(0, 0, 0, None))
 
 
 def check_M0(M0: Complex[Array, "b d d"]) -> None:
-    """
-    Validate initial Hessian `M0`: symmetric and Im(M0) ≻ 0.
+    r"""
+    Validate initial Hessian ``M0``: symmetric with
+    $\operatorname{Im}(M_0)\succ0$.
 
     Parameters
     ----------
@@ -113,7 +117,8 @@ def check_M0(M0: Complex[Array, "b d d"]) -> None:
     Raises
     ------
     ValueError
-        If symmetry fails or Im(M0) is not positive definite (per batch).
+        If symmetry fails or $\operatorname{Im}(M_0)$ is not positive
+        definite (per batch).
     """
     if not jnp.allclose(M0, jnp.transpose(M0, (0, 2, 1))):
         raise ValueError("M0 must be symmetric.")
@@ -126,16 +131,18 @@ def prepare_M0(
     alpha0: Optional[Complex[Array, "b d"]],
     M0: Optional[Complex[Array, "b d d"]],
 ) -> Complex[Array, "b d d"]:
-    """
+    r"""
     Construct an initial Hessian or pass through an explicit one.
 
     Parameters
     ----------
     alpha0 : jnp.ndarray | None, shape (b, d), complex
-        If given, produces diagonal M0 = diag(alpha0). Im(alpha0) should be > 0.
+        If given, produces $M_0=\operatorname{diag}(\alpha_0)$.
+        $\operatorname{Im}(\alpha_0)$ should be positive.
     M0 : jnp.ndarray | None, shape (b, d, d), complex
         Explicit Hessian. Mathematical callers must ensure symmetry and
-        ``Im(M0) ≻ 0``; call :func:`check_M0` in eager validation code.
+        $\operatorname{Im}(M_0)\succ0$; call :func:`check_M0` in eager
+        validation code.
 
     Returns
     -------

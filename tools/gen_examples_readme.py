@@ -2,238 +2,128 @@
 """
 Regenerate examples/README.md as the public example index.
 
-Local/private example directories are intentionally omitted from the public
-gallery.
+The script index is generated from the repository's example tree.
 """
 
 from __future__ import annotations
 
-import re
-import ast
+import argparse
 from pathlib import Path
+
+from example_metadata import ExampleInfo, read_example_info
 
 GITHUB_REPO = "elma16/beamax"
 GITHUB_BRANCH = "main"
 PUBLIC_EXAMPLES_ROOT = Path("examples")
-PRIVATE_EXAMPLE_DIRS = {"private", "thesis", "learned", "benchmarks"}
 
-# Friendly section titles, ordered
 GROUPS = [
-    ("examples/forward", "Forward propagation"),
-    ("examples/reconstruction", "Reconstruction"),
-    ("examples/rays", "Rays and autodiff"),
-    ("examples/single-gaussian-beam", "Single Gaussian beam diagnostics"),
+    ("forward", "Forward propagation"),
+    ("reconstruction", "Reconstruction"),
+    ("rays", "Rays and autodiff"),
+    ("single-gaussian-beam", "Single Gaussian beam diagnostics"),
+    ("diagnostics", "Diagnostics"),
 ]
 
 
-def short_desc(py_path: Path) -> str:
-    """Pull the first paragraph of the module docstring (one-line)."""
-    text = py_path.read_text()
-    m = re.search(r'^"""\s*\n(.*?)\n\s*"""', text, re.DOTALL | re.MULTILINE)
-    if not m:
-        m = re.search(r'^"""(.*?)"""', text, re.DOTALL | re.MULTILINE)
-    if not m:
+def optional_note(info: ExampleInfo) -> str:
+    if info.smoke:
         return ""
-    body = m.group(1).strip()
-    # First line (or first sentence)
-    first = body.split("\n", 1)[0].strip()
-    return first
-
-
-def example_metadata(py_path: Path) -> dict[str, str]:
-    """Read ``Example key: value`` metadata from a module docstring."""
-    try:
-        docstring = ast.get_docstring(ast.parse(py_path.read_text()))
-    except SyntaxError:
-        return {}
-    if not docstring:
-        return {}
-    metadata: dict[str, str] = {}
-    for line in docstring.splitlines():
-        if not line.startswith("Example "):
-            continue
-        key, sep, value = line.partition(":")
-        if sep:
-            metadata[key.removeprefix("Example ").strip().lower()] = value.strip()
-    return metadata
-
-
-def is_default_smoke_example(py_path: Path) -> bool:
-    smoke = example_metadata(py_path).get("smoke", "true")
-    return smoke.lower() not in {"0", "false", "no", "off"}
-
-
-def optional_note(py_path: Path) -> str:
-    metadata = example_metadata(py_path)
-    if is_default_smoke_example(py_path):
-        return ""
-    extras = metadata.get("extras", "").strip()
+    extras = ",".join(info.extras)
     install = f"`beamax[{extras}]`" if extras else "extra dependencies"
-    return f" _(optional; requires {install}; skipped by default smoke)_"
+    return f" _(requires {install}; excluded from default smoke)_"
 
 
-def optional_skip_reason(py_path: Path) -> str:
-    metadata = example_metadata(py_path)
-    extras = metadata.get("extras", "").strip()
-    if extras:
-        return f"requires `beamax[{extras}]`"
-    return "marked optional by `Example smoke: false`"
-
-
-def gallery_sort_key(py_path: Path) -> tuple[bool, str]:
+def gallery_sort_key(entry: tuple[Path, ExampleInfo]) -> tuple[bool, str]:
     """Sort base smoke examples before optional examples, then by filename."""
-    return (not is_default_smoke_example(py_path), py_path.name)
+    path, info = entry
+    return (not info.smoke, path.name)
 
 
 def colab_url(rel_nb: str) -> str:
     return f"https://colab.research.google.com/github/{GITHUB_REPO}/blob/{GITHUB_BRANCH}/{rel_nb}"
 
 
-def gallery_entry(py_path: Path) -> str:
+def gallery_entry(py_path: Path, info: ExampleInfo) -> str:
     nb_path = py_path.with_suffix(".ipynb")
-    desc = short_desc(py_path)
     rel_py = str(py_path.relative_to(Path("examples")))
     rel_nb = str(nb_path) if nb_path.exists() else None
     line = f"- [`{py_path.name}`]({rel_py})"
-    if desc:
-        line += f" — {desc}{optional_note(py_path)}"
+    if info.description:
+        line += f" — {info.description}{optional_note(info)}"
     if rel_nb:
         line += f" [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]({colab_url(rel_nb)})"
     return line
 
 
-def is_public_example(py_path: Path) -> bool:
-    try:
-        rel = py_path.relative_to(PUBLIC_EXAMPLES_ROOT)
-    except ValueError:
-        return False
-    return not (PRIVATE_EXAMPLE_DIRS & set(rel.parts))
-
-
-def main() -> None:
-    root = Path("examples")
-    seen: set[Path] = set()
+def render_readme() -> str:
+    """Render the public example index from example metadata."""
     sections: list[str] = []
+    has_optional_examples = False
 
-    for group_dir, group_title in GROUPS:
-        gd = Path(group_dir)
-        if not gd.is_dir():
-            continue
-        py_files = []
-        for p in sorted(gd.iterdir(), key=lambda path: path.name):
-            if p.suffix != ".py":
-                continue
-            if p in seen:
-                continue
-            # Skip files that are inside a *deeper* group directory.
-            deeper = any(
-                str(p).startswith(deeper_dir + "/")
-                for deeper_dir, _ in GROUPS
-                if Path(deeper_dir) != gd
-                and str(p).startswith(group_dir + "/")
-                and Path(deeper_dir).is_relative_to(gd)
-            )
-            if deeper:
-                continue
-            py_files.append(p)
-            seen.add(p)
-        if not py_files:
+    for group_name, group_title in GROUPS:
+        group_dir = PUBLIC_EXAMPLES_ROOT / group_name
+        entries = [
+            (path, read_example_info(path))
+            for path in group_dir.glob("*.py")
+            if "__pycache__" not in path.parts
+        ]
+        if not entries:
             continue
         section = [f"### {group_title}", ""]
-        for p in sorted(py_files, key=gallery_sort_key):
-            section.append(gallery_entry(p))
-        section.append("")
-        sections.append("\n".join(section))
-
-    # Catch-all for any .py we missed
-    leftovers = sorted(
-        (
-            p
-            for p in root.rglob("*.py")
-            if "__pycache__" not in p.parts and p not in seen and is_public_example(p)
-        ),
-        key=gallery_sort_key,
-    )
-    if leftovers:
-        section = ["### Uncategorised", ""]
-        for p in leftovers:
-            section.append(gallery_entry(p))
+        for path, info in sorted(entries, key=gallery_sort_key):
+            section.append(gallery_entry(path, info))
+            has_optional_examples |= not info.smoke
         section.append("")
         sections.append("\n".join(section))
 
     body = "\n".join(sections)
-    optional_examples = sorted(
-        (
-            p
-            for p in root.rglob("*.py")
-            if "__pycache__" not in p.parts
-            and is_public_example(p)
-            and not is_default_smoke_example(p)
-        ),
-        key=lambda p: str(p),
-    )
-    optional_lines = "\n".join(
-        f"- [`{p.relative_to(root)}`]({p.relative_to(root)}) — {optional_skip_reason(p)}."
-        for p in optional_examples
-    )
     optional_section = (
-        f"""## Smoke Testing
+        """## Smoke testing
 
-The local default smoke command runs the base examples and skips only examples
-marked `Example smoke: false`. These are skipped because they require optional
-runtime extras, not because they are unsupported.
-
-CI installs the k-Wave and matplotlib extras and runs all public examples with:
+Examples marked `Example smoke: false` are skipped by default. To include them:
 
 ```bash
 python tools/run_examples.py --directory examples --include-optional --silent-figures
 ```
 
-Optional examples skipped by default:
-
-{optional_lines}
-
 """
-        if optional_examples
+        if has_optional_examples
         else ""
     )
-    output = f"""# Examples
+    intro = """# Examples
 
-This directory holds the supported beamax example gallery. Base examples are
-small, documented, paired with notebooks, linted, and smoke-tested in CI.
-Every public script has a matching notebook with an **Open in Colab** badge.
-The public examples are small enough to run on a standard CPU Colab runtime.
-
-Each notebook installs beamax from this repository in its first code cell:
-
-```
-%pip install --quiet "beamax[viz-mpl] @ git+https://github.com/{GITHUB_REPO}.git"
-```
-
-When running locally from a checkout, that cell can be skipped.
-
-Local script outputs are written under `plots/<category>/`, mirroring the
-script's directory under `examples/`.
+Run scripts from the repository root. Selected examples include Colab notebooks;
+optional requirements are listed below.
 
 ## Gallery
-
-{body}
-
-{optional_section}
-## Contributing a new example
-
-1. Add the script under the appropriate `examples/<category>/` directory with
-   a 1-2 sentence module docstring.
-   Use `Example extras: ...` and `Example smoke: false` for optional-runtime
-   examples.
-2. Run `python tools/finalize_examples.py` (or hand-edit a notebook) so a
-   paired `.ipynb` exists with the Open-in-Colab badge + install cell pattern.
-3. Add a bullet to the section above (or rerun the regeneration script).
-4. Keep public examples self-contained and fast. Keep research/profiling/data-
-   dependent material outside the tracked public gallery.
 """
-    Path("examples/README.md").write_text(output)
-    print("wrote examples/README.md")
+    output_parts = [intro, body]
+    if optional_section:
+        output_parts.append(optional_section)
+    return "\n\n".join(part.strip() for part in output_parts) + "\n"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="fail if examples/README.md is stale without changing it",
+    )
+    args = parser.parse_args()
+
+    path = Path("examples/README.md")
+    output = render_readme()
+    if args.check:
+        if not path.exists() or path.read_text() != output:
+            raise SystemExit(
+                "examples/README.md is stale; run tools/gen_examples_readme.py"
+            )
+        print("examples/README.md is up to date")
+        return
+
+    path.write_text(output)
+    print(f"wrote {path}")
 
 
 if __name__ == "__main__":

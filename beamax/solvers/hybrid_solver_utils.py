@@ -1,11 +1,8 @@
-import logging
-import math
 import jax
 from jax import vmap
 import jax.numpy as jnp
 from jax.lax import fori_loop
 from typing import Tuple, Optional
-from scipy.ndimage import zoom
 from einops import rearrange
 import warnings
 
@@ -13,8 +10,6 @@ from beamax import utils
 from beamax.decomposition import DyadicDecomposition
 from beamax.transforms import single_filter_idx, MSWPT
 from beamax.geometry import Domain
-
-logger = logging.getLogger(__name__)
 
 
 def gh_lowpass_filter(
@@ -25,8 +20,8 @@ def gh_lowpass_filter(
     windowing: str = "rectangular",
     gh: Optional[jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Split into LF/HF via `g,h` frame filters in Fourier domain.
+    r"""
+    Split into LF/HF via the $g$ and $h$ frame filters in Fourier domain.
 
     Parameters
     ----------
@@ -47,13 +42,11 @@ def gh_lowpass_filter(
     (p0_HF_ft, p0_LF_ft) : Tuple[jnp.ndarray, jnp.ndarray]
         Fourier-domain HF and LF components.
     """
-    # Work in Fourier domain
     p0_ft = utils.convert_space(p0, input_type, "fourier")
 
     if gh is None:
         gh = compute_gh_filter(wpt, boxes_include, windowing)
 
-    # Low- and high-frequency parts in Fourier domain
     p0_LF_ft = p0_ft * gh
     p0_HF_ft = p0_ft - p0_LF_ft
 
@@ -65,8 +58,13 @@ def compute_gh_filter(
     boxes_include: jnp.ndarray,
     windowing: str = "rectangular",
 ) -> jnp.ndarray:
-    """
-    Compute the LF-projection filter ``gh = (Σ_{b∈LF} g_b^2) / Σ_b g_b^2``.
+    r"""
+    Compute the LF-projection filter ``gh``:
+
+    $$
+    \mathrm{gh}
+    =\frac{\sum_{b\in\mathrm{LF}}g_b^2}{\sum_b g_b^2}.
+    $$
 
     This is the data-independent piece of :func:`gh_lowpass_filter` and is
     therefore cacheable across calls that share ``(wpt, boxes_include,
@@ -168,7 +166,7 @@ def get_indices_between_two_opposing_corners(
 def get_indices_with_norm_less_than(
     centers: jnp.ndarray, norm: float, inclusive: bool = True
 ) -> jnp.ndarray:
-    """
+    r"""
     Get the indices of the boxes with a norm less than (or equal to) the given value.
 
     Parameters
@@ -176,7 +174,7 @@ def get_indices_with_norm_less_than(
     centers : jnp.ndarray, shape (num_centers, ndim)
         Box centre coordinates.
     norm : float
-        L-infinity norm threshold.
+        $\ell^\infty$ norm threshold.
     inclusive : bool, default=True
         If ``True``, use ``<=``; otherwise use ``<``.
 
@@ -226,29 +224,22 @@ def find_bounding_corner_indices(
         raise ValueError("Cannot find corners from empty index set")
 
     if idx_box.size == 1:
-        # Single point - return same index for both corners
-        # (caller should handle this edge case)
         return int(idx_box[0]), int(idx_box[0])
 
     selected_centers = centers[idx_box]
 
-    # Compute component-wise min and max of selected centers
     comp_min = jnp.min(selected_centers, axis=0)
     comp_max = jnp.max(selected_centers, axis=0)
 
-    # Find the selected center closest to comp_min (L2 distance)
     dist_to_min = jnp.linalg.norm(selected_centers - comp_min, axis=1)
     corner1_local = jnp.argmin(dist_to_min)
     corner1_idx = idx_box[corner1_local]
 
-    # Find the selected center closest to comp_max (L2 distance)
     dist_to_max = jnp.linalg.norm(selected_centers - comp_max, axis=1)
     corner2_local = jnp.argmin(dist_to_max)
     corner2_idx = idx_box[corner2_local]
 
-    # If both corners ended up the same (e.g., 1D case), pick the furthest point
     if corner1_idx == corner2_idx:
-        # Find the point furthest from corner1
         dist_from_corner1 = jnp.linalg.norm(
             selected_centers - centers[corner1_idx], axis=1
         )
@@ -256,25 +247,6 @@ def find_bounding_corner_indices(
         corner2_idx = idx_box[corner2_local]
 
     return int(corner1_idx), int(corner2_idx)
-
-
-def are_opposing(corner1: int, corner2: int) -> bool:
-    """
-    Check two corners are opposing.
-
-    Parameters
-    ----------
-    corner1 : int
-        First corner index.
-    corner2 : int
-        Second corner index.
-
-    Returns
-    -------
-    bool
-        Whether the corner indices differ.
-    """
-    return corner1 != corner2
 
 
 def get_bounds(
@@ -328,7 +300,7 @@ def get_bounds(
 
     global_bounds_min = jnp.min(bounds_min, axis=0)
     global_bounds_max = jnp.max(bounds_max, axis=0)
-    bounds_per_dim = jnp.stack((global_bounds_min, global_bounds_max + 1), axis=-1)  # ?
+    bounds_per_dim = jnp.stack((global_bounds_min, global_bounds_max + 1), axis=-1)
 
     nn = jnp.array(domain.N)
     nn = rearrange(nn, "d -> d 1")
@@ -417,10 +389,7 @@ def downsample_domain(domain: Domain, p0_LF_downsampled: jnp.ndarray) -> Domain:
     """
     N_resized = p0_LF_downsampled.shape
     resize_factor = tuple([domain.N[i] / N_resized[i] for i in range(len(N_resized))])
-    #    dx_resized = resize_factor * domain.dx
     dx_resized = tuple([resize_factor[i] * domain.dx[i] for i in range(len(N_resized))])
-
-    # assert jnp.allclose(dx_resized * (N_resized), domain.dx * (domain.N))
 
     def resize_field(field):
         if field is None or callable(field):
@@ -459,7 +428,7 @@ def split_frequency_components(
     use_pow2: bool = False,
     gh: Optional[jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Domain]:
-    """
+    r"""
     Split input into high- and low-frequency components.
 
     Parameters
@@ -504,8 +473,8 @@ def split_frequency_components(
     -----
     If the low-frequency index set is empty (no bins fall inside the requested
     box / cutoff), we:
-      - return p0_LF = 0 (in `output_type`),
-      - return p0_HF = p0 (in `output_type`),
+      - return $p_{0,\mathrm{LF}}=0$ (in `output_type`),
+      - return $p_{0,\mathrm{HF}}=p_0$ (in `output_type`),
       - leave sensors_mask and domain unchanged,
       - skip downsampling entirely.
 
@@ -513,51 +482,40 @@ def split_frequency_components(
     """
     centers = wpt.dyadic_decomp.centres_ndim
 
-    # Determine the low-frequency index set (idx_box) and box_corners
     if cutoff_freq is not None and box_corners is None:
-        # Use L-infinity norm with inclusive boundary to match box_corners behavior
         idx_box = get_indices_with_norm_less_than(centers, cutoff_freq, inclusive=True)
 
-        # Find actual corner indices from the selected set
         if idx_box.size > 0:
             corner1_idx, corner2_idx = find_bounding_corner_indices(centers, idx_box)
             box_corners = jnp.array([corner1_idx, corner2_idx])
 
     elif box_corners is not None and cutoff_freq is None:
-        # Use provided box_corners directly
         idx_box = get_indices_between_two_opposing_corners(
             centers, int(box_corners[0]), int(box_corners[1])
         )
     else:
         raise ValueError("Exactly one of cutoff_freq or box_corners must be provided.")
 
-    # If idx_box is empty, short-circuit safely.
     if idx_box.size == 0:
         warnings.warn(
             "split_frequency_components: low-frequency selection is empty; "
             "returning p0_HF = p0 and p0_LF = 0 with unchanged domain.",
             RuntimeWarning,
         )
-        # Convert p0 to the requested output space.
         p0_out = utils.convert_space(p0, input_type, output_type)
-        # Create a zero LF of the same shape and dtype.
         p0_LF = jnp.zeros_like(p0_out)
         p0_HF = p0_out
-        # No downsampling possible/needed.
         return p0_HF, p0_LF, sensors_mask, domain
 
-    # Normal path: compute LF/HF in Fourier domain via g/h filters.
     p0_HF_ft, p0_LF_ft = gh_lowpass_filter(
         p0, input_type, wpt, idx_box, windowing, gh=gh
     )
 
-    # If desired, downsample the LF path and align sensors.
     sensors_mask_ds = sensors_mask
     dom_downsample = domain
 
     if downsample:
         assert box_corners is not None
-        # Compute target bounds in spatial grid for LF.
         bounds = get_bounds(
             wpt.dyadic_decomp,
             domain,
@@ -565,140 +523,14 @@ def split_frequency_components(
             int(box_corners[1]),
         )
 
-        # Downsample LF Fourier data (implementation defines axis/layout).
         p0_LF_ft = downsample_p0(p0_LF_ft, bounds, use_pow2)
 
-        # Interpolate sensors mask to the new spatial shape that corresponds to p0_LF_ft.
         sensors_mask_ds = utils.interpolate_nearest(sensors_mask_ds, p0_LF_ft.shape)
         sensors_mask_ds = sensors_mask_ds.astype(jnp.float32)
 
-        # Build a consistent downsampled domain for LF.
         dom_downsample = downsample_domain(domain, p0_LF_ft)
 
-    # Convert both components to the requested output space.
     p0_HF = utils.convert_space(p0_HF_ft, "fourier", output_type)
     p0_LF = utils.convert_space(p0_LF_ft, "fourier", output_type)
 
     return p0_HF, p0_LF, sensors_mask_ds, dom_downsample
-
-
-def oversample_window(
-    array: jnp.ndarray, dt_oversample: int = 0, axis: int = 0, window_type: str = "cos2"
-) -> jnp.ndarray:
-    """
-    Apply a windowing function to the array and oversample it in the temporal domain.
-
-    Parameters
-    ----------
-    array : jnp.ndarray
-        Input array to be windowed
-    dt_oversample : int, default=0
-        Number of points to oversample
-    axis : int, default=0
-        Axis along which to apply the window
-    window_type : str, default='cos2'
-        Type of window to apply. Options: 'cos2', 'hann', 'hamming', 'blackman'
-
-    Returns
-    -------
-    jnp.ndarray
-        Windowed array
-    """
-    if dt_oversample == 0:
-        return array
-
-    if window_type == "cos2":
-        window = jnp.cos(jnp.linspace(0, jnp.pi / 2, dt_oversample)) ** 2
-    elif window_type == "hann":
-        window = jnp.hanning(2 * dt_oversample)[-dt_oversample:]
-    elif window_type == "hamming":
-        window = jnp.hamming(2 * dt_oversample)[-dt_oversample:]
-    elif window_type == "blackman":
-        window = jnp.blackman(2 * dt_oversample)[-dt_oversample:]
-    else:
-        raise ValueError(f"Unsupported window type: {window_type}")
-
-    shape = [1] * array.ndim
-    shape[axis] = dt_oversample
-    window = window.reshape(shape)
-
-    slice_obj = [slice(None)] * array.ndim
-    slice_obj[axis] = slice(-dt_oversample, None)
-
-    # JAX-compatible: use .at[] API instead of in-place assignment
-    windowed_section = array[tuple(slice_obj)] * window
-    result = array.at[tuple(slice_obj)].set(windowed_section)
-
-    return result
-
-
-def interpolate_LF_soln(
-    lf_downsampled: jnp.ndarray,
-    target_size: Tuple,
-    interpolation_method: str = "spline",
-    interp_window: str = "cos2",
-    dt_oversample: int = 0,
-    spline_order: int = 3,
-) -> jnp.ndarray:
-    """
-    Interpolates a downsampled solution from a LF wave solver, to match the desired size.
-
-    Parameters
-    ----------
-    lf_downsampled : jnp.ndarray
-        Downsampled low-frequency solver output.
-    target_size : Tuple[int, ...]
-        Desired output shape.
-    interpolation_method : {"spline", "fourier"}, default="spline"
-        Interpolation method. The Fourier branch retains the historical
-        two-dimensional planar-sensor normalization; new code should prefer
-        :class:`beamax.solvers.HybridSolver`, which has the domain context
-        required for dimension-general normalization.
-    interp_window : {"cos2", "hann", "hamming", "blackman"}, default="cos2"
-        Temporal taper to apply before interpolation.
-    dt_oversample : int, default=0
-        Number of oversampled time steps in the taper region.
-    spline_order : int, default=3
-        Spline order for ``scipy.ndimage.zoom``.
-
-    Returns
-    -------
-    jnp.ndarray
-        Interpolated low-frequency solution.
-    """
-    lf_windowed = oversample_window(
-        lf_downsampled, dt_oversample, axis=0, window_type=interp_window
-    )
-
-    if interpolation_method == "spline":
-        input_size = lf_downsampled.shape
-        new_shape = tuple(
-            [target_size[i] / input_size[i] for i in range(len(target_size))]
-        )
-        # Spline `zoom` is sample-value preserving by construction (it
-        # evaluates the spline interpolant at the new grid points), so no
-        # post-correction is needed; an energy-renormalisation here would
-        # actively un-preserve sample values.
-        lf_upsampled = zoom(lf_windowed, new_shape, order=spline_order)
-
-    elif interpolation_method == "fourier":
-        lf_upsampled = utils.interpolate_fourier(
-            lf_windowed, target_size, "spatial", "spatial"
-        )
-        # Historical convention for a 2-D volume cropped equally in both
-        # axes and observed on a 1-D planar sensor: the initial unitary crop
-        # inflates amplitudes by the spatial ratio, while the bare sensor-grid
-        # resize cancels only its square root. This second square-root factor
-        # completes the cancellation. The helper lacks enough domain metadata
-        # to generalise this rule to arbitrary dimensions/geometries.
-        scale = math.sqrt(
-            math.prod(
-                input_len / output_len
-                for input_len, output_len in zip(lf_windowed.shape, target_size)
-            )
-        )
-        lf_upsampled = lf_upsampled * scale
-    else:
-        raise ValueError(f"Interpolation method {interpolation_method} not supported.")
-
-    return jnp.asarray(lf_upsampled)

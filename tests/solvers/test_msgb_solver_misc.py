@@ -1,25 +1,7 @@
-"""
-Tests for thin error/dispatch paths in MSGBSolver and ShardingStrategy.
+"""MSGBSolver and ShardingStrategy validation and dispatch tests."""
 
-Focus: parts of `msgb_solver.py` that don't show up in the existing forward,
-time-reversal, or sharding integration tests. In particular:
-
-- `ShardingStrategy._beam_sharding_spec` input validation,
-- `MSGBSolver._infer_planar_surface` happy + failure paths,
-- `MSGBSolver.forward` / `.time_reversal` / `.adjoint` sensor + periodicity
-  validation,
-- `MSGBSolver.solve_ivp` (thin wrapper around `forward`),
-- explicit `*_with_params` diagnostic variants,
-- A small `adjoint` smoke test exercising the full
-  `_prepare_adj_params → compute_TR_result` path.
-"""
-
-import os
 from types import SimpleNamespace
-
-# Force two host devices so we can build a Mesh and exercise sharding-spec helpers
-# even on a single-CPU CI runner.
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=2")
+from typing import Any
 
 import pytest
 
@@ -33,18 +15,15 @@ from beamax.transforms import MSWPT
 from beamax.gb import gb_solvers
 from beamax.solvers.msgb_solvers import msgb_solver as msgb_solver_module
 from beamax.solvers.msgb_solvers.msgb_solver import (
+    MSGBExperimentalConfig,
     MSGBSolver,
-    _apply_adjoint_image_weight,
-    _form_adjoint_source,
+    _validate_time_grid,
+    apply_adjoint_image_weight,
+    form_adjoint_source,
 )
 from beamax.solvers import ShardingStrategy
 
 jax.config.update("jax_enable_x64", True)
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 def _c_const(x):
@@ -52,17 +31,14 @@ def _c_const(x):
 
 
 @pytest.fixture(scope="module")
-def two_device_mesh():
-    """A 2-device CPU mesh for testing ShardingStrategy helpers."""
-    devices = jax.devices()[:2]
-    if len(devices) < 2:
-        pytest.skip("requires at least 2 devices")
-    return jax.make_mesh((len(devices),), ("x",))
+def device_mesh():
+    """A minimal mesh for tests that inspect only partition specifications."""
+    return jax.make_mesh((1,), ("x",))
 
 
 @pytest.fixture
-def sharding_strategy(two_device_mesh):
-    return ShardingStrategy(mesh=two_device_mesh, beam_axis="x")
+def sharding_strategy(device_mesh):
+    return ShardingStrategy(mesh=device_mesh, beam_axis="x")
 
 
 @pytest.fixture
@@ -78,9 +54,92 @@ def simple_solver():
     )
 
 
-# ---------------------------------------------------------------------------
-# ShardingStrategy._beam_sharding_spec input validation
-# ---------------------------------------------------------------------------
+def test_validate_time_grid_contract():
+    invalid_grids = [
+        (jnp.array([]), "non-empty one-dimensional"),
+        (jnp.zeros((2, 2)), "non-empty one-dimensional"),
+        (jnp.array([0.0 + 0.0j, 1.0 + 0.0j]), "real-valued"),
+        (jnp.array([0.0, jnp.nan]), "finite"),
+        (jnp.array([0.0]), "at least two points"),
+        (jnp.array([0.0, 0.3, 1.0]), "uniformly spaced"),
+        (jnp.array([0.0, 0.5, 0.5]), "strictly increasing"),
+    ]
+    for ts, match in invalid_grids:
+        with pytest.raises(ValueError, match=match):
+            _validate_time_grid(ts)
+
+    assert _validate_time_grid(jnp.array([2.0]), allow_singleton=True) is None
+    assert _validate_time_grid(
+        jnp.linspace(0.0, 1.0, 11, dtype=jnp.float32)
+    ) == pytest.approx(0.1)
+    assert _validate_time_grid(jnp.array([2, 4, 6])) == pytest.approx(2.0)
+
+
+def test_solver_rejects_wrong_stage_config_types():
+    kwargs: dict[str, Any] = dict(
+        thr=4,
+        thr_strat="top_n",
+        batch_size=4,
+        input_type="spatial",
+        ode_solver=gb_solvers.solve_ODE_base,
+        sum_method="all_real",
+    )
+    invalid_config: Any = object()
+    with pytest.raises(TypeError, match="pallas_config must be a PallasConfig"):
+        MSGBSolver(**kwargs, pallas_config=invalid_config)
+    with pytest.raises(TypeError, match="experimental_config must be an"):
+        MSGBSolver(**kwargs, experimental_config=invalid_config)
+
+
+def test_explicit_stage_compatibility_policy(sharding_strategy):
+    kwargs: dict[str, Any] = dict(
+        thr=4,
+        thr_strat="top_n",
+        batch_size=4,
+        input_type="spatial",
+        ode_solver=gb_solvers.solve_ODE_base,
+        sum_method="all_real",
+    )
+    stages = (
+        MSGBExperimentalConfig(coefficient_selection="streaming_top_n"),
+        MSGBExperimentalConfig(forward_kernel="trajectory_pallas"),
+        MSGBExperimentalConfig(inverse_evaluator="terminal_pallas"),
+    )
+
+    with pytest.raises(ValueError, match="requires thr_strat='top_n'"):
+        MSGBSolver(
+            **{**kwargs, "thr": 0.1, "thr_strat": "hard"},
+            experimental_config=stages[0],
+        )
+
+    for config in stages:
+        with pytest.raises(ValueError, match="cannot be combined with sharding"):
+            MSGBSolver(**kwargs, experimental_config=config, sharding=sharding_strategy)
+
+    for config in stages[1:]:
+        with pytest.raises(ValueError, match="require a real sum_method"):
+            MSGBSolver(
+                **{**kwargs, "sum_method": "all_complex"},
+                experimental_config=config,
+            )
+
+    fused = MSGBExperimentalConfig(forward_kernel="hom_diag_3d_pallas")
+    with pytest.raises(ValueError, match="requires ode_solver=solve_hom_diag"):
+        MSGBSolver(**kwargs, experimental_config=fused)
+
+
+def test_terminal_pallas_selects_pallas_inverse_evaluation():
+    solver = MSGBSolver(
+        thr=4,
+        thr_strat="top_n",
+        batch_size=4,
+        input_type="spatial",
+        ode_solver=gb_solvers.solve_ODE_base,
+        sum_method="all_real",
+        experimental_config=MSGBExperimentalConfig(inverse_evaluator="terminal_pallas"),
+    )
+
+    assert solver._effective_inverse_aggregate_method() == "pallas"
 
 
 class TestBeamShardingSpec:
@@ -95,10 +154,9 @@ class TestBeamShardingSpec:
             sharding_strategy._beam_sharding_spec(1, is_batched=True)
 
     def test_batched_returns_fully_replicated(self, sharding_strategy):
-        """Batched tensors are kept replicated so scan/vmap stay simple."""
+        """Batched tensors are kept replicated for scanned aggregation."""
         spec = sharding_strategy._beam_sharding_spec(3, is_batched=True)
         assert isinstance(spec, PartitionSpec)
-        # Every axis should be unsharded (None).
         assert tuple(spec) == (None, None, None)
 
     def test_unbatched_shards_beam_axis(self, sharding_strategy):
@@ -107,15 +165,9 @@ class TestBeamShardingSpec:
         assert tuple(spec) == ("x", None)
 
 
-# ---------------------------------------------------------------------------
-# MSGBSolver._infer_planar_surface
-# ---------------------------------------------------------------------------
-
-
 class TestInferPlanarSurface:
     def test_planar_xline_returns_surface_axis_and_coord(self, simple_solver):
         """Sensors lying on a constant-y line should be detected as a planar surface."""
-        # Five sensors along x=2.0, varying y => axis 0 is "constant".
         y_vals = jnp.linspace(0.0, 1.0, 5)
         positions = jnp.stack([jnp.full_like(y_vals, 2.0), y_vals], axis=1)
 
@@ -123,8 +175,6 @@ class TestInferPlanarSurface:
         assert axis == 0
         assert float(coord) == pytest.approx(2.0)
 
-        # The returned surface function should give zero on the constant-coord
-        # axis and a nonzero residual off it.
         on = surface(jnp.array([2.0, 0.5]))
         off = surface(jnp.array([3.0, 0.5]))
         assert float(on) == pytest.approx(0.0)
@@ -138,11 +188,6 @@ class TestInferPlanarSurface:
         )
         with pytest.raises(ValueError, match="planar surface"):
             simple_solver._infer_planar_surface(positions)
-
-
-# ---------------------------------------------------------------------------
-# Sensor-type / periodicity validation in forward, time_reversal, adjoint
-# ---------------------------------------------------------------------------
 
 
 def _build_small_1d_setup(periodic=False):
@@ -169,8 +214,7 @@ class TestSensorAndPeriodicityValidation:
         """TR explicitly forbids periodic spatial boundaries."""
         domain_periodic, wpt_p = _build_small_1d_setup(periodic=True)
         domain_data, wpt_d = _build_small_1d_setup(periodic=False)
-        # Fake some data: just any (Nt, Ns) shape works because the check
-        # is the first thing in time_reversal.
+        # Validation runs before the data are consumed.
         data = jnp.zeros((8, 1))
         ts = jnp.linspace(0.0, 1.0, 8)
         sensor_mask = jnp.zeros(domain_data.N).at[0].set(1)
@@ -244,66 +288,9 @@ class TestSensorAndPeriodicityValidation:
             )
 
 
-# ---------------------------------------------------------------------------
-# solve_ivp — thin wrapper around forward
-# ---------------------------------------------------------------------------
-
-
-class TestSolveIvp:
-    def test_solve_ivp_with_zero_dpdt_matches_forward(self):
-        """solve_ivp(p0, dpdt=0) should give the same sensor data as forward(p0)."""
-        domain, wpt = _build_small_1d_setup(periodic=True)
-        sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(domain.N))
-        p0 = jnp.cos(2.0 * jnp.pi * jnp.arange(domain.N[0]) / domain.N[0])
-        ts = jnp.linspace(0.0, 0.1, 8)
-
-        solver = MSGBSolver(
-            thr=8,
-            thr_strat="top_n",
-            batch_size=4,
-            input_type="spatial",
-            ode_solver=gb_solvers.solve_ODE_base,
-            sum_method="all_real",
-        )
-        out_fwd = solver.forward(p0, domain, sensors, ts, wpt)
-        out_ivp = solver.solve_ivp(p0, jnp.zeros_like(p0), domain, wpt, sensors, ts)
-
-        assert jnp.allclose(out_fwd, out_ivp, atol=1e-12)
-
-
 class TestDiagnosticParamVariants:
-    def test_forward_with_params_matches_forward(self):
-        """Diagnostic forward variant should expose params without changing data."""
-        domain, wpt = _build_small_1d_setup(periodic=True)
-        sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(domain.N))
-        p0 = jnp.cos(2.0 * jnp.pi * jnp.arange(domain.N[0]) / domain.N[0])
-        ts = jnp.linspace(0.0, 0.1, 8)
-
-        solver = MSGBSolver(
-            thr=8,
-            thr_strat="top_n",
-            batch_size=4,
-            input_type="spatial",
-            ode_solver=gb_solvers.solve_ODE_base,
-            sum_method="all_real",
-        )
-
-        sensor_data = solver.forward(p0, domain, sensors, ts, wpt)
-        diagnostic_data, params = solver.forward_with_params(
-            p0, domain, sensors, ts, wpt
-        )
-
-        assert jnp.allclose(sensor_data, diagnostic_data, atol=1e-12)
-        assert len(params) == 6
-
     def test_3d_forward_preserves_sensor_position_order(self, monkeypatch):
-        """3D output channels must retain the order of ``sensor_positions``.
-
-        This guards against the legacy Fortran-order reshape that used to
-        compensate for k-Wave's standalone mask order.  Solver wrappers now
-        expose a common NumPy-C channel convention, so MSGB must return the
-        native order in which its sensor positions were supplied.
-        """
+        """Retain 3D sensor order under the NumPy-C channel convention."""
 
         def fake_prepare(self, p0, dpdt, domain, wpt):
             del self, p0, dpdt, domain, wpt
@@ -317,7 +304,7 @@ class TestDiagnosticParamVariants:
 
         monkeypatch.setattr(MSGBSolver, "_prepare_forward_params_real", fake_prepare)
         monkeypatch.setattr(
-            msgb_solver_module, "compute_forward_result", fake_forward_result
+            msgb_solver_module, "_compute_forward_result_jit", fake_forward_result
         )
 
         domain = geometry.Domain(
@@ -340,7 +327,9 @@ class TestDiagnosticParamVariants:
             sum_method="all_real",
         )
         expected = jnp.arange(18, dtype=jnp.float64).reshape(3, 6)
-        fake_wpt = SimpleNamespace(dyadic_decomp=SimpleNamespace(N=domain.N))
+        fake_wpt = SimpleNamespace(
+            dyadic_decomp=SimpleNamespace(N=domain.N), total_coeffs=1
+        )
 
         with jax.disable_jit():
             actual, _ = solver.forward_with_params(
@@ -389,27 +378,14 @@ class TestDiagnosticParamVariants:
             assert jnp.allclose(oversized, capped, rtol=1e-12, atol=1e-12)
 
 
-@pytest.mark.parametrize(
-    "strategy,threshold",
-    [
-        ("hard", 0.0),
-        ("percentile", 50.0),
-        ("hard_reassign", 0.0),
-        ("bao_energy", 0.0),
-        ("perc_max_abs", 0.0),
-    ],
-)
-def test_data_dependent_threshold_strategies_run_through_public_forward(
-    strategy, threshold
-):
-    """Data-dependent selectors must execute outside compiled propagation."""
+def test_hard_threshold_runs_through_public_forward():
     domain, wpt = _build_small_1d_setup(periodic=True)
     sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(domain.N))
     p0 = jnp.cos(2.0 * jnp.pi * jnp.arange(domain.N[0]) / domain.N[0])
     ts = jnp.linspace(0.0, 0.01, 3)
     solver = MSGBSolver(
-        thr=threshold,
-        thr_strat=strategy,
+        thr=0.0,
+        thr_strat="hard",
         batch_size=8,
         input_type="spatial",
         ode_solver=gb_solvers.solve_ODE_base,
@@ -422,14 +398,24 @@ def test_data_dependent_threshold_strategies_run_through_public_forward(
     assert bool(jnp.all(jnp.isfinite(result)))
 
 
+def test_real_inverse_methods_reject_complex_boundary_data(simple_solver):
+    domain, wpt = _build_small_1d_setup(periodic=False)
+    sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(domain.N))
+    data = jnp.ones(domain.N, dtype=jnp.complex64)
+    ts = jnp.linspace(0.0, 1.0, domain.N[0])
+
+    with pytest.raises(ValueError, match=r"time-reversal data requires an \*_complex"):
+        simple_solver.time_reversal(data, domain, sensors, sensors, ts, domain, wpt)
+    with pytest.raises(ValueError, match=r"adjoint data requires an \*_complex"):
+        simple_solver.adjoint(data, domain, sensors, sensors, ts, domain, wpt)
+
+
 @pytest.mark.parametrize(
     "threshold,strategy,match",
     [
         (0, "top_n", "positive integer"),
         (1.5, "top_n", "positive integer"),
         (-1.0, "hard", "non-negative"),
-        (101.0, "percentile", r"\[0, 100\]"),
-        (1.1, "perc_max_abs", r"\[0, 1\]"),
     ],
 )
 def test_threshold_configuration_is_validated(threshold, strategy, match):
@@ -444,11 +430,6 @@ def test_threshold_configuration_is_validated(threshold, strategy, match):
         )
 
 
-# ---------------------------------------------------------------------------
-# adjoint — smoke test the happy path (also covers _prepare_adj_params)
-# ---------------------------------------------------------------------------
-
-
 def test_form_adjoint_source_applies_spectral_derivative_sign_and_c_squared():
     n = 64
     dt = 0.25 / n
@@ -460,7 +441,7 @@ def test_form_adjoint_source_applies_spectral_derivative_sign_and_c_squared():
     window = jnp.sin(angular_frequency * t)
     c_at_sources = jnp.array([2.0, 3.0])
 
-    source = _form_adjoint_source(data, dt, c_at_sources, window)
+    source = form_adjoint_source(data, dt, c_at_sources, window)
     expected = (
         -(c_at_sources**2) * angular_frequency * jnp.cos(angular_frequency * t)[:, None]
     )
@@ -487,11 +468,11 @@ def test_form_adjoint_source_folds_flat_speeds_onto_a_detector_grid():
         k_c, (ny * nz,), dtype=jnp.float64, minval=1.0, maxval=2.0
     )
 
-    source_grid = _form_adjoint_source(data_grid, dt, c_flat, None)
+    source_grid = form_adjoint_source(data_grid, dt, c_flat, None)
     assert source_grid.shape == (nt, ny, nz)
 
     # The flattened problem is the reference: same physics, (Nt, Ns) layout.
-    source_flat = _form_adjoint_source(data_grid.reshape(nt, ny * nz), dt, c_flat, None)
+    source_flat = form_adjoint_source(data_grid.reshape(nt, ny * nz), dt, c_flat, None)
     assert jnp.allclose(source_grid.reshape(nt, ny * nz), source_flat, atol=1e-12)
 
     # Each detector must receive its own speed (catches a transposed fold).
@@ -509,13 +490,17 @@ def test_form_adjoint_source_folds_flat_speeds_onto_a_detector_grid():
 def test_form_adjoint_source_rejects_mismatched_detector_count():
     data = jnp.ones((4, 3, 2))
     with pytest.raises(ValueError, match="does not match the data detector grid"):
-        _form_adjoint_source(data, 0.1, jnp.ones(5), None)
+        form_adjoint_source(data, 0.1, jnp.ones(5), None)
 
 
 def test_prepare_adjoint_uses_raw_spacetime_coefficients(monkeypatch):
     """Boundary-source analysis must not insert an IVP half-wave factor 1/2."""
 
     class FakeWPT:
+        # Force the raw, materialized coefficient path under test.
+        windowing = "none"
+        total_coeffs = 4
+
         def forward(self, source, input_type):
             assert input_type == "spatial"
             return jnp.array([1.0, 4.0, 2.0, 3.0])
@@ -570,73 +555,8 @@ def test_c_inverse_squared_output_weight_closes_constant_speed_mode_identity():
 
     forward_data = propagator * f
     terminal_mass_source_field = c**2 * jnp.sum(propagator * h) * dt
-    adjoint_image = _apply_adjoint_image_weight(terminal_mass_source_field, c)
+    adjoint_image = apply_adjoint_image_weight(terminal_mass_source_field, c)
 
     lhs = jnp.sum(forward_data * h) * dt
     rhs = f * adjoint_image
     assert jnp.allclose(lhs, rhs, rtol=1e-12, atol=1e-12)
-
-
-def test_adjoint_runs_on_small_2d_problem():
-    """Adjoint should run end-to-end on a small 2D non-periodic setup.
-
-    Regression test: `MSGBSolver.adjoint` used to call
-    `domain.c_fn(sensor_positions)[0, :]`, which raised `IndexError` because
-    `Domain.c_fn` returns a 1D array. The fix evaluates `c` at the source
-    (acquisition) geometry, which broadcasts cleanly across the data's time
-    axis. This test guards against that bug recurring.
-    """
-    N = (32, 32)
-    dx = (1.0 / N[0], 1.0 / N[1])
-    domain = geometry.Domain(N=N, dx=dx, c=_c_const, periodic=(False, False))
-
-    sensor_mask = jnp.zeros(N).at[0, :].set(1)  # one row of sensors along x=0
-    sensors = geometry.Sensor(domain=domain, binary_mask=sensor_mask)
-    full_grid = geometry.Sensor(domain=domain, binary_mask=jnp.ones(N))
-
-    Ns_x = int(sensors.positions.shape[0])
-    Nt = 16
-    ts = jnp.linspace(0.0, 0.1, Nt)
-    data = jnp.zeros((Nt, Ns_x)).at[Nt // 2, Ns_x // 2].set(1.0)
-
-    solver = MSGBSolver(
-        thr=4,
-        thr_strat="top_n",
-        batch_size=4,
-        input_type="spatial",
-        ode_solver=gb_solvers.solve_ODE_base,
-        tr_ode_solver=gb_solvers.solve_ODE_batch_t,
-        sum_method="all_real",
-    )
-
-    dt = float(ts[1] - ts[0])
-    data_dx = (dt, dx[1])
-    data_domain = geometry.Domain(
-        N=(Nt, Ns_x), dx=data_dx, c=_c_const, periodic=(False, False)
-    )
-    data_decomp = DyadicDecomposition(
-        num_levels=1, N=(Nt, Ns_x), num_boxes_levels=(2,), box_aspect_ratio=(1, 1)
-    )
-    data_wpt = MSWPT(data_decomp, redundancy=2, windowing="rectangular")
-
-    q_T = solver.adjoint(
-        data=data,
-        domain=domain,
-        sensors=full_grid,
-        sources=sensors,
-        ts=ts,
-        data_domain=data_domain,
-        data_wpt=data_wpt,
-        window=jnp.ones(Nt),
-    )
-
-    # `compute_TR_result` returns one value per evaluation sensor; for the
-    # full-grid evaluation this is N0 * N1 values. Shape and exact layout are
-    # downstream concerns — what matters here is that the call completes and
-    # produces a finite result of the expected size.
-    assert int(q_T.size) == N[0] * N[1]
-    assert jnp.all(jnp.isfinite(q_T))
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

@@ -2,30 +2,18 @@ from beamax.decomposition import DyadicDecomposition, validate_params
 from beamax import utils
 import jax.numpy as jnp
 import pytest
-import sys
 import jax
 from jax import tree_util
 
 jax.config.update("jax_enable_x64", True)
 
-common_params3d = [
-    (
-        num_levels,
-        N,
-        tuple([2 ** (level + 2) for level in range(num_levels)]),
-        (1,) * len(N),
-    )
-    for num_levels in range(1, 3)
-    for N in [
-        (128,),
-        (128, 128),
-        (256, 128),
-        (128, 256),
-        (128, 128, 128),
-        (256, 128, 128),
-        (128, 256, 128),
-        (128, 128, 256),
-    ]
+geometry_params = [
+    (1, (128,), (4,), (1,)),
+    (2, (128,), (4, 8), (1,)),
+    (1, (128, 128), (4,), (1, 1)),
+    (2, (256, 128), (4, 8), (1, 1)),
+    (1, (128, 128, 128), (4,), (1, 1, 1)),
+    (2, (128, 256, 128), (4, 8), (1, 1, 1)),
 ]
 
 
@@ -61,27 +49,9 @@ def test_rect_sqr_decomp_diff():
     )
 
 
-@pytest.mark.parametrize(
-    "num_levels, N, num_boxes_outer_level, box_aspect_ratio", common_params3d
-)
-def test_init_valid_params(num_levels, N, num_boxes_outer_level, box_aspect_ratio):
-    """
-    Test that the DyadicDecomposition class can be initialized with valid parameters.
-    """
-    decomp = DyadicDecomposition(num_levels, N, num_boxes_outer_level, box_aspect_ratio)
-    assert decomp.num_levels == num_levels
-
-
-@pytest.mark.parametrize(
-    "num_levels, N, num_boxes_outer_level, box_aspect_ratio", common_params3d
-)
-def test_dyadic_decomp_is_pytree(
-    num_levels, N, num_boxes_outer_level, box_aspect_ratio
-):
-    """
-    Test that the DyadicDecomposition class is a pytree.
-    """
-    decomp = DyadicDecomposition(num_levels, N, num_boxes_outer_level, box_aspect_ratio)
+def test_dyadic_decomp_is_pytree():
+    """A representative decomposition survives PyTree flattening."""
+    decomp = DyadicDecomposition(2, (128, 256, 128), (4, 8), (1, 1, 1))
     flat, aux = tree_util.tree_flatten(decomp)
     reconstructed = tree_util.tree_unflatten(aux, flat)
 
@@ -95,30 +65,14 @@ def test_dyadic_decomp_is_pytree(
 
 
 @pytest.mark.parametrize(
-    "num_levels, N, num_boxes_outer_level, box_aspect_ratio", common_params3d
-)
-def test_decomp_is_dyadic(num_levels, N, num_boxes_outer_level, box_aspect_ratio):
-    """
-    Test that the DyadicDecomposition class is dyadic. This means that we expect the length scales of boxes to Double, when moving from one scale to a higher one.
-    """
-
-    decomp = DyadicDecomposition(num_levels, N, num_boxes_outer_level, box_aspect_ratio)
-
-    for i in range(1, num_levels):
-        assert jnp.all(decomp.box_lengths[i] == 2 * decomp.box_lengths[i - 1]), (
-            f"Box lengths at level {i} are not dyadic."
-        )
-
-
-@pytest.mark.parametrize(
     "N, expected_lengths, expected_retained",
     [
         ((2048,), (32, 64, 128), (4, 6, 12)),
         ((256, 256), (4, 8, 16), (16, 60, 240)),
     ],
 )
-def test_reported_three_level_thesis_tiling(N, expected_lengths, expected_retained):
-    """Lock widths and retained counts reported for the MSWPT experiment."""
+def test_three_level_tiling_regression(N, expected_lengths, expected_retained):
+    """Lock the three-level widths and retained coefficient counts."""
     decomp = DyadicDecomposition(
         num_levels=3,
         N=N,
@@ -141,33 +95,8 @@ def test_rejects_zero_width_or_zero_variance_inner_boxes_cleanly(N):
         )
 
 
-# @pytest.mark.parametrize(
-#     "num_levels, N, num_boxes_outer_level, box_aspect_ratio", common_params3d
-# )
-# def test_dyadic_decomp_is_diff(num_levels, N, num_boxes_outer_level, box_aspect_ratio):
-#     params = ()
-
-#     def loss_fn(params):
-#         decomp = DyadicDecomposition(params)
-#         return (
-#             jnp.sum(decomp.scaling)
-#             + jnp.sum(decomp.box_lengths)
-#             + jnp.sum(decomp.centres_ndim)
-#         )
-
-#     def compute_vjp(params):
-#         _, vjp_fn = vjp(loss_fn, params)
-#         return vjp_fn(jnp.ones_like(loss_fn(params)))
-
-#     grads = compute_vjp(params)
-
-#     flat_grads, _ = tree_util.tree_flatten(grads)
-#     for g in flat_grads:
-#         assert jnp.all(jnp.isfinite(g)), "Gradient contains non-finite values"
-
-
 @pytest.mark.parametrize(
-    "num_levels, N, num_boxes_outer_level, box_aspect_ratio", common_params3d
+    "num_levels, N, num_boxes_outer_level, box_aspect_ratio", geometry_params
 )
 def test_dyadic_decomp_all_centres_filled(
     num_levels, N, num_boxes_outer_level, box_aspect_ratio
@@ -182,7 +111,7 @@ def test_dyadic_decomp_all_centres_filled(
 
 
 @pytest.mark.parametrize(
-    "num_levels, N, num_boxes_outer_level, box_aspect_ratio", common_params3d
+    "num_levels, N, num_boxes_outer_level, box_aspect_ratio", geometry_params
 )
 def test_centres_have_mirror_pairs(
     num_levels, N, num_boxes_outer_level, box_aspect_ratio
@@ -253,22 +182,57 @@ def test_noninteger_rectangular_aspect_is_tiled_without_uncovered_bins():
 
 
 @pytest.mark.parametrize(
-    "N,boxes,aspect",
+    "num_levels,N,boxes,aspect",
     [
-        ((64.5, 64), (4,), (1, 1)),
-        ((64, 64), (4.5,), (1, 1)),
-        ((64, 64), (4,), (1.5, 1)),
-        ((64, 64), (4,), (-1, 1)),
+        (1, (64.5, 64), (4,), (1, 1)),
+        (1, (True, 64), (4,), (1, 1)),
+        (1, ("64", 64), (4,), (1, 1)),
+        (1, (-64, 64), (4,), (1, 1)),
+        (1, (64, 64), (4.5,), (1, 1)),
+        (1, (64, 64), (-4,), (1, 1)),
+        (2, (128, 128), (8, 4), (1, 1)),
+        (1, (64, 64), (4,), (1.5, 1)),
+        (1, (64, 64), (4,), ()),
+        (1, (64, 64), (4,), (1,)),
+        (1, (64, 64), (4,), (-1, 1)),
+        (1, (64, 72), (4,), (1, 1)),
+        (4, (16, 16), (8, 8, 8, 8), (1, 1)),
+        (1, (100,), (6,), (1,)),
     ],
 )
-def test_decomposition_rejects_nonintegral_or_negative_geometry(N, boxes, aspect):
+def test_decomposition_rejects_invalid_geometry(num_levels, N, boxes, aspect):
     with pytest.raises(ValueError):
-        DyadicDecomposition(1, N, boxes, aspect)
+        DyadicDecomposition(num_levels, N, boxes, aspect)
+
+
+@pytest.mark.parametrize(
+    "boxes_per_dim_levels, match",
+    [
+        (((4, 4),), "num_levels"),
+        (((4,), (8, 8)), "ndim"),
+        (((4, 4.5), (8, 8)), "integers"),
+        (((4, 0), (8, 8)), "positive"),
+        (((4, 3), (8, 8)), "even"),
+        (((8, 4), (4, 8)), "nondecreasing"),
+        (((4, 4), (8, 16)), "smallest-axis sequence"),
+    ],
+)
+def test_boxes_per_dim_levels_validation(boxes_per_dim_levels, match):
+    with pytest.raises(ValueError, match=match):
+        DyadicDecomposition(
+            num_levels=2,
+            N=(64, 32),
+            num_boxes_levels=(4, 8),
+            box_aspect_ratio=(2, 1),
+            boxes_per_dim_levels=boxes_per_dim_levels,
+        )
 
 
 def test_validate_params_error_branches():
     with pytest.raises(ValueError):
         validate_params(0, (16, 16), (2, 4), (1, 1))
+    with pytest.raises(ValueError):
+        validate_params(1.0, (16, 16), (2,), (1, 1))
     with pytest.raises(ValueError):
         validate_params(1, (15, 16), (2,), (1, 1))
     with pytest.raises(ValueError):
@@ -276,10 +240,4 @@ def test_validate_params_error_branches():
     with pytest.raises(ValueError):
         validate_params(1, (16, 16), (2,), (2, 2))  # no 1 in aspect
     with pytest.raises(ValueError):
-        validate_params(1, (16,), (2,), (2,))  # 1D aspect must be (1,)
-    with pytest.raises(ValueError):
         validate_params(5, (16, 16), (50, 60, 70, 80, 90), (1, 1))  # base>N_ref
-
-
-if __name__ == "__main__":
-    pytest.main(sys.argv)

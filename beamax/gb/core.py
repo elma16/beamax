@@ -1,4 +1,6 @@
-from typing import Callable, Optional
+from __future__ import annotations
+
+from typing import Callable, Optional, TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -6,10 +8,17 @@ from jaxtyping import Array, Bool, Complex, Float, Num
 
 from beamax.gb.gb_solvers import SolverConfig, SolverFn
 
+if TYPE_CHECKING:
+    from beamax.gb.pallas_config import PallasConfig
+
 __all__ = [
     "compute_gaussian_beam",
     "compute_gaussian_beam_real",
+    "compute_gaussian_beam_real_pallas",
     "compute_gaussian_beam_real_TR",
+    "compute_gaussian_beam_real_TR_xla_terminal",
+    "compute_gaussian_beam_real_TR_pallas_terminal",
+    "sum_gaussian_beam_real_trajectories_xla",
 ]
 
 
@@ -44,8 +53,13 @@ def compute_phase(
     domain_size: Float[Array, " d"],
     periodic: Bool[Array, " d"],
 ) -> Complex[Array, "b t *S"]:
-    """
-    GB phase at sensors: `(p · Δx) + 0.5 Δxᵀ M Δx`.
+    r"""
+    GB phase at sensors:
+
+    $$
+    \Phi=p\mathbin{\cdot}\Delta x
+    +\frac{1}{2}\Delta x^{\mathsf T}M\Delta x.
+    $$
 
     Parameters
     ----------
@@ -66,8 +80,17 @@ def compute_phase(
     )
     diff = jnp.where(periodic, diff - domain_size * jnp.round(diff / domain_size), diff)
 
-    phase = jnp.einsum("btd,bt...d->bt...", pt, diff) + 0.5 * jnp.einsum(
-        "btij,bt...i,bt...j->bt...", mt, diff, diff
+    phase = jnp.einsum(
+        "btd,bt...d->bt...",
+        pt,
+        diff,
+        precision=jax.lax.Precision.HIGHEST,
+    ) + 0.5 * jnp.einsum(
+        "btij,bt...i,bt...j->bt...",
+        mt,
+        diff,
+        diff,
+        precision=jax.lax.Precision.HIGHEST,
     )
 
     return phase
@@ -79,7 +102,7 @@ def compute_diff(
     domain_size: Float[Array, " d"],
     periodic: Bool[Array, " d"],
 ) -> Float[Array, "b t *S d"]:
-    """
+    r"""
     Sensor–ray displacement with periodic wrap.
 
     Parameters
@@ -92,7 +115,8 @@ def compute_diff(
     Returns
     -------
     jnp.ndarray, shape (b, t, *S, d)
-        Δx = sensors - xt (broadcast), wrapped as needed.
+        The displacement $\Delta x=x_s-x_t$, broadcast over sensors and
+        wrapped as needed.
     """
     diff = sensors[None, None, ...] - jnp.expand_dims(
         xt, axis=tuple(range(2, 2 + sensors.ndim - 1))
@@ -118,7 +142,7 @@ def compute_gaussian_beam(
     ode_solver: SolverFn,
     solver_config: Optional[SolverConfig] = None,
 ) -> Complex[Array, "Nt *S b"]:
-    """
+    r"""
     Complex GB field at sensors, keeping beam axis.
 
     Parameters
@@ -128,9 +152,9 @@ def compute_gaussian_beam(
     M0 : jnp.ndarray, shape (b, d, d), complex
     a0 : jnp.ndarray, shape (b,), complex
     omega0 : jnp.ndarray, shape (b,)
-        Angular frequencies (|p| scaled).
+        Angular frequencies scaled by $\lVert p\rVert$.
     mode : jnp.ndarray, shape (b,)
-        ±1 per beam.
+        Branch value $\pm1$ per beam.
     c : Callable[[jnp.ndarray], jnp.ndarray]
         Speed of sound.
     lam : float
@@ -151,7 +175,7 @@ def compute_gaussian_beam(
     Notes
     -----
     - Calls `ode_solver` once; wraps positions; phases from `xt, pt, Mt`.
-    - Overall factor `At * exp(i omega0 * phase)`.
+    - Overall factor $A_t\exp(i\omega_0\Phi)$.
     """
     xt, pt, Mt, At = ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
 
@@ -169,7 +193,7 @@ def compute_gaussian_beam(
 
 
 def safe_angle_eps(z, eps=1e-12):
-    """
+    r"""
     Phase angle with zero-safe branch for `(0+0j)`.
 
     Parameters
@@ -182,13 +206,136 @@ def safe_angle_eps(z, eps=1e-12):
     Returns
     -------
     jnp.ndarray
-        `atan2(Im(z), Re(z_safe))`.
+        $\operatorname{atan2}\!\left(\operatorname{Im}z,
+        \operatorname{Re}z_{\mathrm{safe}}\right)$.
     """
     re = jnp.real(z)
     im = jnp.imag(z)
-    # Replace exactly-zero pair by (eps,0) so atan2 returns 0, finite derivatives
+    # Map 0 + 0j to angle zero with finite derivatives.
     re = jnp.where((re == 0) & (im == 0), eps, re)
     return jnp.arctan2(im, re)
+
+
+def _sum_gaussian_beam_real_components_xla(
+    xt,
+    pt,
+    matrix_real,
+    matrix_imag,
+    amplitude,
+    angle,
+    omega0,
+    sensors,
+    domain_size,
+    periodic,
+    *,
+    precision=jax.lax.Precision.HIGHEST,
+    rounding_mode: str = "nearest_even",
+    periodic_axes: tuple[bool, ...] | None = None,
+    initial_field=None,
+):
+    """Sum preprocessed real beam components with XLA."""
+    if rounding_mode not in {"nearest_even", "half_open"}:
+        raise ValueError(f"Unsupported rounding mode {rounding_mode!r}.")
+
+    num_times = xt.shape[1]
+    sensors_flat = sensors.reshape((-1, sensors.shape[-1]))
+    num_sensors = sensors_flat.shape[0]
+    dom = domain_size.astype(xt.dtype)
+    pmask = periodic.astype(xt.dtype)
+
+    def minimum_image(delta):
+        def image_index(value):
+            if rounding_mode == "half_open":
+                return jnp.floor(value + 0.5)
+            return jnp.round(value)
+
+        if periodic_axes is None:
+            return delta - dom * image_index(delta / dom) * pmask
+        return jnp.stack(
+            [
+                (
+                    delta[..., axis]
+                    - dom[axis] * image_index(delta[..., axis] / dom[axis])
+                    if periodic_axes[axis]
+                    else delta[..., axis]
+                )
+                for axis in range(delta.shape[-1])
+            ],
+            axis=-1,
+        )
+
+    def add_beam(accumulator, beam):
+        xi, pi, mr, mi, amp, phase_offset, frequency = beam
+        delta = minimum_image(sensors_flat[None, :, :] - xi[:, None, :])
+        phase_linear = jnp.einsum("tsd,td->ts", delta, pi, precision=precision)
+        phase_quadratic = 0.5 * jnp.einsum(
+            "tsd,tde,tse->ts",
+            delta,
+            mr,
+            delta,
+            precision=precision,
+        )
+        decay_quadratic = 0.5 * jnp.einsum(
+            "tsd,tde,tse->ts",
+            delta,
+            mi,
+            delta,
+            precision=precision,
+        )
+        contribution = (
+            amp[:, None]
+            * jnp.cos(
+                frequency * (phase_linear + phase_quadratic) + phase_offset[:, None]
+            )
+            * jnp.exp(-frequency * decay_quadratic)
+        )
+        return accumulator + contribution, None
+
+    initial = (
+        jnp.zeros((num_times, num_sensors), dtype=xt.dtype)
+        if initial_field is None
+        else initial_field
+    )
+    result, _ = jax.lax.scan(
+        add_beam,
+        initial,
+        (xt, pt, matrix_real, matrix_imag, amplitude, angle, omega0),
+    )
+    return result
+
+
+def sum_gaussian_beam_real_trajectories_xla(
+    xt: Float[Array, "b Nt d"],
+    pt: Float[Array, "b Nt d"],
+    Mt: Complex[Array, "b Nt d d"],
+    At: Complex[Array, "b Nt 1"],
+    omega0: Float[Array, " b"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
+    *,
+    precision=jax.lax.Precision.HIGHEST,
+) -> Float[Array, "Nt *S"]:
+    """Sum trajectory fields with output-sized XLA accumulation.
+
+    A singleton time axis provides terminal-only evaluation.
+    """
+    num_times = xt.shape[1]
+    amplitude = At[..., 0]
+    result = _sum_gaussian_beam_real_components_xla(
+        xt,
+        pt,
+        jnp.real(Mt),
+        jnp.imag(Mt),
+        2.0 * jnp.abs(amplitude),
+        safe_angle_eps(amplitude),
+        omega0,
+        sensors,
+        domain_size,
+        periodic,
+        precision=precision,
+    )
+    return result.reshape((num_times,) + sensors.shape[:-1])
 
 
 def compute_gaussian_beam_real(
@@ -207,7 +354,7 @@ def compute_gaussian_beam_real(
     ode_solver: SolverFn,
     solver_config: Optional[SolverConfig] = None,
 ) -> Float[Array, "Nt *S"]:
-    """
+    r"""
     Real-valued streaming GB: scan over beams, vmap over time.
 
     Parameters
@@ -248,85 +395,72 @@ def compute_gaussian_beam_real(
 
     Notes
     -----
-    Uses ``O(Nt * S)`` memory instead of materializing the beam axis with
-    ``O(b * Nt * S)`` storage.
+    Uses $\mathcal{O}(N_tS)$ memory instead of materializing the beam axis
+    with $\mathcal{O}(bN_tS)$ storage.
     """
-    # Solve ODEs for all beams (this is fine, ODEs are small)
+    xt, pt, Mt, At = ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
+    if xt.shape[1] != ts.shape[0]:
+        # Prevent terminal-only states from broadcasting across the time grid.
+        raise ValueError(
+            f"ode_solver saved {xt.shape[1]} time steps but {ts.shape[0]} "
+            "were requested; forward evaluation needs the full time grid."
+        )
+    xt = wrap_position(xt, domain_size, periodic)
+    return sum_gaussian_beam_real_trajectories_xla(
+        xt,
+        pt,
+        Mt,
+        At,
+        omega0,
+        sensors,
+        domain_size,
+        periodic,
+    )
+
+
+def compute_gaussian_beam_real_pallas(
+    x0: Float[Array, "b d"],
+    p0: Float[Array, "b d"],
+    M0: Complex[Array, "b d d"],
+    a0: Complex[Array, " b"],
+    omega0: Float[Array, " b"],
+    mode: Num[Array, " b"],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
+    lam: float,
+    ts: Float[Array, " Nt"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
+    ode_solver: SolverFn,
+    solver_config: Optional[SolverConfig] = None,
+    pallas_config: PallasConfig | None = None,
+    initial_field: jax.Array | None = None,
+    return_padded: bool = False,
+) -> Float[Array, "Nt *S"]:
+    """Evaluate a real GB field with XLA trajectories and Pallas reduction."""
+    from beamax.gb.pallas_kernels import sum_gaussian_beam_real_pallas
+
     xt, pt, Mt, At = ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
     xt = wrap_position(xt, domain_size, periodic)
 
     d = sensors.shape[-1]
     sensors_flat = sensors.reshape((-1, d))
-    S = sensors_flat.shape[0]
-    Nt = ts.shape[0]
-
-    dom = domain_size.astype(xt.dtype)
-    pmask = periodic.astype(xt.dtype)
-
-    # Vectorize computation over time for a single beam
-    def single_beam_all_times(xi, pi, Mi, Ai, wi):
-        """
-        Process one beam at all time points.
-
-        Parameters
-        ----------
-        xi : jnp.ndarray, shape (Nt, d)
-            Beam centre over time.
-        pi : jnp.ndarray, shape (Nt, d)
-            Beam momentum over time.
-        Mi : jnp.ndarray, shape (Nt, d, d)
-            Complex Hessian over time.
-        Ai : jnp.ndarray, shape (Nt,)
-            Complex amplitude over time.
-        wi : jnp.ndarray
-            Scalar beam frequency.
-
-        Returns
-        -------
-        jnp.ndarray, shape (Nt, S)
-            Real beam contribution at flattened sensor positions.
-        """
-        Mr = jnp.real(Mi)  # (Nt, d, d)
-        Mi_im = jnp.imag(Mi)  # (Nt, d, d)
-
-        # Broadcast: xi (Nt,1,d), sensors_flat (S,d) -> delta (Nt,S,d)
-        delta = sensors_flat[None, :, :] - xi[:, None, :]
-        delta = delta - dom * jnp.round(delta / dom) * pmask
-
-        # Vectorized over (Nt, S)
-        phi_lin = jnp.einsum("tsd,td->ts", delta, pi)
-        phi_quad = 0.5 * jnp.einsum("tsd,tde,tse->ts", delta, Mr, delta)
-        chi = 0.5 * jnp.einsum("tsd,tde,tse->ts", delta, Mi_im, delta)
-
-        phase = wi * (phi_lin + phi_quad) + safe_angle_eps(Ai[:, None])
-
-        return 2.0 * jnp.abs(Ai[:, None]) * jnp.cos(phase) * jnp.exp(-wi * chi)
-
-    # Scan over beams to accumulate without materializing (b, Nt, S)
-    def scan_fn(acc, beam_data):
-        """
-        Accumulate one beam contribution into the streaming field.
-
-        Parameters
-        ----------
-        acc : jnp.ndarray, shape (Nt, S)
-            Running field sum.
-        beam_data : Tuple[jnp.ndarray, ...]
-            Per-beam tuple ``(xi, pi, Mi, Ai, wi)``.
-
-        Returns
-        -------
-        (jnp.ndarray, None)
-            Updated accumulator and empty scan output.
-        """
-        xi, pi, Mi, Ai, wi = beam_data
-        contrib = single_beam_all_times(xi, pi, Mi, Ai[:, 0], wi)
-        return acc + contrib, None
-
-    init = jnp.zeros((Nt, S), dtype=xt.dtype)
-    result, _ = jax.lax.scan(scan_fn, init, (xt, pt, Mt, At, omega0))
-
-    return result.reshape((Nt,) + sensors.shape[:-1])
+    result = sum_gaussian_beam_real_pallas(
+        xt=xt,
+        pt=pt,
+        Mt=Mt,
+        At=At,
+        omega0=omega0,
+        sensors=sensors_flat,
+        domain_size=domain_size,
+        periodic=periodic,
+        config=pallas_config,
+        initial_field=initial_field,
+        return_padded=return_padded,
+    )
+    if return_padded:
+        return result
+    return result.reshape((ts.shape[0],) + sensors.shape[:-1])
 
 
 def compute_gaussian_beam_real_TR(
@@ -345,10 +479,20 @@ def compute_gaussian_beam_real_TR(
     ode_solver: SolverFn,
     solver_config: Optional[SolverConfig] = None,
 ) -> Float[Array, "Nt *S b"]:
-    """
+    r"""
     Compute a collection of Gaussian Beams in n-dimensions, assuming the resulting field is real.
 
-    u + bar(u) = 2|A|cos(ω(x p + 0.5 x Mr x) + angle(A))exp(-ω/2 x Mi x).
+    $$
+    u+\overline{u}
+    =2|A|\cos\!\left(
+      \omega\left[p\mathbin{\cdot}\Delta x
+      +\frac{1}{2}\Delta x^{\mathsf T}M_R\Delta x\right]
+      +\arg A
+    \right)
+    \exp\!\left(
+      -\frac{\omega}{2}\Delta x^{\mathsf T}M_I\Delta x
+    \right).
+    $$
 
     This should require 2 times less memory than the complex version, and should be faster.
 
@@ -393,33 +537,145 @@ def compute_gaussian_beam_real_TR(
     xt = wrap_position(xt, domain_size, periodic)
     diff = compute_diff(xt, sensors, domain_size, periodic)
 
-    # Pre-compute these terms
-    xp_term = jnp.einsum("btd,bt...d->bt...", pt, diff)
+    xp_term = jnp.einsum(
+        "btd,bt...d->bt...",
+        pt,
+        diff,
+        precision=jax.lax.Precision.HIGHEST,
+    )
 
     Mr = jnp.real(Mt)
     Mi = jnp.imag(Mt)
 
-    temp = jnp.einsum("btij,bt...i->btj...", Mr, diff)
-    xMrx_term = 0.5 * jnp.einsum("btj...,bt...j->bt...", temp, diff)
-    temp = jnp.einsum("btij,bt...i->btj...", Mi, diff)
-    xMix_term = 0.5 * jnp.einsum("btj...,bt...j->bt...", temp, diff)
+    temp = jnp.einsum(
+        "btij,bt...i->btj...",
+        Mr,
+        diff,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    xMrx_term = 0.5 * jnp.einsum(
+        "btj...,bt...j->bt...",
+        temp,
+        diff,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    temp = jnp.einsum(
+        "btij,bt...i->btj...",
+        Mi,
+        diff,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    xMix_term = 0.5 * jnp.einsum(
+        "btj...,bt...j->bt...",
+        temp,
+        diff,
+        precision=jax.lax.Precision.HIGHEST,
+    )
 
-    # Combine into real_phase
     real_phase = xp_term + xMrx_term
 
-    # Calculate field
     amplitude = jnp.abs(At)
 
-    real_ω = jnp.einsum("b,bt...->bt...", omega0, real_phase)
+    real_ω = jnp.einsum(
+        "b,bt...->bt...",
+        omega0,
+        real_phase,
+        precision=jax.lax.Precision.HIGHEST,
+    )
     num_sensor_dims = real_phase.ndim - 3
     angle = safe_angle_eps(At).reshape(At.shape + (1,) * num_sensor_dims)
-    # angle = jnp.angle(At).reshape(At.shape + (1,) * num_sensor_dims)
     phase_angle = real_ω + angle
 
-    damping = jnp.exp(-jnp.einsum("b,bt...->bt...", omega0, xMix_term))
+    damping = jnp.exp(
+        -jnp.einsum(
+            "b,bt...->bt...",
+            omega0,
+            xMix_term,
+            precision=jax.lax.Precision.HIGHEST,
+        )
+    )
 
     gb_real = jnp.einsum(
         "bt1,bt...,bt...->t...b", 2 * amplitude, jnp.cos(phase_angle), damping
     )
 
     return gb_real
+
+
+def compute_gaussian_beam_real_TR_xla_terminal(
+    x0: Float[Array, "b d"],
+    p0: Float[Array, "b d"],
+    M0: Complex[Array, "b d d"],
+    a0: Complex[Array, " b"],
+    omega0: Float[Array, " b"],
+    mode: Num[Array, " b"],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
+    lam: float,
+    ts: Float[Array, "b Nt"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
+    ode_solver: SolverFn,
+    solver_config: Optional[SolverConfig] = None,
+) -> Float[Array, "*S"]:
+    """Evaluate the terminal TR field with output-sized XLA accumulation."""
+    xt, pt, Mt, At = ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
+    xt = wrap_position(xt, domain_size, periodic)
+    result = sum_gaussian_beam_real_trajectories_xla(
+        xt[:, -1:, :],
+        pt[:, -1:, :],
+        Mt[:, -1:, :, :],
+        At[:, -1:, :],
+        omega0,
+        sensors,
+        domain_size,
+        periodic,
+    )
+    return result[0]
+
+
+def compute_gaussian_beam_real_TR_pallas_terminal(
+    x0: Float[Array, "b d"],
+    p0: Float[Array, "b d"],
+    M0: Complex[Array, "b d d"],
+    a0: Complex[Array, " b"],
+    omega0: Float[Array, " b"],
+    mode: Num[Array, " b"],
+    c: Callable[[Float[Array, "... d"]], Float[Array, "..."]],
+    lam: float,
+    ts: Float[Array, "b Nt"],
+    sensors: Float[Array, "*S d"],
+    domain_size: Float[Array, " d"],
+    periodic: Bool[Array, " d"],
+    ode_solver: SolverFn,
+    solver_config: Optional[SolverConfig] = None,
+    pallas_config: PallasConfig | None = None,
+    initial_field: jax.Array | None = None,
+    return_padded: bool = False,
+) -> Float[Array, "*S"]:
+    """Evaluate the terminal TR field with Pallas beam reduction."""
+    from beamax.gb.pallas_kernels import sum_gaussian_beam_real_pallas
+
+    xt, pt, Mt, At = ode_solver(x0, p0, M0, a0, mode, ts, c, lam, solver_config)
+    xt = wrap_position(xt, domain_size, periodic)
+
+    d = sensors.shape[-1]
+    sensors_flat = sensors.reshape((-1, d))
+    result = sum_gaussian_beam_real_pallas(
+        xt=xt[:, -1:, :],
+        pt=pt[:, -1:, :],
+        Mt=Mt[:, -1:, :, :],
+        At=At[:, -1:, :],
+        omega0=omega0,
+        sensors=sensors_flat,
+        domain_size=domain_size,
+        periodic=periodic,
+        config=pallas_config,
+        initial_field=(
+            None if initial_field is None else jnp.reshape(initial_field, (1, -1))
+        ),
+        return_padded=return_padded,
+    )
+    if return_padded:
+        return result[0]
+    return result[0].reshape(sensors.shape[:-1])

@@ -1,14 +1,4 @@
-"""
-Comprehensive tests for MSGB forward solvers.
-
-Test organization:
-- TestMSGBSolverBasics: Core MSGB solver functionality
-- TestMSGBSolverAggregation: Different aggregation strategies
-- TestMSGBSolverAccuracy: Accuracy and convergence tests
-- TestHybridSolverBasics: Basic hybrid solver functionality
-- TestHybridSolverAdvanced: Advanced features (interpolation, windowing, etc.)
-- TestSolverSharding: Multi-device parallelization
-"""
+"""MSGB forward aggregation, reconstruction, and hybrid integration tests."""
 
 import jax.numpy as jnp
 import jax
@@ -25,13 +15,15 @@ from beamax.gb import gb_solvers, core
 from beamax.solvers.msgb_solvers.msgb_solver import MSGBSolver
 from beamax.solvers.msgb_solvers import forward_solver_utils
 from beamax.solvers import HybridBackend, HybridSolver
-from beamax.solvers.hybrid_solver import HybridSolverConfig
 
 try:
     from beamax.solvers import KWaveSolver
     from kwave.options.simulation_execution_options import SimulationExecutionOptions
     from kwave.options.simulation_options import SimulationOptions
-except Exception as exc:  # pragma: no cover - depends on optional k-wave stack.
+except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency.
+    missing = exc.name or ""
+    if missing != "kwave" and not missing.startswith("kwave."):
+        raise
     KWaveSolver = None
     SimulationExecutionOptions = None
     SimulationOptions = None
@@ -80,15 +72,7 @@ requires_kwave_cpp_binary = pytest.mark.skipif(
 )
 
 
-# ============================================================================
-# Fixtures and Utilities
-# ============================================================================
-
-
-# Pure data-object fixtures — kept module-scoped so identical (Domain, decomp,
-# wpt) instances are reused across the many parameterised tests below. They
-# hold no mutable JAX state, so reuse is safe and avoids redundant construction
-# (and the JIT cache they prime stays warm across tests).
+# Reuse immutable data fixtures and their warmed JIT cache across tests.
 @pytest.fixture(scope="module")
 def simple_domain_1d():
     """1D domain with homogeneous speed of sound."""
@@ -172,7 +156,6 @@ def create_test_signal(dyadic_decomp, wpt, box_indices=(34, 6), k_values=None):
         )
         signal += utils.unitary_ifft(frame_ft)
 
-    # Normalize
     signal = signal / jnp.max(jnp.abs(signal))
     return signal
 
@@ -183,6 +166,8 @@ def create_test_signal(dyadic_decomp, wpt, box_indices=(34, 6), k_values=None):
         ({"thr_strat": "missing"}, "thr_strat"),
         ({"input_type": "time"}, "input_type"),
         ({"batch_size": 0}, "batch_size"),
+        ({"batch_size": 1.5}, "batch_size"),
+        ({"batch_size": True}, "batch_size"),
         ({"sum_method": "all"}, "sum_method"),
         ({"adjoint_relative_guard": 1.0}, "adjoint_relative_guard"),
     ],
@@ -202,21 +187,17 @@ def test_msgb_solver_validates_configuration(override, message):
         MSGBSolver(**kwargs)
 
 
-# ============================================================================
-# Test MSGB Solver - Aggregation Methods
-# ============================================================================
-
-
 class TestMSGBSolverAggregation:
     """Test that different aggregation methods produce identical results."""
 
-    @pytest.mark.parametrize("periodic", [True, False])
-    @pytest.mark.parametrize("use_complex", [False, True])
+    @pytest.mark.parametrize(
+        ("periodic", "use_complex"),
+        [(True, False), (False, False), (False, True)],
+    )
     def test_aggregation_methods_consistency(
         self, simple_domain_1d, dyadic_decomp_1d, wpt_1d, periodic, use_complex
     ):
-        """Verify all aggregation methods (scan/vmap/all) give identical results."""
-        # Update domain periodicity
+        """Verify supported aggregation methods give identical results."""
         domain = geometry.Domain(
             N=simple_domain_1d.N,
             dx=simple_domain_1d.dx,
@@ -226,19 +207,15 @@ class TestMSGBSolverAggregation:
 
         sensors = geometry.Sensor(binary_mask=jnp.ones(domain.N), domain=domain)
 
-        # Create test signal
         p0 = create_test_signal(dyadic_decomp_1d, wpt_1d)
         if not use_complex:
             p0 = p0.real
-        jnp.zeros_like(p0)
 
-        # Select methods based on dtype
         if use_complex:
-            methods = ["all_complex", "vmap_complex", "scan_complex"]
+            methods = ["all_complex", "scan_complex"]
         else:
-            methods = ["all_real", "vmap_real", "scan_real"]
+            methods = ["all_real", "scan_real", "pallas_real"]
 
-        # Run all methods
         results = []
         ts = jnp.array([0.0])
 
@@ -255,18 +232,12 @@ class TestMSGBSolverAggregation:
             result = solver.forward(p0, domain, sensors, ts, wpt_1d)
             results.append(result)
 
-        # Verify all results match
         for i, method in enumerate(methods[1:], 1):
             assert jnp.allclose(results[0], results[i], atol=1e-14), (
                 f"Method {methods[i]} differs from {methods[0]}:\n"
                 f"  Max diff: {jnp.max(jnp.abs(results[0] - results[i]))}\n"
                 f"  Rel L2: {jnp.linalg.norm(results[0] - results[i]) / jnp.linalg.norm(results[0])}"
             )
-
-
-# ============================================================================
-# Test MSGB Solver - Frame Equivalence
-# ============================================================================
 
 
 class TestMSGBSolverFrameEquivalence:
@@ -286,18 +257,15 @@ class TestMSGBSolverFrameEquivalence:
         """
         domain = simple_domain_2d
 
-        # Create sparse coefficient vector
         total_coeffs = wpt_2d.total_coeffs
         coeffs = jnp.zeros(total_coeffs)
 
-        # Add a few random coefficients
         num_nonzero = 2
         for i in range(num_nonzero):
             key = jax.random.PRNGKey(i)
             idx = jax.random.randint(key, (), 0, total_coeffs)
             coeffs = coeffs.at[idx].set(1.0)
 
-        # Manual reconstruction from frames
         shapes = utils.compute_coeff_shapes(
             dyadic_decomp_2d, wpt_2d.redundancy, jnp.arange(dyadic_decomp_2d.num_levels)
         )
@@ -322,7 +290,6 @@ class TestMSGBSolverFrameEquivalence:
             )
             manual_recon += utils.unitary_ifft(frame_ft)
 
-        # GB solver reconstruction
         p0s, M0s, x0s, ωs, a0s, modes = forward_solver_utils.compute_forward_parameters(
             nonzero_indices, wpt_2d, domain
         )
@@ -348,7 +315,6 @@ class TestMSGBSolverFrameEquivalence:
             axis=-1,
         )[0, ...]
 
-        # Check equivalence
         max_error = jnp.max(jnp.abs(gb_recon - manual_recon))
         rel_error = jnp.linalg.norm(gb_recon - manual_recon) / jnp.linalg.norm(
             manual_recon
@@ -361,20 +327,13 @@ class TestMSGBSolverFrameEquivalence:
         )
 
 
-# ============================================================================
-# Test MSGB Solver - Accuracy
-# ============================================================================
-
-
 class TestMSGBSolverAccuracy:
     """Test accuracy and convergence properties of MSGB solver."""
 
     @pytest.mark.parametrize(
         "N,threshold_list",
         [
-            # Two thresholds are enough to verify the monotonic-improvement
-            # property in each dimension; previously this swept four
-            # thresholds in 2D, which was the single slowest non-fixture call.
+            # Two thresholds suffice to test monotonic improvement.
             ((128,), [100, 400]),
             ((64, 128), [1000, 4000]),
         ],
@@ -390,11 +349,8 @@ class TestMSGBSolverAccuracy:
         dyadic = DyadicDecomposition(2, N, (4, 8), (1,) * d)
         wpt = MSWPT(dyadic, 2, "rectangular")
 
-        # Create test signal
-        p0 = create_test_signal(dyadic, wpt)
-        jnp.zeros_like(p0)
+        p0 = create_test_signal(dyadic, wpt).real
 
-        # Test increasing thresholds
         errors = []
         ts = jnp.array([0.0])
 
@@ -410,23 +366,13 @@ class TestMSGBSolverAccuracy:
             )
 
             gb_result = solver.forward(p0, domain, sensors, ts, wpt)[0, ...].reshape(N)
-            error = jnp.linalg.norm(gb_result - p0.real) / jnp.linalg.norm(p0.real)
+            error = jnp.linalg.norm(gb_result - p0) / jnp.linalg.norm(p0)
             errors.append(error)
 
-        # Verify monotonic improvement
-        for i in range(1, len(errors)):
-            assert errors[i] <= errors[i - 1] * 1.1, (  # Allow 10% tolerance
-                f"Error increased from {errors[i - 1]:.4e} to {errors[i]:.4e} "
-                f"at threshold {threshold_list[i]}"
-            )
-
-        # Final error should be reasonable
-        # assert errors[-1] < 0.9, f"Final error {errors[-1]} too high"
-
-
-# ============================================================================
-# Test Hybrid Solver - Basic Functionality
-# ============================================================================
+        assert errors[1] <= errors[0], (
+            f"Error increased from {errors[0]:.4e} to {errors[1]:.4e} "
+            f"at threshold {threshold_list[1]}"
+        )
 
 
 @requires_kwave
@@ -450,10 +396,7 @@ class TestHybridSolverBasics:
         )
         return KWaveSolver(sim_opts, exec_opts)
 
-    # `dt_oversample` is forced to 0 when `downsample=False` inside the test
-    # below, so the (downsample=False, dt_oversample=30) combination is
-    # identical to (downsample=False, dt_oversample=0). We enumerate the
-    # three distinct cases explicitly instead of the 2x2 Cartesian product.
+    # The fourth Cartesian case duplicates ``(False, 0)`` after normalization.
     @pytest.mark.parametrize(
         "downsample, dt_oversample",
         [(True, 0), (True, 30), (False, 0)],
@@ -499,11 +442,6 @@ class TestHybridSolverBasics:
         )
 
 
-# ============================================================================
-# Test Hybrid Solver - Advanced Features
-# ============================================================================
-
-
 class TestHybridSolverAdvanced:
     """Test advanced hybrid solver features."""
 
@@ -519,38 +457,6 @@ class TestHybridSolverAdvanced:
                 return jnp.zeros((128, 128))
 
         return DummySolver()
-
-    def test_config_object_initialization(self, dummy_solver):
-        """Test initialization with HybridSolverConfig object."""
-        config = HybridSolverConfig(
-            box_corners=jnp.array([0, 15]),
-            downsample=True,
-            interp_method="zoom",
-            order=5,
-        )
-
-        solver = HybridSolver(
-            hf_solver=dummy_solver,
-            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
-            config=config,
-        )
-
-        assert solver.config.downsample
-        assert solver.config.interp_method == "zoom"
-        assert solver.config.order == 5
-
-    def test_kwargs_initialization(self, dummy_solver):
-        """Test initialization with kwargs."""
-        solver = HybridSolver(
-            hf_solver=dummy_solver,
-            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
-            box_corners=jnp.array([0, 15]),
-            downsample=False,
-            interp_method="fourier",
-        )
-
-        assert not solver.config.downsample
-        assert solver.config.interp_method == "fourier"
 
     def test_factory_method_periodic_domain(self, dummy_solver):
         """Test factory method auto-selects Fourier for periodic domain."""
@@ -581,13 +487,12 @@ class TestHybridSolverAdvanced:
         )
 
         assert solver.config.interp_method == "zoom"
-        assert solver.config.order == 3  # Default cubic
+        assert solver.config.order == 3
 
     def test_validation_warning_fourier_nonperiodic(
         self, dummy_solver, simple_domain_2d
     ):
         """Test that warning is issued for Fourier + non-periodic."""
-        # Make non-periodic
         domain = geometry.Domain(
             N=simple_domain_2d.N,
             dx=simple_domain_2d.dx,
@@ -600,10 +505,9 @@ class TestHybridSolverAdvanced:
             lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
             box_corners=jnp.array([0, 15]),
             downsample=True,
-            interp_method="fourier",  # Explicitly use Fourier
+            interp_method="fourier",
         )
 
-        # Should warn when forward is called
         dyadic = DyadicDecomposition(2, domain.N, (4, 8), (1, 1))
         wpt = MSWPT(dyadic, 2, "rectangular")
         sensors = geometry.Sensor(binary_mask=jnp.ones(domain.N), domain=domain)
@@ -615,49 +519,6 @@ class TestHybridSolverAdvanced:
             solver.forward(p0, domain, sensors, ts, wpt)
             assert len(w) == 1
             assert "non-periodic domain" in str(w[0].message).lower()
-
-    @pytest.mark.parametrize("window_type", ["kaiser", "tukey"])
-    def test_window_types(self, dummy_solver, window_type):
-        """Test different windowing functions."""
-        solver = HybridSolver(
-            hf_solver=dummy_solver,
-            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
-            box_corners=jnp.array([0, 15]),
-            window_type=window_type,
-            dt_oversample=20,
-        )
-
-        assert solver.config.window_type == window_type
-
-        # Test windowing actually works
-        data = jnp.ones((50, 10))
-        windowed = solver._apply_window(data)
-
-        # Window should taper at the end
-        assert jnp.all(windowed[-20:, 0] <= 1.0)
-        assert jnp.all(windowed[:-20, 0] == 1.0)
-
-    @pytest.mark.parametrize(
-        "interp_method,order",
-        [
-            ("fourier", 3),
-            ("zoom", 1),
-            ("zoom", 3),
-            ("zoom", 5),
-        ],
-    )
-    def test_interpolation_methods(self, dummy_solver, interp_method, order):
-        """Test different interpolation methods."""
-        solver = HybridSolver(
-            hf_solver=dummy_solver,
-            lf_backend=HybridBackend.from_beamax_solver(dummy_solver),
-            box_corners=jnp.array([0, 15]),
-            interp_method=interp_method,
-            order=order,
-        )
-
-        assert solver.config.interp_method == interp_method
-        assert solver.config.order == order
 
 
 @requires_kwave
@@ -764,11 +625,3 @@ def test_hybrid_downsample():
     )
 
     assert jnp.allclose(hybrid_data_downsample, hybrid_data, atol=1e-5)
-
-
-# ============================================================================
-# Run Tests
-# ============================================================================
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])

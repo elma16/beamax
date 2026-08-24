@@ -13,7 +13,6 @@ import equinox as eqx
 from scipy.signal.windows import kaiser
 from scipy.ndimage import zoom
 from typing import Any, Literal, Optional, Tuple, Callable
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from beamax.solvers.hybrid_solver_utils import split_frequency_components
@@ -37,7 +36,7 @@ __all__ = ["HybridBackend", "HybridContext", "HybridSolver", "HybridSolverConfig
 
 @dataclass(frozen=True)
 class HybridSolverConfig:
-    """
+    r"""
     Configuration for hybrid solver.
 
     Parameters
@@ -57,9 +56,9 @@ class HybridSolverConfig:
     dt_oversample : int
         Number of extra time steps for windowing (forward only)
     beta : float
-        Kaiser window shape parameter (higher = sharper transition)
+        Kaiser window shape parameter. Larger values sharpen the transition.
     order : int
-        Spline order for zoom interpolation (0-5)
+        Spline order for zoom interpolation; one of $0,1,\ldots,5$.
     window_type : str
         "kaiser" or "tukey" - windowing function type
     use_windowing : bool
@@ -82,14 +81,15 @@ class HybridSolverConfig:
     use_time_extension: bool = True
 
     def __post_init__(self):
-        """
+        r"""
         Validate mutually exclusive split options and interpolation settings.
 
         Raises
         ------
         ValueError
             If neither or both frequency split definitions are provided, if
-            ``order`` is outside ``[0, 5]``, or if ``window_type`` is unknown.
+            ``order`` is not one of $0,1,\ldots,5$, or if ``window_type`` is
+            unknown.
         """
         has_corners = self.box_corners is not None
         has_freq = self.cutoff_freq is not None
@@ -135,76 +135,36 @@ class HybridSolverConfig:
 
 @dataclass(frozen=True)
 class HybridContext:
-    """
-    Runtime context passed to a low-frequency hybrid backend operation.
+    """Runtime inputs passed to a low-frequency hybrid backend.
 
-    The backend receives the already split low-frequency component plus this
-    object. It may use any of the fields it understands and ignore the rest;
-    the :class:`HybridSolver` still owns splitting, optional downsampling, time
-    extension/windowing, interpolation, and HF/LF merging.
+    :class:`HybridSolver` owns splitting, optional downsampling, windowing,
+    interpolation, and merging. The context contains only the geometry and
+    shapes needed by the backend adapter.
 
     Attributes
     ----------
-    operation : {"forward", "time_reversal", "adjoint"}
-        Operation currently being dispatched.
-    config : HybridSolverConfig
-        Hybrid split/downsampling/windowing configuration.
     domain : Domain
         Full-resolution output domain. For ``forward`` this is the physical
         simulation domain; for inverse operations this is the reconstruction
         domain.
-    input_domain : Domain
-        Full-resolution domain of the data being split. This is usually the
-        same as ``domain`` for ``forward`` and ``data_domain`` for inverse
-        operations.
     component_domain : Domain
-        Domain for the LF component actually passed to the backend. It may be
-        downsampled when ``config.downsample`` is true.
-    full_sensors : object
-        Original sensor object or mask supplied by the caller.
-    component_sensors : object
-        Sensor representation aligned to ``component_domain``.
-    full_sensor_mask : jnp.ndarray
-        Full-resolution sensor mask.
+        Domain for the LF component passed to the backend.
     component_sensor_mask : jnp.ndarray
         Sensor mask aligned to ``component_domain``.
     ts : jnp.ndarray
-        Time grid passed to the LF operation. This may be extended for forward
-        solves.
-    original_ts : jnp.ndarray
-        Time grid supplied by the caller before any hybrid extension.
+        Time grid passed to the LF operation.
     target_shape : tuple[int, ...]
         Shape the LF result will be interpolated/truncated to before merging.
     sources : object, optional
         Source geometry for inverse operations.
-    wpt, data_wpt, img_wpt : MSWPT, optional
-        Wave-packet transforms relevant to the operation.
-    data_domain : Domain, optional
-        Full-resolution data domain for inverse operations.
     """
 
-    operation: HybridOperationName
-    config: HybridSolverConfig
     domain: Domain
-    input_domain: Domain
     component_domain: Domain
-    full_sensors: Any
-    component_sensors: Any
-    full_sensor_mask: jnp.ndarray
     component_sensor_mask: jnp.ndarray
     ts: jnp.ndarray
-    original_ts: jnp.ndarray
     target_shape: Tuple[int, ...]
     sources: Any = None
-    wpt: Optional[MSWPT] = None
-    data_wpt: Optional[MSWPT] = None
-    img_wpt: Optional[MSWPT] = None
-    data_domain: Optional[Domain] = None
-
-    @property
-    def split_config(self) -> HybridSolverConfig:
-        """Alias for ``config`` for adapters that name it by responsibility."""
-        return self.config
 
 
 @dataclass(frozen=True)
@@ -333,100 +293,31 @@ class HybridBackend:
         )
 
 
-class InterpolationStrategy(ABC):
-    """Abstract base for spatial interpolation strategies."""
-
-    @abstractmethod
-    def interpolate(self, data: jnp.ndarray, target_shape: Tuple) -> jnp.ndarray:
-        """
-        Interpolate data to a target shape.
-
-        Parameters
-        ----------
-        data : jnp.ndarray
-            Input array.
-        target_shape : Tuple[int, ...]
-            Desired output shape.
-
-        Returns
-        -------
-        jnp.ndarray
-            Interpolated array.
-        """
-        pass
+def _interpolate_fourier(
+    data: jnp.ndarray, target_shape: Tuple[int, ...]
+) -> jnp.ndarray:
+    """Resize spatial data with unitary Fourier padding or cropping."""
+    if len(target_shape) != data.ndim:
+        raise ValueError(
+            f"target_shape must have length {data.ndim}, got {target_shape}."
+        )
+    return utils.interpolate_fourier(
+        data, target_shape, input_type="spatial", output_type="spatial"
+    ).real
 
 
-class FourierInterpolation(InterpolationStrategy):
-    """Unitary Fourier resizing (periodic boundaries assumed)."""
-
-    def interpolate(self, data: jnp.ndarray, target_shape: Tuple) -> jnp.ndarray:
-        """
-        Interpolate by Fourier-domain padding or cropping.
-
-        Parameters
-        ----------
-        data : jnp.ndarray
-            Spatial-domain array to resize.
-        target_shape : Tuple[int, ...]
-            Desired output shape.
-
-        Returns
-        -------
-        jnp.ndarray
-            Real-valued unitary Fourier resize.
-
-        Notes
-        -----
-        This primitive performs no pointwise amplitude correction. The hybrid
-        owner has the source/target-domain context needed to distinguish a
-        full-field resize from detector-data resizing and applies the matched
-        correction there.
-        """
-        if len(target_shape) != data.ndim:
-            raise ValueError(
-                f"target_shape must have length {data.ndim}, got {target_shape}."
-            )
-        return utils.interpolate_fourier(
-            data, target_shape, input_type="spatial", output_type="spatial"
-        ).real
-
-
-class ZoomInterpolation(InterpolationStrategy):
-    """Spline-based interpolation (handles non-periodic domains)."""
-
-    def __init__(self, order: int = 3):
-        """
-        Initialize spline interpolation order.
-
-        Parameters
-        ----------
-        order : int, default=3
-            Spline order passed to :func:`scipy.ndimage.zoom`.
-        """
-        self.order = order
-
-    def interpolate(self, data: jnp.ndarray, target_shape: Tuple) -> jnp.ndarray:
-        """
-        Interpolate by spline zoom factors.
-
-        Parameters
-        ----------
-        data : jnp.ndarray
-            Input array.
-        target_shape : Tuple[int, ...]
-            Desired output shape.
-
-        Returns
-        -------
-        jnp.ndarray
-            Resized array from :func:`scipy.ndimage.zoom`.
-        """
-        if len(target_shape) != data.ndim:
-            raise ValueError(
-                f"target_shape must have length {data.ndim}, got {target_shape}."
-            )
-        zoom_factors = tuple(o / i for o, i in zip(target_shape, data.shape))
-        return jnp.asarray(zoom(data, zoom_factors, order=self.order))
+def _interpolate_zoom(
+    data: jnp.ndarray, target_shape: Tuple[int, ...], *, order: int
+) -> jnp.ndarray:
+    """Resize spatial data with spline interpolation."""
+    if len(target_shape) != data.ndim:
+        raise ValueError(
+            f"target_shape must have length {data.ndim}, got {target_shape}."
+        )
+    zoom_factors = tuple(
+        output / input_ for output, input_ in zip(target_shape, data.shape)
+    )
+    return jnp.asarray(zoom(data, zoom_factors, order=order))
 
 
 class HybridSolver(eqx.Module):
@@ -451,8 +342,7 @@ class HybridSolver(eqx.Module):
 
     Notes
     -----
-    The LF backend does not need to subclass :class:`beamax.solvers.Solver`.
-    It only needs to provide at least one operation through
+    The LF backend only needs to provide at least one operation through
     :class:`HybridBackend`. Missing operations fail when called, not at hybrid
     construction time.
     """
@@ -460,7 +350,6 @@ class HybridSolver(eqx.Module):
     lf_backend: HybridBackend = eqx.field(static=True)
     hf_solver: Any
     config: HybridSolverConfig = eqx.field(static=True)
-    _interpolator: InterpolationStrategy = eqx.field(static=True)
 
     def __init__(
         self,
@@ -487,20 +376,11 @@ class HybridSolver(eqx.Module):
         self.lf_backend = lf_backend
         self.hf_solver = hf_solver
 
+        if config is not None and config_kwargs:
+            raise ValueError("Pass either config or keyword configuration, not both.")
         if config is None:
             config = HybridSolverConfig(**config_kwargs)
         self.config = config
-
-        # Setup interpolation strategy
-        if config.interp_method == "fourier":
-            self._interpolator = FourierInterpolation()
-        elif config.interp_method == "zoom":
-            self._interpolator = ZoomInterpolation(config.order)
-        else:
-            raise ValueError(
-                f"Unknown interp_method: {config.interp_method}. "
-                f"Must be 'fourier' or 'zoom'"
-            )
 
     @staticmethod
     def create_with_domain(
@@ -526,7 +406,7 @@ class HybridSolver(eqx.Module):
         domain : Domain
             Domain whose periodic flags determine interpolation choice.
         config : HybridSolverConfig, optional
-            Explicit configuration. If provided, ``config_kwargs`` are ignored.
+            Explicit configuration.
         **config_kwargs
             Configuration options used when ``config`` is ``None``.
 
@@ -535,10 +415,11 @@ class HybridSolver(eqx.Module):
         HybridSolver
             Configured hybrid solver.
         """
+        if config is not None and config_kwargs:
+            raise ValueError("Pass either config or keyword configuration, not both.")
         if config is None:
             config_dict = config_kwargs.copy()
 
-            # Auto-select interpolation method if not specified
             if "interp_method" not in config_dict:
                 if all(domain.periodic):
                     config_dict["interp_method"] = "fourier"
@@ -716,22 +597,20 @@ class HybridSolver(eqx.Module):
         solver_method = self.lf_backend.require(operation)
         lf_result = jnp.asarray(solver_method(lf_data, context))
 
-        # Apply windowing if enabled and downsampled
         if apply_windowing and self.config.downsample:
             lf_result = self._apply_window(lf_result)
 
-        # Apply interpolation if enabled and downsampled
         if apply_interpolation and self.config.downsample:
             source_shape = tuple(int(n) for n in lf_result.shape)
-            lf_result = self._interpolator.interpolate(lf_result, context.target_shape)
+            if self.config.interp_method == "fourier":
+                lf_result = _interpolate_fourier(lf_result, context.target_shape)
+            else:
+                lf_result = _interpolate_zoom(
+                    lf_result, context.target_shape, order=self.config.order
+                )
             if operation == "forward" and self.config.interp_method == "fourier":
-                # The LF initial condition is obtained by cropping a unitary
-                # d-D DFT, which inflates its coarse samples by
-                # sqrt(prod(N_full / N_coarse)). A detector record generally
-                # has fewer spatial axes than that initial field, so bare
-                # unitary detector-grid resizing cancels only part of the
-                # inflation. Restore physical sample amplitudes using both the
-                # output-grid ratio and the full/component domain-volume ratio.
+                # Correct unitary-crop inflation when the field and detector
+                # records have different numbers of spatial axes.
                 output_ratio = math.prod(
                     target / source
                     for source, target in zip(source_shape, context.target_shape)
@@ -907,41 +786,28 @@ class HybridSolver(eqx.Module):
 
         mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors
 
-        # Split into HF/LF
         p0_HF, p0_LF, ds_mask, ds_domain = self._split_frequencies(
             p0, mask, wpt, domain
         )
         p0_HF, p0_LF = p0_HF.real, p0_LF.real
 
-        # Extend time if configured
         ts_extended = self._extend_time(ts)
         original_Nt = len(ts)
 
-        # Solve HF with extended time
         hf_result = self._solve_hf(
             p0_HF, domain, sensors, mask, ts_extended, wpt, method="forward"
         )
 
-        # Apply window to HF result
         hf_result = self._apply_window(hf_result)
 
         context = HybridContext(
-            operation="forward",
-            config=self.config,
             domain=domain,
-            input_domain=domain,
             component_domain=ds_domain,
-            full_sensors=sensors,
-            component_sensors=ds_mask,
-            full_sensor_mask=mask,
             component_sensor_mask=ds_mask,
             ts=ts_extended,
-            original_ts=ts,
             target_shape=tuple(hf_result.shape),
-            wpt=wpt,
         )
 
-        # Solve LF with extended time (windowing + interpolation inside).
         lf_result = self._run_lf_backend(
             "forward",
             p0_LF,
@@ -950,7 +816,6 @@ class HybridSolver(eqx.Module):
             apply_interpolation=True,
         )
 
-        # Truncate both to original time length
         if self.config.downsample and self.config.use_time_extension:
             hf_result = hf_result[:original_Nt, ...]
             lf_result = lf_result[:original_Nt, ...]
@@ -1003,13 +868,11 @@ class HybridSolver(eqx.Module):
 
         mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors
 
-        # Split recorded data into HF/LF
         data_HF, data_LF, ds_mask, ds_domain = self._split_frequencies(
             data, mask, data_wpt, data_domain
         )
         data_HF, data_LF = data_HF.real, data_LF.real
 
-        # Solve HF in reconstruction domain.
         hf_result = self._solve_hf(
             data_HF,
             domain,
@@ -1024,31 +887,20 @@ class HybridSolver(eqx.Module):
         )
 
         context = HybridContext(
-            operation="time_reversal",
-            config=self.config,
             domain=domain,
-            input_domain=data_domain,
             component_domain=ds_domain,
-            full_sensors=sensors,
-            component_sensors=ds_mask,
-            full_sensor_mask=mask,
             component_sensor_mask=ds_mask,
             ts=ts,
-            original_ts=ts,
             target_shape=tuple(hf_result.shape),
             sources=sources,
-            data_wpt=data_wpt,
-            img_wpt=img_wpt,
-            data_domain=data_domain,
         )
 
-        # Solve LF in component domain, then interpolate to reconstruction shape.
         lf_result = self._run_lf_backend(
             "time_reversal",
             data_LF,
             context,
-            apply_windowing=False,  # No windowing for TR
-            apply_interpolation=True,  # Still need interpolation
+            apply_windowing=False,
+            apply_interpolation=True,
         )
 
         return jnp.asarray(hf_result + lf_result)
@@ -1097,13 +949,11 @@ class HybridSolver(eqx.Module):
 
         mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors
 
-        # Split recorded data into HF/LF
         data_HF, data_LF, ds_mask, ds_domain = self._split_frequencies(
             data, mask, data_wpt, data_domain
         )
         data_HF, data_LF = data_HF.real, data_LF.real
 
-        # Solve HF adjoint
         hf_result = self._solve_hf(
             data_HF,
             domain,
@@ -1118,25 +968,14 @@ class HybridSolver(eqx.Module):
         )
 
         context = HybridContext(
-            operation="adjoint",
-            config=self.config,
             domain=domain,
-            input_domain=data_domain,
             component_domain=ds_domain,
-            full_sensors=sensors,
-            component_sensors=ds_mask,
-            full_sensor_mask=mask,
             component_sensor_mask=ds_mask,
             ts=ts,
-            original_ts=ts,
             target_shape=tuple(hf_result.shape),
             sources=sources,
-            data_wpt=data_wpt,
-            img_wpt=img_wpt,
-            data_domain=data_domain,
         )
 
-        # Solve LF adjoint in component domain, then interpolate to reconstruction shape.
         lf_result = self._run_lf_backend(
             "adjoint",
             data_LF,

@@ -1,7 +1,3 @@
-# Pyright otherwise flags the MSWPT eqx.Module init-set fields that follow a
-# field with a default; equinox supports this pattern at runtime via its custom
-# __init__, but pyright applies plain dataclass ordering rules.
-# pyright: reportGeneralTypeIssues=false
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -10,13 +6,29 @@ from jax.lax import fori_loop
 from jaxtyping import Array, Float, Int, Num
 from typing import List, Tuple, Union
 
-from beamax import utils
 from beamax.decomposition import DyadicDecomposition
+from beamax.utils.arrays import extract_centered_box
+from beamax.utils.coeff_index import compute_coeff_shapes, find_level
+from beamax.utils.fft import convert_space, unitary_fft, unitary_ifft
 
 
-# Per-axis grid lengths can arrive as either a (d,) array or a plain tuple of
-# ints. The function ``jnp.array(...)``s its argument anyway, so we accept both.
-DomainLength = Union[Int[Array, " d"], Tuple[int, ...]]
+def _analyse_box(
+    spectrum: jax.Array,
+    packed_filter: jax.Array,
+    support_shape: Tuple[int, ...],
+    centre: jax.Array,
+    grid_shape: jax.Array,
+    half_support: jax.Array,
+) -> jax.Array:
+    """Return the MSWPT coefficients for one local Fourier box."""
+    filtered = packed_filter * extract_centered_box(spectrum, support_shape, centre)
+    parity_index = (centre + grid_shape // 2) // half_support
+    parity_sign = 1 - 2 * (parity_index & 1)
+    # Apply the sign after integer division so odd half-supports keep the
+    # transform's established recentering convention.
+    rolls = parity_sign * (half_support // 2)
+    filtered = jnp.roll(filtered, rolls, axis=tuple(range(spectrum.ndim)))
+    return unitary_ifft(filtered)
 
 
 def _validate_transform_configuration(redundancy: int, windowing: str) -> None:
@@ -36,15 +48,14 @@ def _validate_transform_configuration(redundancy: int, windowing: str) -> None:
 def compute_windowed_gaussian(
     centre: Int[Array, " d"],
     meshgrid: Int[Array, "*N d"],
-    # Plain int when called directly; scalar Array when indexed from a vmap'd
-    # box_lengths buffer.
+    # vmap supplies a scalar array; direct calls may use int.
     box_length,
     box_aspect_ratio: Union[Int[Array, " d"], Tuple[int, ...]],
-    domain_length: DomainLength,
+    domain_length: Union[Int[Array, " d"], Tuple[int, ...]],
     redundancy: int,
     windowing: str,
 ) -> Float[Array, "*N"]:
-    """
+    r"""
     Windowed N-D Gaussian in Fourier index space.
 
     Parameters
@@ -56,13 +67,14 @@ def compute_windowed_gaussian(
     box_length : int
         Smallest-axis tile length for this level.
     box_aspect_ratio : jnp.ndarray, shape (d,)
-        Per-axis aspect multipliers. Values ≥ 1 with at least one 1.
+        Per-axis aspect multipliers. Every component satisfies $a_i \ge 1$,
+        with at least one satisfying $a_i = 1$.
     domain_length : array-like, shape (d,)
         Per-axis grid lengths. These define the periodic wrap independently on
         each Fourier axis.
     redundancy : int
         Supported translation-lattice redundancy (1 or 2). Redundancy 2 does
-        not by itself make the Gaussian-window frame tight.
+        not by itself make the Gaussian window frame tight.
     windowing : {"none", "rectangular", "rectangular_mirror"}
         Windowing function applied to the Gaussian.
 
@@ -97,7 +109,6 @@ def compute_windowed_gaussian(
 
 
 def single_filter_idx(
-    # Accepts a plain int or an int array (the vmap'd call passes an array).
     centre_idx,
     meshgrid: Int[Array, "*N d"],
     dyadic_decomp: DyadicDecomposition,
@@ -125,7 +136,7 @@ def single_filter_idx(
     jnp.ndarray, shape (*N,)
         Filter values.
     """
-    level = utils.find_level(dyadic_decomp, centre_idx)
+    level = find_level(dyadic_decomp, centre_idx)
 
     return compute_windowed_gaussian(
         dyadic_decomp.centres_ndim[centre_idx],
@@ -149,7 +160,7 @@ def single_filter_coord(
     redundancy: int,
     windowing: str = "rectangular",
 ) -> Float[Array, "*N"]:
-    """
+    r"""
     Filter for a single tile (by `(centre, level)` pair).
 
     Parameters
@@ -157,7 +168,7 @@ def single_filter_coord(
     centre : jnp.ndarray, shape (d,)
         Tile centre in Fourier indices.
     level : int
-        Dyadic level (0..L-1).
+        Dyadic level $\ell \in \{0, \ldots, L-1\}$.
     meshgrid : jnp.ndarray, shape (*N, d)
         Fourier meshgrid.
     dyadic_decomp : DyadicDecomposition
@@ -187,24 +198,21 @@ def single_filter_coord(
     )
 
 
-vmap_filter_coord = vmap(single_filter_coord, in_axes=(0, 0, None, None, None, None))
-
-
 def compute_frame_phase(
     dyadic_decomp: DyadicDecomposition,
     boxidx: Union[int, Int[Array, "..."]],
     k: Int[Array, "... d"],
     redundancy: int,
 ) -> Num[Array, "..."]:
-    """Unit-modulus phase induced by local-patch parity recentering.
+    r"""Unit-modulus phase induced by local-patch parity recentering.
 
     The fast transform parity-rolls each local Fourier patch before applying
     its FFT.  This factor converts the clean global modulation
-    ``exp(-2 pi i m.k / S)`` into the exact coefficient convention used by the
-    implemented transform, including rectangular supports and both supported
-    redundancies.
+    $\exp\left(-2\pi i\sum_{j=1}^{d}m_jk_j/S_j\right)$ into the exact
+    coefficient convention used by the implemented transform, including
+    rectangular supports and both supported redundancies.
     """
-    level = utils.find_level(dyadic_decomp, boxidx)
+    level = find_level(dyadic_decomp, boxidx)
     box_length = dyadic_decomp.box_lengths[level]
     if box_length.ndim > 0:
         box_length = box_length[..., None]
@@ -218,49 +226,9 @@ def compute_frame_phase(
     parity_sign = 1 - 2 * (parity_index & 1)
     rolls = parity_sign * (half_support // 2)
     phase_cycles = jnp.sum((centre - rolls) * k / support_lengths, axis=-1)
-    # Reduce before evaluating the exponential.  Besides improving accuracy for
-    # large indices, this makes mathematically integral offsets (including the
-    # reported rho=2 isotropic configurations) evaluate as exactly zero cycles
-    # instead of feeding a large multiple of an approximate float32 pi to exp.
+    # Reduction makes integral offsets exact and improves large-index accuracy.
     phase_cycles = jnp.remainder(phase_cycles, 1.0)
     return jnp.exp(2 * jnp.pi * 1j * phase_cycles)
-
-
-def compute_sum_gsquare(
-    dyadic_decomp: DyadicDecomposition,
-    redundancy: int,
-    windowing: str = "rectangular",
-) -> Float[Array, "*N"]:
-    """
-    Sum of squares of all tile filters.
-
-    Parameters
-    ----------
-    dyadic_decomp : DyadicDecomposition
-        Frequency tiling.
-    redundancy : int
-        1 (basis) or 2 (frame).
-    windowing : str
-        Windowing function.
-
-    Returns
-    -------
-    jnp.ndarray, shape (*N,)
-        Σ_b g_b^2 over all boxes.
-
-    Notes
-    -----
-    Implemented with `lax.fori_loop` to avoid large vmaps.
-    """
-    _validate_transform_configuration(redundancy, windowing)
-    filters = vmap_filter_idx(
-        jnp.arange(dyadic_decomp.total_num_boxes),
-        dyadic_decomp.fourier_meshgrid,
-        dyadic_decomp,
-        redundancy,
-        windowing,
-    )
-    return jnp.sum(jnp.square(filters), axis=0)
 
 
 def compute_gh_filters(
@@ -268,8 +236,9 @@ def compute_gh_filters(
     redundancy: int,
     windowing: str = "rectangular",
 ) -> Tuple[Float[Array, "B *N"], Float[Array, "B *N"]]:
-    """
-    Compute `g` tiles and their dual `h = g / Σ g^2`.
+    r"""
+    Compute the $g_b$ tiles and their duals
+    $h_b = g_b / \sum_{b'} g_{b'}^2$.
 
     Parameters
     ----------
@@ -337,7 +306,7 @@ def compute_frames(
     jnp.ndarray, shape (*N,)
         Complex atom, dtype = complex64/complex128.
     """
-    level = utils.find_level(dyadic_decomp, boxidx)
+    level = find_level(dyadic_decomp, boxidx)
     box_length = dyadic_decomp.box_lengths[level]
     support_lengths = (
         box_length * redundancy * jnp.asarray(dyadic_decomp.box_aspect_ratio)
@@ -355,7 +324,7 @@ def compute_frames(
 
 
 class MSWPT(eqx.Module):
-    """
+    r"""
     Multiscale Wave-Packet Transform.
 
     Parameters
@@ -376,9 +345,9 @@ class MSWPT(eqx.Module):
     redundancy : int
     windowing : str
     complex_dtype : jnp.dtype
-        complex64 unless JAX x64 enabled → complex128.
+        ``complex64`` unless JAX x64 is enabled, in which case ``complex128``.
     sum_gsquare : jnp.ndarray, shape (*N,)
-        Σ_b g_b^2 precomputed.
+        $\sum_b g_b^2$, precomputed.
     boxes_cumsum : Tuple[int, ...]
         Cumulative number of boxes per level (static).
     coeff_shapes : Tuple[Tuple[int, ...], ...]
@@ -392,10 +361,10 @@ class MSWPT(eqx.Module):
     _support_shapes : List[Tuple[int, ...]]
         Per-level support shapes (static).
     _box_shapes : List[Tuple[int, ...]]
-        Per-level “box lengths” in each axis (static).
-    _half_mask : jnp.ndarray
-        Mask selecting one spatial-frequency representative from each
-        conjugate pair.
+        Per-level "box lengths" in each axis (static).
+    half_mask : jnp.ndarray
+        Read-only mask selecting one spatial-frequency representative from
+        each conjugate pair.
 
     Notes
     -----
@@ -404,8 +373,8 @@ class MSWPT(eqx.Module):
     """
 
     dyadic_decomp: DyadicDecomposition = eqx.field()
-    redundancy: int = eqx.field(default=2, static=True)
-    windowing: str = eqx.field(default="rectangular", static=True)
+    redundancy: int = eqx.field(static=True)
+    windowing: str = eqx.field(static=True)
 
     complex_dtype: jnp.dtype = eqx.field(static=True)
     sum_gsquare: jnp.ndarray
@@ -452,8 +421,7 @@ class MSWPT(eqx.Module):
                 "choose compatible grid, box counts, and aspect ratios."
             )
         self.sum_gsquare = sum_gsquare
-        # `jax.config.x64_enabled` is a dynamically-attached attribute that
-        # pyright cannot see; access it via getattr to keep the type-checker happy.
+        # Pyright cannot see JAX's dynamically attached x64 flag.
         x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
         self.complex_dtype = jnp.complex128 if x64_enabled else jnp.complex64
         boxes_cumsum_arr = jnp.concatenate(
@@ -461,19 +429,17 @@ class MSWPT(eqx.Module):
         )
         self.boxes_cumsum = tuple(boxes_cumsum_arr.astype(int).tolist())
 
-        coeff_shapes_arr = utils.compute_coeff_shapes(
+        coeff_shapes_arr = compute_coeff_shapes(
             self.dyadic_decomp,
             self.redundancy,
             jnp.arange(self.dyadic_decomp.num_levels),
         )
-        # Convert JAX array to tuple of tuples (static structure)
         self.coeff_shapes = tuple(
             tuple(int(x) for x in row) for row in coeff_shapes_arr
         )
 
         coeffs_cumsum_list = [0]
         for shape in self.coeff_shapes:
-            # Calculate product of shape dimensions
             prod = 1
             for dim in shape:
                 prod *= dim
@@ -508,10 +474,15 @@ class MSWPT(eqx.Module):
         )
         self.gfilts_packed = self._compute_all_g_packed()
 
+    @property
+    def half_mask(self) -> jnp.ndarray:
+        """Mask selecting one representative from each conjugate frame pair."""
+        return self._half_mask
+
     @eqx.filter_jit
     def _compute_sum_gsquare(self):
-        """
-        Compute Σ_b g_b^2 over all boxes.
+        r"""
+        Compute $\sum_b g_b^2$ over all boxes.
 
         Returns
         -------
@@ -561,12 +532,12 @@ class MSWPT(eqx.Module):
         Returns
         -------
         List[jnp.ndarray]
-            For each level `ℓ`, an array of shape `support_shape[ℓ]` containing
-            the centered, cropped `g` tile for the *first* box at that level.
+            One array per level, containing the centred, cropped `g` tile for
+            that level's first box.
 
         Notes
         -----
-        - The packed tile is extracted with wrap-around at the level’s first centre.
+        - The packed tile is extracted with wrap-around at the level's first centre.
         - Used to avoid recomputing or allocating full-size filters inside loops.
         """
         packs = []
@@ -583,7 +554,7 @@ class MSWPT(eqx.Module):
             )
             support = self._support_shapes[lvl]
             c = centres[start]
-            packed = utils.extract_centered_box(g, support, c)
+            packed = extract_centered_box(g, support, c)
             packs.append(packed)
 
         return packs
@@ -591,38 +562,21 @@ class MSWPT(eqx.Module):
     def _compute_coeffs(
         self, ft_sum_sq: Num[Array, "*N"]
     ) -> Num[Array, " total_coeffs"]:
-        """
-        Compute flat MSWPT coefficients level-by-level from `ft_sum_sq`.
+        r"""Compute flat MSWPT coefficients from pre-whitened Fourier data.
 
         Parameters
         ----------
         ft_sum_sq : jnp.ndarray, shape (*N,), complex
-            Fourier-domain data divided by Σ g^2 (pre-whitened).
+            Fourier-domain data divided by $\sum_b g_b^2$ (pre-whitened).
 
         Returns
         -------
         jnp.ndarray, shape (total_coeffs,), complex
             Concatenated coefficients across all levels.
-
-        Algorithm
-        ---------
-        For each level:
-        1) Extract the Fourier patch around each centre with wrap-around.
-        2) Multiply by packed `g`.
-        3) Apply parity-preserving rolls to unwrap support.
-        4) IFFT (unitary) to get coefficients for that box.
-        5) Flatten and place into the global flat buffer.
-
-        Notes
-        -----
-        - Uses `lax.fori_loop` within each level to keep memory bounded.
-        - Axis rolls depend on centre and per-level box lengths (integer, static).
         """
         N = jnp.array(self.dyadic_decomp.N)
         num_levels = self.dyadic_decomp.num_levels
-        d = self.dyadic_decomp.ndim
         centres_ndim = self.dyadic_decomp.centres_ndim
-        axis = tuple(range(d))
         centres = centres_ndim + N // 2
 
         all_coeffs = jnp.zeros((self.total_coeffs,), dtype=self.complex_dtype)
@@ -635,58 +589,30 @@ class MSWPT(eqx.Module):
             centres_level = centres[start_idx:end_idx]
             gfilt_level_packed = self.gfilts_packed[level]
 
-            box_length_level = self._box_shapes[level]
+            half_support_level = jnp.array(self._box_shapes[level])
             support_shape_level = self._support_shapes[level]
 
-            # This function processes a single box for the forward transform
             def loop_body(i, coeffs_for_level):
-                """
-                Compute and store coefficients for one box at the current level.
-
-                Parameters
-                ----------
-                i : int
-                    Local box index within the level.
-                coeffs_for_level : jnp.ndarray
-                    Running coefficient tensor for the level.
-
-                Returns
-                -------
-                jnp.ndarray
-                    Updated coefficient tensor for the level.
-                """
+                """Store one box's coefficients."""
                 centre = centres_level[i]
-
-                fft_patch = utils.extract_centered_box(
-                    ft_sum_sq, support_shape_level, centre
+                coeff = _analyse_box(
+                    ft_sum_sq,
+                    gfilt_level_packed,
+                    support_shape_level,
+                    centre,
+                    N,
+                    half_support_level,
                 )
-                support_filtered = gfilt_level_packed * fft_patch
-
-                box_half_support = jnp.array(box_length_level)
-                rolls_intermediate = (centre + N // 2) // box_half_support
-                parity_sign = 1 - 2 * (rolls_intermediate & 1)
-                # Parenthesise the half-length before applying the sign. For
-                # an odd half-support, ``(-1 * length) // 2`` floors to -1,
-                # whereas the inverse correctly uses ``-(length // 2) == 0``.
-                # The old ordering broke rho=1 anisotropic round trips.
-                rolls = parity_sign * (box_half_support // 2)
-                support_filtered = jnp.roll(support_filtered, rolls, axis=axis)
-
-                # Compute IFFT and update the coefficient array for this level
-                coeff = utils.unitary_ifft(support_filtered)
                 return coeffs_for_level.at[i].set(coeff)
 
-            # Initialize an empty array for this level's coefficients
             initial_coeffs_level = jnp.zeros(
                 self.coeff_shapes[level], dtype=self.complex_dtype
             )
 
-            # Loop over all boxes in this level
             final_coeffs_level = lax.fori_loop(
                 0, end_idx - start_idx, loop_body, initial_coeffs_level
             )
 
-            # Update the full coefficient vector
             all_coeffs = lax.dynamic_update_slice(
                 all_coeffs, jnp.ravel(final_coeffs_level), (coeff_idx_prev,)
             )
@@ -697,7 +623,7 @@ class MSWPT(eqx.Module):
     def forward(
         self, data: Num[Array, "*N"], input_type: str
     ) -> Num[Array, " total_coeffs"]:
-        """
+        r"""
         Forward MSWPT.
 
         Parameters
@@ -714,9 +640,9 @@ class MSWPT(eqx.Module):
 
         Notes
         -----
-        - Converts to Fourier (`utils.unitary_fft`) if needed.
-        - Divides by Σ g^2 to apply the pointwise canonical-dual analysis
-          filters for this painless frame construction.
+        - Converts to Fourier with `unitary_fft` if needed.
+        - Divides by $\sum_b g_b^2$ to apply the pointwise canonical-dual
+          analysis filters for this painless frame construction.
         - JIT-compiled while preserving the reusable transform state. The
           input data buffer may still be donated for memory efficiency.
         """
@@ -727,7 +653,7 @@ class MSWPT(eqx.Module):
                 "Gaussian, so it cannot provide an exact analysis/synthesis "
                 "pair. Use 'rectangular' or 'rectangular_mirror'."
             )
-        ft_data = utils.convert_space(data, input_type, "fourier")
+        ft_data = convert_space(data, input_type, "fourier")
         ft_sum_gsq = ft_data / self.sum_gsquare
         coeffs = self._compute_coeffs(ft_sum_gsq)
         return coeffs
@@ -736,7 +662,7 @@ class MSWPT(eqx.Module):
     def inverse(
         self, coeffs: Num[Array, " total_coeffs"], output_type: str
     ) -> Num[Array, "*N"]:
-        """
+        r"""
         Fast synthesis MSWPT; the exact inverse of :meth:`forward` for its
         supported window configurations.
 
@@ -757,15 +683,24 @@ class MSWPT(eqx.Module):
         With ``windowing="none"`` this remains a synthesis-only map for the
         Gaussian restricted to the transform's nominal packed support (the
         same packed atom as ``windowing="rectangular"``). It is *not* the
-        global unwindowed atom returned by :func:`compute_frames`; there is
-        deliberately no corresponding fast analysis call.
+        global unwindowed atom returned by :func:`compute_frames`.
 
-        The synthesis mirrors the analysis steps in :meth:`forward`::
+        The synthesis mirrors the analysis steps in :meth:`forward`:
 
-            forward:   patch = extract(F / Σg², centre);   c = IFFT(roll(g*patch, +r))
-            inverse:   tmp = FFT(c);                       add += g * roll(tmp, -r)
+        $$
+        \begin{aligned}
+        P_b &= \operatorname{extract}\left(F / \sum_j g_j^2, x_b\right),
+        &
+        c_b &= \operatorname{IFFT}\left(
+            \operatorname{roll}(g_b P_b, +r_b)
+        \right), \\
+        T_b &= \operatorname{FFT}(c_b),
+        &
+        F &\leftarrow F + g_b\operatorname{roll}(T_b, -r_b).
+        \end{aligned}
+        $$
 
-        where the periodic scatter-add happens at the true box centre.
+        The final update is a periodic scatter-add at the true box centre $x_b$.
         """
         N = jnp.array(self.dyadic_decomp.N, dtype=jnp.int32)
         L = self.dyadic_decomp.num_levels
@@ -774,7 +709,6 @@ class MSWPT(eqx.Module):
         centres_all = self.dyadic_decomp.centres_ndim.astype(jnp.int32)
 
         for level in range(L):
-            # ----- static per-level data -----
             start = int(self.boxes_cumsum[level])
             end = int(self.boxes_cumsum[level + 1])
             nbox = end - start
@@ -782,62 +716,42 @@ class MSWPT(eqx.Module):
             c_lo = int(self.coeffs_cumsum[level])
             c_hi = int(self.coeffs_cumsum[level + 1])
 
-            gfilt = self.gfilts_packed[level]  # (*S,)
+            gfilt = self.gfilts_packed[level]
             S_tuple = tuple(int(s) for s in gfilt.shape)
             d = len(S_tuple)
 
-            box_len = jnp.array(self._box_shapes[level], dtype=jnp.int32)  # (d,)
+            box_len = jnp.array(self._box_shapes[level], dtype=jnp.int32)
 
-            # Precompute support indices/meshgrid once per level (static)
             aranges = tuple(jnp.arange(Sk, dtype=jnp.int32) for Sk in S_tuple)
             base_grids = jnp.meshgrid(*aranges, indexing="ij")
             S = jnp.array(S_tuple, dtype=jnp.int32)
             S_half = S // 2
 
-            # Slice coeffs and reshape to (nbox, *S)
             coeffs_lvl = lax.dynamic_slice(coeffs, (c_lo,), (c_hi - c_lo,))
             coeffs_lvl = coeffs_lvl.reshape((nbox, *S_tuple))
 
-            centres_lvl = centres_all[start:end]  # (nbox, d)
+            centres_lvl = centres_all[start:end]
 
             def body(i, ft):
-                """
-                Scatter-add one inverse-transform box contribution.
+                """Scatter-add one inverse-transform box."""
+                centre = centres_lvl[i]
 
-                Parameters
-                ----------
-                i : int
-                    Local box index within the level.
-                ft : jnp.ndarray, shape (*N,)
-                    Running Fourier-domain reconstruction.
-
-                Returns
-                -------
-                jnp.ndarray, shape (*N,)
-                    Updated Fourier-domain reconstruction.
-                """
-                centre = centres_lvl[i]  # (d,)
-
-                # ----- compute parity rolls r (same as forward) -----
                 ri = (centre + (N // 2)) // box_len
-                sign = 1 - 2 * (ri & 1)  # even→+1, odd→-1
-                rolls = sign * (box_len // 2)  # vector (d,)
+                sign = 1 - 2 * (ri & 1)
+                rolls = sign * (box_len // 2)
 
-                # ----- local synthesis on support -----
-                cpatch = coeffs_lvl[i]  # (*S,)
-                fh = utils.unitary_fft(cpatch)  # FFT(c)
+                cpatch = coeffs_lvl[i]
+                fh = unitary_fft(cpatch)
 
-                # exact roll(fh, -rolls) using modular indexing on support
-                # jnp.roll(x, s) along axis k is x[take((arange - s) % S)]
+                # Exact roll by -rolls using modular support indices.
                 unrolled = fh
                 for ax in range(d):
-                    idx = (aranges[ax] + rolls[ax]) % S[ax]  # -(-rolls) == +rolls
+                    idx = (aranges[ax] + rolls[ax]) % S[ax]
                     unrolled = jnp.take(unrolled, idx, axis=ax)
 
-                contrib = gfilt * unrolled  # g * roll(FFT(c), -r)
+                contrib = gfilt * unrolled
 
-                # ----- periodic scatter-add at the true centre -----
-                c0 = (centre + (N // 2)) % N  # [0,N)
+                c0 = (centre + (N // 2)) % N
                 starts = (c0 - S_half) % N
                 grids = tuple(((starts[k] + base_grids[k]) % N[k]) for k in range(d))
 
@@ -846,67 +760,4 @@ class MSWPT(eqx.Module):
 
             ft_out = lax.fori_loop(0, nbox, body, ft_out)
 
-        # back to requested domain
-        return utils.convert_space(ft_out, "fourier", output_type)
-
-    def convert_to_array(self, coeffs: Num[Array, " total_coeffs"]) -> Num[Array, "*M"]:
-        """
-        Reshape flat coefficients into a dense tensor arranged by spatial support.
-
-        Parameters
-        ----------
-        coeffs : jnp.ndarray, shape (total_coeffs,), complex
-            Flat vector returned by :meth:`forward`.
-
-        Returns
-        -------
-        jnp.ndarray
-            Dense coefficient tensor with per-level boxes unflattened and placed
-            at their centred positions. **Shape:** `(redundancy * N1, redundancy * N2, …)`,
-            **dtype:** complex.
-
-        Notes
-        -----
-        - Intended for diagnostics/visualization; not required for forward/inverse.
-        - Uses integer centres and per-level support shapes; pure JAX.
-        """
-        N = jnp.array(self.dyadic_decomp.N)
-        num_levels = self.dyadic_decomp.num_levels
-        centres_ndim = self.dyadic_decomp.centres_ndim
-        centres = centres_ndim * 2 + N
-        coeffs_array = jnp.zeros((self.redundancy * N), dtype=self.complex_dtype)
-
-        for level in range(num_levels):
-            start_idx = self.boxes_cumsum[level]
-            end_idx = self.boxes_cumsum[level + 1]
-
-            coeff_idx_prev = self.coeffs_cumsum[level]
-            coeff_idx_next = self.coeffs_cumsum[level + 1]
-
-            box_length_level = self._box_shapes[level]
-
-            centres_level = centres[start_idx:end_idx]
-
-            support_shape_level = self._support_shapes[level]
-
-            length = jnp.prod(jnp.array(support_shape_level))
-            coeffs_level = coeffs[coeff_idx_prev:coeff_idx_next]
-
-            # unflatten coefficients, place it in the correct position
-            coeff_offset = 0
-            for boxidx in range(self.dyadic_decomp.num_boxes_ndim[level]):
-                center = centres_level[boxidx]
-
-                # Calculate box boundaries
-                half_length = jnp.array(box_length_level)
-                starts = center - half_length
-                ends = center + half_length
-
-                # Handle multi-dimensional slicing
-                slices = tuple(slice(start, end) for start, end in zip(starts, ends))
-
-                box = coeffs_level[coeff_offset : coeff_offset + length]
-                box = jnp.reshape(box, support_shape_level)
-                coeffs_array = coeffs_array.at[slices].set(box)
-                coeff_offset += length
-        return coeffs_array
+        return convert_space(ft_out, "fourier", output_type)

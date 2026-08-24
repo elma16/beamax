@@ -1,16 +1,5 @@
-#!/usr/bin/env python
-"""
-Single Gaussian beam with viscous absorption: MSGB vs k-Wave.
+"""Compare lossless and absorbing Gaussian beams with k-Wave.
 
-This optional example propagates the same 1D Gaussian beam pair twice — once
-in a lossless medium and once in an absorbing medium — using both the MSGB
-solver and a k-Wave strip reference, then compares them in a single figure.
-
-The absorbing case is the headline: it shows that the Gaussian-beam viscous
-damping coefficient ``lambda`` and k-Wave's ``alpha_coeff`` produce visually
-matching spacetime fields and matching max-amplitude decay.
-
-Example category: Single Gaussian beam diagnostics
 Example extras: kwave,viz-mpl
 Example smoke: false
 """
@@ -20,35 +9,17 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize, TwoSlopeNorm
+from pathlib import Path
 
 from beamax import geometry, utils
 from beamax.gb import core, gb_solvers, gb_utils
-
+from beamax.solvers import KWaveSolver
 
 jax.config.update("jax_enable_x64", True)
 
-INSTALL_HINT = 'pip install -e ".[kwave,viz-mpl]"'
-
-
-def load_kwave_solver():
-    """Import k-Wave lazily so base beamax installs can still import this file."""
-    try:
-        from beamax.solvers import KWaveSolver
-    except ImportError as exc:
-        print(f"Skipping optional example: k-Wave is not installed ({INSTALL_HINT}).")
-        raise SystemExit(0) from exc
-    return KWaveSolver
-
 
 def lam_to_alpha_db_per_cm(lam: float, c0: float) -> float:
-    """
-    Convert the Gaussian-beam viscous coefficient ``lam`` to k-Wave's
-    ``alpha_coeff`` so the two solvers see matching effective absorption.
-
-    The factor of 1/2 is load-bearing: empirically the lossless residual
-    drops to machine precision and the absorbing residual stays small only
-    when the conversion is halved.
-    """
+    r"""Return $\alpha_{\mathrm{dB/cm}}=(\log_{10}e)\lambda/(10c_0)$."""
     return float(jnp.log10(jnp.e) / 5.0 * lam / c0 / 2.0)
 
 
@@ -60,7 +31,7 @@ def msgb_real_beam(domain, ts, lam: float) -> jnp.ndarray:
     mode = jnp.ones((b,))
     a0 = jnp.ones((b,))
     omega0 = jnp.ones((b,)) * 100.0
-    alpha0 = jnp.ones((b, d)) * 1j  # beam half-width parameter
+    alpha0 = jnp.ones((b, d)) * 1j
     m0 = gb_utils.prepare_M0(alpha0, None)
     periodic = jnp.array(domain.periodic)
 
@@ -92,7 +63,6 @@ def kwave_run(
     c0: float,
     alpha_coeff: float,
     cfl: float,
-    KWaveSolver,
 ):
     """Run a 1D k-Wave strip simulation with a matching absorbing medium."""
     n = p0_1d.shape[0]
@@ -118,16 +88,14 @@ def kwave_run(
         debug=False,
         quiet=True,
     )
-    p0_2d = p0_1d[:, None]  # k-Wave wants the strip dim explicit
+    p0_2d = p0_1d[:, None]
     return np.asarray(solver.forward(p0_2d, kw_domain, binary_mask, ts))
 
 
 def main() -> None:
-    KWaveSolver = load_kwave_solver()
-
     n = 512
     cfl = 0.3
-    lam = 5.0  # GB viscous coefficient; alpha_coeff is derived from this
+    lam = 5.0
 
     def c_fn(x):
         return 1.0 + 0.0 * x[..., 0]
@@ -142,12 +110,10 @@ def main() -> None:
     ts = domain.generate_time_domain()
     c0 = float(c_fn(jnp.zeros(1)))
 
-    # 1. MSGB beams (lossless + absorbing).
     u_loss = np.asarray(msgb_real_beam(domain, ts, lam=0.0))
     u_abs = np.asarray(msgb_real_beam(domain, ts, lam=lam))
 
-    # 2. k-Wave references, initialised from the MSGB p0 so the two solvers
-    #    see exactly the same initial condition.
+    # Use the same initial field in both solvers.
     alpha_db = lam_to_alpha_db_per_cm(lam, c0)
     p0_init = jnp.asarray(u_loss[0])
     k_loss = kwave_run(
@@ -156,7 +122,6 @@ def main() -> None:
         c0=c0,
         alpha_coeff=0.0,
         cfl=cfl,
-        KWaveSolver=KWaveSolver,
     ).reshape(len(ts), n)
     k_abs = kwave_run(
         p0_init,
@@ -164,26 +129,14 @@ def main() -> None:
         c0=c0,
         alpha_coeff=alpha_db,
         cfl=cfl,
-        KWaveSolver=KWaveSolver,
     ).reshape(len(ts), n)
 
-    dx = float(domain.dx[0])
-    dt = float(ts[1] - ts[0])
-
-    def rel_l2(u, ref):
-        return float(
-            np.sqrt(np.sum((u - ref) ** 2) * dx * dt)
-            / np.sqrt(np.sum(ref**2) * dx * dt)
-        )
-
-    e2_loss = rel_l2(u_loss, k_loss)
-    e2_abs = rel_l2(u_abs, k_abs)
+    e2_loss = utils.rel_l2(k_loss, u_loss)
+    e2_abs = utils.rel_l2(k_abs, u_abs)
     print(f"Damping coefficient lam = {lam}, alpha_coeff = {alpha_db:.4f} dB/cm")
     print(f"Lossless  rel-L2 (MSGB vs k-Wave): {e2_loss:.3e}")
     print(f"Absorbing rel-L2 (MSGB vs k-Wave): {e2_abs:.3e}")
 
-    # 3. One figure: top row spacetime panels (absorbing case), bottom row
-    #    quantitative comparisons (max-amplitude curves + initial/final snapshots).
     extent = [0.0, 1.0, float(ts[0]), float(ts[-1])]
     norm_abs = Normalize(
         vmin=min(k_abs.min(), u_abs.min()), vmax=max(k_abs.max(), u_abs.max())
@@ -194,67 +147,44 @@ def main() -> None:
 
     fig, axes = plt.subplots(2, 3, figsize=(14, 7.5), constrained_layout=True)
 
-    def _label_spacetime(ax, title):
-        ax.set_title(title)
-        ax.set_xlabel("x")
-        ax.set_ylabel("t")
-
-    im0 = axes[0, 0].imshow(
-        k_abs,
-        extent=extent,
-        origin="lower",
-        aspect="auto",
-        norm=norm_abs,
-        cmap="viridis",
+    spacetime_panels = (
+        (k_abs, norm_abs, "viridis", "k-Wave (absorbing)"),
+        (u_abs, norm_abs, "viridis", "MSGB (absorbing)"),
+        (diff, diff_norm, "RdBu_r", "k-Wave − MSGB (absorbing)"),
     )
-    _label_spacetime(axes[0, 0], "k-Wave (absorbing)")
-    fig.colorbar(im0, ax=axes[0, 0])
-
-    im1 = axes[0, 1].imshow(
-        u_abs,
-        extent=extent,
-        origin="lower",
-        aspect="auto",
-        norm=norm_abs,
-        cmap="viridis",
-    )
-    _label_spacetime(axes[0, 1], "MSGB (absorbing)")
-    fig.colorbar(im1, ax=axes[0, 1])
-
-    im2 = axes[0, 2].imshow(
-        diff,
-        extent=extent,
-        origin="lower",
-        aspect="auto",
-        norm=diff_norm,
-        cmap="RdBu_r",
-    )
-    _label_spacetime(axes[0, 2], "k-Wave − MSGB (absorbing)")
-    fig.colorbar(im2, ax=axes[0, 2])
+    for ax, (image, norm, cmap, title) in zip(axes[0], spacetime_panels):
+        im = ax.imshow(
+            image,
+            extent=extent,
+            origin="lower",
+            aspect="auto",
+            norm=norm,
+            cmap=cmap,
+        )
+        ax.set(title=title, xlabel="x", ylabel="t")
+        fig.colorbar(im, ax=ax)
 
     t = np.asarray(ts)
     axes[1, 0].plot(t, u_loss.max(axis=1), label="MSGB", color="C0")
     axes[1, 0].plot(t, k_loss.max(axis=1), "--", label="k-Wave", color="C3")
-    axes[1, 0].set_title(r"$\max_x |u(x,t)|$ — lossless")
-    axes[1, 0].set_xlabel("t")
+    axes[1, 0].set(title=r"$\max_x |u(x,t)|$ — lossless", xlabel="t")
     axes[1, 0].legend()
 
     axes[1, 1].plot(t, u_abs.max(axis=1), label="MSGB", color="C0")
     axes[1, 1].plot(t, k_abs.max(axis=1), "--", label="k-Wave", color="C3")
     axes[1, 1].set_yscale("log")
-    axes[1, 1].set_title(r"$\max_x |u(x,t)|$ — absorbing (log)")
-    axes[1, 1].set_xlabel("t")
+    axes[1, 1].set(title=r"$\max_x |u(x,t)|$ — absorbing (log)", xlabel="t")
     axes[1, 1].legend()
 
     x = np.asarray(domain.grid).reshape(-1)
     axes[1, 2].plot(x, u_loss[0], label="initial $p_0$", color="black")
     axes[1, 2].plot(x, u_loss[-1], "--", label="lossless, final", color="C3")
     axes[1, 2].plot(x, u_abs[-1], label="absorbing, final", color="C0")
-    axes[1, 2].set_title("snapshots")
-    axes[1, 2].set_xlabel("x")
+    axes[1, 2].set(title="snapshots", xlabel="x")
     axes[1, 2].legend()
 
-    out_dir = utils.example_plot_dir(__file__)
+    out_dir = Path("plots/single-gaussian-beam")
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "single_gaussian_beam_absorption.png"
     fig.savefig(out_path, dpi=180, bbox_inches="tight")
     plt.close(fig)

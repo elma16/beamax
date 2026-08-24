@@ -1,34 +1,16 @@
-#!/usr/bin/env python
-"""
-Differentiate through 2D Gaussian beam rays.
+"""Optimise a neural sound-speed field through the Gaussian beam ray ODE.
 
-This example ports the thesis ray-focusing setup to the public gallery. A
-small neural field represents `c(x)`, and autodiff through the Gaussian beam
-ray ODE optimizes the medium so a fan of rays focuses at a target point.
-
-Example category: Rays and autodiff
 Example extras: viz-mpl,autodiff
 Example smoke: false
-
-Requires Optax. Install with `pip install "beamax[viz-mpl,autodiff]"`, or
-from a checkout with `pip install -e ".[viz-mpl,autodiff]"`.
 """
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+import optax
+from pathlib import Path
 
-try:
-    import optax
-except ModuleNotFoundError as exc:
-    print(
-        "Skipping optional example: Optax is not installed "
-        '(`pip install "beamax[viz-mpl,autodiff]"`).'
-    )
-    raise SystemExit(0) from exc
-
-from beamax import utils
 from beamax.gb import gb_solvers
 from beamax.plotter import use_beamax_style
 
@@ -40,9 +22,7 @@ YMIN, YMAX = -10.0, 10.0
 EXTENT = [XMIN, XMAX, YMIN, YMAX]
 
 
-class NeuralC:
-    """Small MLP parametrization of the sound-speed field."""
-
+class NeuralSoundSpeed:
     def __init__(self, hidden_dim: int = 32, base_c: float = 1.0):
         self.base_c = base_c
         key = jax.random.PRNGKey(42)
@@ -71,7 +51,6 @@ class NeuralC:
 
 
 def ray_setup():
-    """Build the source line, upward launches, target focus, and time grid."""
     n_rays = 20
     source_x = jnp.linspace(-5.0, 5.0, n_rays)
     source_y = -7.0
@@ -90,7 +69,7 @@ def ray_setup():
 
 def solve_rays(
     params: dict[str, jnp.ndarray],
-    param_c: NeuralC,
+    sound_speed: NeuralSoundSpeed,
     x0: jnp.ndarray,
     p0: jnp.ndarray,
     m0: jnp.ndarray,
@@ -99,7 +78,7 @@ def solve_rays(
     ts: jnp.ndarray,
 ) -> jnp.ndarray:
     def c_fn(x):
-        return param_c(x, params)
+        return sound_speed(x, params)
 
     xt, _, _, _ = gb_solvers.solve_ODE_base(x0, p0, m0, a0, mode, ts, c_fn, 0.0, None)
     return xt
@@ -107,7 +86,7 @@ def solve_rays(
 
 def focusing_loss(
     params: dict[str, jnp.ndarray],
-    param_c: NeuralC,
+    sound_speed: NeuralSoundSpeed,
     x0: jnp.ndarray,
     p0: jnp.ndarray,
     m0: jnp.ndarray,
@@ -116,8 +95,8 @@ def focusing_loss(
     ts: jnp.ndarray,
     focus: jnp.ndarray,
 ):
-    """Penalize distance to the focus, spread at focus time, and field roughness."""
-    xt = solve_rays(params, param_c, x0, p0, m0, a0, mode, ts)
+    """Combine focus distance, ray spread, and field regularisation."""
+    xt = solve_rays(params, sound_speed, x0, p0, m0, a0, mode, ts)
     dist_to_focus = jnp.linalg.norm(xt - focus[None, None, :], axis=-1)
     min_dist = jnp.min(dist_to_focus, axis=1)
     focus_loss = jnp.mean(min_dist)
@@ -138,7 +117,7 @@ def focusing_loss(
 
 
 def speed_map(
-    param_c: NeuralC,
+    sound_speed: NeuralSoundSpeed,
     params: dict[str, jnp.ndarray],
     nx: int = 200,
     ny: int = 200,
@@ -147,7 +126,7 @@ def speed_map(
     yg = jnp.linspace(YMIN, YMAX, ny)
     xx, yy = jnp.meshgrid(xg, yg, indexing="xy")
     grid_points = jnp.stack([xx, yy], axis=-1)
-    return param_c(grid_points, params)
+    return sound_speed(grid_points, params)
 
 
 def plot_rays_before_after(
@@ -169,7 +148,7 @@ def plot_rays_before_after(
     )
     for ax, c_map, xt, title in panels:
         im = ax.imshow(
-            np.asarray(c_map.T),
+            np.asarray(c_map),
             extent=EXTENT,
             origin="lower",
             cmap="viridis",
@@ -195,13 +174,11 @@ def plot_rays_before_after(
             marker="*",
             label="focus",
         )
-        ax.set_title(title)
+        ax.set(title=title, xticks=[], yticks=[])
         ax.legend(frameon=True, fancybox=True, loc="lower right")
-        ax.set_xticks([])
-        ax.set_yticks([])
 
-    plt.colorbar(im, ax=ax2)
-    plt.tight_layout()
+    fig.colorbar(im, ax=ax2)
+    fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -209,10 +186,9 @@ def plot_rays_before_after(
 def plot_loss(out_path, loss_history: list[float]) -> None:
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(loss_history)
-    ax.set_xlabel("iteration")
-    ax.set_ylabel(r"$\mathcal{L}$")
+    ax.set(xlabel="iteration", ylabel=r"$\mathcal{L}$")
     ax.grid(True, alpha=0.3)
-    plt.tight_layout()
+    fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -223,7 +199,7 @@ def plot_speed_delta(out_path, c_init_map, c_opt_map, focus) -> None:
 
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(
-        np.asarray(diff_map.T),
+        np.asarray(diff_map),
         extent=EXTENT,
         origin="lower",
         cmap="RdBu_r",
@@ -232,28 +208,27 @@ def plot_speed_delta(out_path, c_init_map, c_opt_map, focus) -> None:
         vmax=delta_max,
     )
     ax.scatter(float(focus[0]), float(focus[1]), s=100, c="black", marker="*")
-    ax.set_title(r"$\Delta c(\mathbf{x})$")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    plt.colorbar(im, ax=ax)
-    plt.tight_layout()
+    ax.set(title=r"$\Delta c(\mathbf{x})$", xticks=[], yticks=[])
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
 def main() -> None:
-    plot_dir = utils.example_plot_dir(__file__)
+    plot_dir = Path("plots/rays")
+    plot_dir.mkdir(parents=True, exist_ok=True)
     use_beamax_style()
 
     x0, p0, m0, a0, mode, ts, focus = ray_setup()
-    param_c = NeuralC(hidden_dim=32)
-    params = param_c.params
+    sound_speed = NeuralSoundSpeed(hidden_dim=32)
+    params = sound_speed.params
 
     loss_grad = jax.jit(
         jax.value_and_grad(
             lambda current_params: focusing_loss(
                 current_params,
-                param_c,
+                sound_speed,
                 x0,
                 p0,
                 m0,
@@ -266,7 +241,7 @@ def main() -> None:
         )
     )
 
-    xt_init = solve_rays(params, param_c, x0, p0, m0, a0, mode, ts)
+    xt_init = solve_rays(params, sound_speed, x0, p0, m0, a0, mode, ts)
     lr_schedule = optax.exponential_decay(
         init_value=0.02,
         transition_steps=50,
@@ -285,16 +260,16 @@ def main() -> None:
     for step in range(num_iters):
         (loss_value, aux), grads = loss_grad(params)
         loss_float = float(loss_value)
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
         loss_history.append(loss_float)
 
-        # Mirrors the thesis script: the best ray trajectory is the one used
-        # to evaluate the loss, while the displayed medium is after the update.
+        # Keep the parameters and trajectory from the same iterate.
         if loss_float < best_loss:
             best_loss = loss_float
             best_params = params
             best_xt = aux["xt"]
+
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
 
         if step % 50 == 0:
             print(
@@ -302,8 +277,8 @@ def main() -> None:
                 f"focus {float(aux['focus']):.4f} | spread {float(aux['spread']):.4f}"
             )
 
-    c_init_map = speed_map(param_c, param_c.params)
-    c_opt_map = speed_map(param_c, best_params)
+    c_init_map = speed_map(sound_speed, sound_speed.params)
+    c_opt_map = speed_map(sound_speed, best_params)
 
     rays_path = plot_dir / "focusing_rays_before_after.png"
     loss_path = plot_dir / "focusing_loss_convergence.png"

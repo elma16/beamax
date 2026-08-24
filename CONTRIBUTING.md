@@ -1,18 +1,16 @@
 # Contributing
 
-Thanks for your interest in contributing to beamax!
-
-## Development setup
+## Setup
 
 ```bash
 git clone https://github.com/elma16/beamax.git
 cd beamax
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,kwave,viz]"
-tools/install-hooks.sh
+pip install -e ".[dev,kwave,viz-mpl,autodiff]"
+pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
 
-## Running tests
+## Checks
 
 ```bash
 pytest                  # full suite
@@ -20,50 +18,37 @@ pytest tests/test_gb.py # single file
 pytest -k "test_name"   # single test by name
 ```
 
-Some tests require optional dependencies such as k-Wave. These are
-skipped automatically if the packages are not installed.
-The k-Wave C++ OMP binary tests are skipped on CI by default because hosted
-runners do not execute the bundled binaries reliably. Set
-`BEAMAX_RUN_KWAVE_CPP_TESTS=1` to opt into those tests on a runner where the
-binary has been validated.
+Missing optional dependencies skip their tests. Validated runners can enable
+the otherwise-disabled k-Wave C++ tests with
+`BEAMAX_RUN_KWAVE_CPP_TESTS=1`.
 
-## Code style
-
-- We use [ruff](https://docs.astral.sh/ruff/) for linting and formatting.
-- Git hooks run ruff, notebook stripping, a fast pytest subset on commit, and
-  the full pytest suite before push. Install them with `tools/install-hooks.sh`
-  so the tracked public-push guard is preserved.
-- No maximum line length is enforced (`E501` is ignored), but keep lines reasonable.
+Use [Ruff](https://docs.astral.sh/ruff/) for linting and formatting. Pre-commit
+runs Ruff, strips notebooks, and runs fast tests; pre-push runs the full suite.
+`E501` is disabled, but keep lines readable.
 
 ## Documentation
 
-The API docs are generated from docstrings via MkDocs. After installing the
-development extra, run:
+API pages are generated from docstrings with MkDocs:
 
 ```bash
-mkdocs serve   # live preview at http://127.0.0.1:8000
+mkdocs serve
 ```
-
-The navigation in `mkdocs.yml` mirrors the public modules in `beamax`.
-
-## Pull requests
-
-1. Create a feature branch from `main`.
-2. Make your changes and add tests where appropriate.
-3. Run `ruff check beamax tests tools examples` and `pytest` locally.
-4. Open a PR against `main`. CI will run the full test suite.
 
 ## Examples
 
-- Add supported, documented, self-contained examples under `examples/`.
-- Keep research, profiling, data-dependent, or dependency-heavy material outside
-  the tracked public gallery; local/private example directories are skipped by
-  the example tooling.
-- Public scripts should have a module docstring, a `main()` guard, small default
-  problem sizes, concise printed metrics, and a paired notebook.
-- Run `python tools/finalize_examples.py` and `python tools/gen_examples_readme.py`
-  after changing public examples.
+- Put self-contained public examples under `examples/`; keep research,
+  profiling, and data-dependent scripts outside the gallery.
+- Give public scripts a module docstring, a `main()` guard, and small defaults.
+- Run `python tools/finalize_examples.py` to generate or update Colab
+  notebooks. Mark notebook-free scripts with `Example notebook: false`.
+- Run `python tools/gen_examples_readme.py` after public example changes.
+
+## Pull requests
+
+Branch from `main`, add relevant tests, run
+`ruff check beamax tests tools examples` and `pytest`, then open a PR against
+`main`.
 
 ## Reporting issues
 
-Please open a GitHub issue with a minimal reproducible example where possible.
+Open a GitHub issue with a minimal reproducer.

@@ -16,8 +16,6 @@ theme:
     - navigation.top
     - search.suggest
     - search.highlight
-    - content.tabs.link
-    - content.code.annotation
     - content.code.copy
   language: en
   palette:
@@ -41,14 +39,9 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: [!relative $config_dir]
       check_paths: true
-  - admonition
   - pymdownx.arithmatex:
       generic: true
-  - footnotes
-  - pymdownx.details
   - pymdownx.superfences
-  - pymdownx.mark
-  - attr_list
 
 extra_javascript:
   - javascripts/mathjax.js
@@ -71,23 +64,24 @@ plugins:
             members_order: source
             inherited_members: true
             filters:
-              - "!^_"          # hide private
-              - "^__all__$"    # allow explicit exports
+              - "!^_"
             heading_level: 4
 
 nav:
   - index.md
   - Guides:
-      - README: readme.md
       - Custom low-frequency solvers: guides/custom-low-frequency-solvers.md
+      - MSGB execution and Pallas kernels: guides/pallas-kernels.md
   - Examples:
       - examples/index.md
       - Forward propagation: examples/forward.md
       - Reconstruction: examples/reconstruction.md
       - Rays and autodiff: examples/rays.md
       - Single Gaussian beam: examples/single-gaussian-beam.md
+      - Diagnostics: examples/diagnostics.md
   - Basic API:
       - decomposition: api/decomposition.md
+      - coefficients: api/coefficients.md
       - geometry: api/geometry.md
       - transforms: api/transforms.md
       - plotter: api/plotter.md
@@ -96,15 +90,14 @@ nav:
           - api/gb/core.md
           - api/gb/gb_utils.md
           - api/gb/gb_solvers.md
+          - PallasConfig: api/gb/pallas_config.md
+          - Pallas kernels: api/gb/pallas_kernels.md
       - solvers:
-          - api/solvers/solverbase.md
           - api/solvers/hybrid_solver.md
           - api/solvers/hybrid_solver_utils.md
           - api/solvers/kwave_solver.md
           - msgb_solver:
-            - api/solvers/msgb_solvers/forward_solver_utils.md
             - api/solvers/msgb_solvers/msgb_solver.md
-            - api/solvers/msgb_solvers/tr_solver_utils.md
 
 watch:
   - beamax

@@ -1,43 +1,16 @@
-from pathlib import Path
-import subprocess
-import sys
 import argparse
 import os
-import ast
+import subprocess
+import sys
+from pathlib import Path
 
-PRIVATE_EXAMPLE_DIRS = {"private", "thesis", "learned", "benchmarks"}
-
-
-def example_metadata(file_path: Path) -> dict[str, str]:
-    """Read ``Example key: value`` metadata from a module docstring."""
-    try:
-        docstring = ast.get_docstring(ast.parse(file_path.read_text()))
-    except SyntaxError:
-        return {}
-    if not docstring:
-        return {}
-    metadata: dict[str, str] = {}
-    for line in docstring.splitlines():
-        if not line.startswith("Example "):
-            continue
-        key, sep, value = line.partition(":")
-        if sep:
-            metadata[key.removeprefix("Example ").strip().lower()] = value.strip()
-    return metadata
+from example_metadata import ExampleInfo, read_example_info
 
 
-def is_default_smoke_example(file_path: Path) -> bool:
-    """Return whether this example should run in the default smoke suite."""
-    smoke = example_metadata(file_path).get("smoke", "true")
-    return smoke.lower() not in {"0", "false", "no", "off"}
-
-
-def optional_skip_reason(file_path: Path) -> str:
+def optional_skip_reason(info: ExampleInfo) -> str:
     """Return the reason an optional example is skipped by the default suite."""
-    metadata = example_metadata(file_path)
-    extras = metadata.get("extras", "").strip()
-    if extras:
-        return f"requires beamax[{extras}]"
+    if info.extras:
+        return f"requires beamax[{','.join(info.extras)}]"
     return "marked optional by Example smoke: false"
 
 
@@ -50,21 +23,18 @@ def run_python_files(
     total_failures = 0
     skipped_optional: list[tuple[Path, str]] = []
 
-    # Use pathlib to recursively find all Python files.
     for file_path in sorted(Path(directory).rglob("*.py")):
-        if "__pycache__" in file_path.parts or (
-            PRIVATE_EXAMPLE_DIRS & set(file_path.parts)
-        ):
+        if "__pycache__" in file_path.parts:
             continue
-        if not include_optional and not is_default_smoke_example(file_path):
-            skipped_optional.append((file_path, optional_skip_reason(file_path)))
+        info = read_example_info(file_path)
+        if not include_optional and not info.smoke:
+            skipped_optional.append((file_path, optional_skip_reason(info)))
             continue
         print(f"Running: {file_path}")
 
-        # Set up environment for subprocess
         env = os.environ.copy()
         if silent_figures:
-            env["MPLBACKEND"] = "Agg"  # Use non-interactive matplotlib backend
+            env["MPLBACKEND"] = "Agg"
             if "MPLCONFIGDIR" not in env:
                 mpl_config_dir = (
                     Path(os.environ.get("TMPDIR", "/tmp")) / "beamax-mplconfig"

@@ -1,19 +1,15 @@
-#!/usr/bin/env python
-"""
-Trace a small fan of 2D rays through a smooth speed field.
+r"""Trace 2D rays through a smooth field with $G(\mathbf{x},\mathbf{p})=c(\mathbf{x})|\mathbf{p}|$.
 
-The Gaussian beam ray equations bend trajectories toward gradients in the
-Hamiltonian `G(x, p) = c(x) |p|`. This example solves those ODEs for a few
-parallel rays, overlays the paths on the speed map, and reports compact
-diagnostics for the amount of bending.
+Example extras: viz-mpl
+Example smoke: false
 """
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 
-from beamax import utils
 from beamax.gb import gb_solvers
 from beamax.plotter import use_beamax_style
 
@@ -22,7 +18,6 @@ jax.config.update("jax_enable_x64", True)
 
 
 def speed_field(x: jnp.ndarray) -> jnp.ndarray:
-    """Smooth 2D sound-speed map used by the ray example."""
     lens_center = jnp.array([0.46, 0.52])
     lens = jnp.exp(-35.0 * jnp.sum((x - lens_center) ** 2, axis=-1))
     vertical_gradient = 0.18 * (x[..., 1] - 0.5)
@@ -30,7 +25,6 @@ def speed_field(x: jnp.ndarray) -> jnp.ndarray:
 
 
 def solve_rays() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Solve a compact bundle of initially parallel rays."""
     n_rays = 60
     ts = jnp.linspace(0.0, 0.75, 48)
     y0 = jnp.linspace(0.18, 0.82, n_rays)
@@ -60,7 +54,8 @@ def solve_rays() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
 
 
 def main() -> None:
-    plot_dir = utils.example_plot_dir(__file__)
+    plot_dir = Path("plots/rays")
+    plot_dir.mkdir(parents=True, exist_ok=True)
     use_beamax_style()
 
     xt, pt, x0, ts = solve_rays()
@@ -103,10 +98,7 @@ def main() -> None:
         edgecolor="black",
         zorder=3,
     )
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
+    ax.set(xlim=(0.0, 1.0), ylim=(0.0, 1.0), xlabel="x", ylabel="y")
     ax.set_title("2D ray bending in a smooth speed field")
     fig.tight_layout()
 

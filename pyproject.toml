@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "beamax"
 description = "Multiscale Gaussian Beams in JAX"
-version = "0.2.2"
+version = "0.3.0"
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.12"
 authors = [
   { name = "Elliott Macneil", email = "ucabem1@ucl.ac.uk" },
   { name = "Ben Cox" },
@@ -30,8 +30,8 @@ classifiers = [
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Mathematics",
   "Topic :: Scientific/Engineering :: Physics",
   "Topic :: Scientific/Engineering :: Medical Science Apps.",
@@ -43,7 +43,6 @@ dependencies = [
   "equinox>=0.13",
   "diffrax>=0.7",
   "einops>=0.8",
-  "optimistix>=0.0.9",
   "scipy>=1.11",
   "jaxtyping>=0.3",
 ]
@@ -55,22 +54,21 @@ dev = [
   "ruff",
   "pre-commit",
   "pyright",
-  "h5py>=3.9",
   "mkdocs",
   "mkdocs-material",
   "mkdocstrings-python",
 ]
 
 viz-mpl = ["matplotlib>=3.7"]
-viz = [
-  "matplotlib>=3.7",
-  "pyvista",
-]
 
 kwave = ["k-wave-python>=0.6.2"]
 autodiff = ["optax>=0.2"]
 
-all = ["beamax[dev,viz,kwave,autodiff]"]
+all = [
+  "matplotlib>=3.7",
+  "k-wave-python>=0.6.2",
+  "optax>=0.2",
+]
 
 [project.urls]
 Homepage = "https://github.com/elma16/beamax"
@@ -85,19 +83,16 @@ beamax = ["py.typed"]
 
 [tool.ruff]
 extend-include = ["*.ipynb"]
-extend-exclude = [
-  "examples/private",
-  "examples/thesis",
-  "examples/learned",
-  "examples/benchmarks",
-]
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
-# F722/F821: ruff/pyflakes can't parse jaxtyping shape strings like
-# ``Float[Array, "b d"]`` as Python expressions, so they're false-positives in
-# every annotated module. Per the jaxtyping docs.
-ignore = ["E501", "E402", "F722", "F821"]
+# Ruff cannot parse jaxtyping shape strings such as ``Float[Array, "b d"]``.
+ignore = ["E501", "F722"]
+
+[tool.ruff.lint.per-file-ignores]
+"*.ipynb" = ["E402"]
+"beamax/gb/core.py" = ["F821"]
+"beamax/transforms.py" = ["F821"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -107,7 +102,5 @@ source = ["beamax"]
 branch = true
 
 [tool.coverage.report]
-omit = [
-  "beamax/solvers/solverbase.py",
-  "beamax/plotter.py",
-]
+fail_under = 90
+precision = 2

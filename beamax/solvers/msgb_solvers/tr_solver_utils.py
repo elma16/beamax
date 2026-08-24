@@ -1,6 +1,7 @@
-from functools import partial
+import math
 
-from jax import lax, vmap
+import jax
+from jax import lax
 import jax.numpy as jnp
 from einops import rearrange
 from typing import Tuple, Union, Callable, Optional
@@ -11,11 +12,7 @@ from beamax.gb import core, gb_utils, gb_solvers
 from beamax.geometry import Domain, Sensor
 from beamax.transforms import MSWPT, compute_frame_phase
 from beamax.gb.gb_solvers import SolverFn, SolverConfig
-
-
-# ============================================================================
-# TR Parameter Computation (unchanged)
-# ============================================================================
+from beamax.gb.pallas_config import PallasConfig
 
 
 def compute_mT_linear_system(
@@ -97,11 +94,28 @@ def mT_forward(
     pdot = -gb_utils.vmap_gx(xT, pT, mode, c)
 
     M_lowerright = mT_spc[:, 1:, 1:]
-    M_upperleft = jnp.einsum("bi, bij, bj -> b", xdot, mT_spc, xdot) - jnp.einsum(
-        "bi, bi -> b", pdot, xdot
+    M_upperleft = jnp.einsum(
+        "bi, bij, bj -> b",
+        xdot,
+        mT_spc,
+        xdot,
+        precision=jax.lax.Precision.HIGHEST,
+    ) - jnp.einsum(
+        "bi, bi -> b",
+        pdot,
+        xdot,
+        precision=jax.lax.Precision.HIGHEST,
     )
     M_upperleft = jnp.reshape(M_upperleft, (b, 1, 1))
-    M_upperright = (pdot - jnp.einsum("bij, bj -> bi", mT_spc, xdot))[:, 1:]
+    M_upperright = (
+        pdot
+        - jnp.einsum(
+            "bij, bj -> bi",
+            mT_spc,
+            xdot,
+            precision=jax.lax.Precision.HIGHEST,
+        )
+    )[:, 1:]
     M_upperright = jnp.reshape(M_upperright, (b, 1, d - 1))
 
     M = jnp.block(
@@ -149,15 +163,41 @@ def mT_inverse(xT, pT, mT_spc_time, mode, c):
     C = mT_spc_time[:, 1:, 1:]
 
     M_lower_right = C
-    M_star_star_xdot_star = jnp.einsum("bij,bj->bi", C, xdot_star)
+    M_star_star_xdot_star = jnp.einsum(
+        "bij,bj->bi",
+        C,
+        xdot_star,
+        precision=jax.lax.Precision.HIGHEST,
+    )
     M_upper_right = ((pdot_star - M_star_star_xdot_star - B) / xdot_1).reshape(
         b, 1, d - 1
     )
 
-    pdotxdot = jnp.einsum("bi,bi->b", pdot_1, xdot_1)
-    pdot_star_dot_xdot_star = jnp.einsum("bi,bi->b", pdot_star, xdot_star)
-    xdot_star_M_xdot_star = jnp.einsum("bi,bij,bj->b", xdot_star, C, xdot_star)
-    Bx = jnp.einsum("bi,bi->b", B, xdot_star)
+    pdotxdot = jnp.einsum(
+        "bi,bi->b",
+        pdot_1,
+        xdot_1,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    pdot_star_dot_xdot_star = jnp.einsum(
+        "bi,bi->b",
+        pdot_star,
+        xdot_star,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    xdot_star_M_xdot_star = jnp.einsum(
+        "bi,bij,bj->b",
+        xdot_star,
+        C,
+        xdot_star,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    Bx = jnp.einsum(
+        "bi,bi->b",
+        B,
+        xdot_star,
+        precision=jax.lax.Precision.HIGHEST,
+    )
 
     numerator = (
         A + pdotxdot - pdot_star_dot_xdot_star + xdot_star_M_xdot_star + 2 * Bx
@@ -239,93 +279,66 @@ def compute_TR_parameters(
     ts : jnp.ndarray, shape (B, 2)
         Per-beam time interval.
     """
-    # -------------------------------------------------------------------------
-    # 0. Boundary geometry: which spatial axis is normal to the detector?
-    # -------------------------------------------------------------------------
     _, const_vals, const_axes = find_constant_columns(
         sources.positions, max_constant_axes=1
     )
     valid = const_axes >= 0
-    normal_axis = jnp.where(valid, const_axes, 0)[0]  # first valid or 0
+    normal_axis = jnp.where(valid, const_axes, 0)[0]
     normal_value = jnp.where(valid, const_vals, 0.0)[0]
 
-    # This is safe with jitted code: the f-string is fully resolved on host.
-    # debug.print(f"TR: normal axis = {normal_axis}, value = {normal_value}")
+    d_spatial = sources.domain.ndim
 
-    # Spatial dimension comes from the physical domain of the sensors
-    d_spatial = sources.domain.ndim  # 1D/2D/3D spatial domain
-
-    # -------------------------------------------------------------------------
-    # 1. Dyadic decomposition / packet indices in (t, x_*)-space
-    # -------------------------------------------------------------------------
     decomp = wpt_data.dyadic_decomp
     red = wpt_data.redundancy
 
-    box_lengths = jnp.array(decomp.box_lengths)  # per level
-    box_aspect = jnp.array(decomp.box_aspect_ratio)  # per axis (t, x_*)
-    N_data = jnp.array(domain_data.N)  # (d_data,)
-    L_phys = jnp.array(domain_data.grid_size)  # (d_data,)
+    box_lengths = jnp.array(decomp.box_lengths)
+    box_aspect = jnp.array(decomp.box_aspect_ratio)
+    N_data = jnp.array(domain_data.N)
+    L_phys = jnp.array(domain_data.grid_size)
 
     shapes = utils.compute_coeff_shapes(decomp, red, jnp.arange(decomp.num_levels))
     cumsum_boxes = jnp.r_[0, jnp.cumsum(decomp.num_boxes_ndim)]
     nn_level, nn_idx = utils.find_tensor_and_multiindex(significant_coeffs, shapes)
     box_idx = nn_idx[0, :] + cumsum_boxes[nn_level]
 
-    # centres_hat: physical Fourier center in (t, x_*) coords
-    # First axis = time frequency τ; others = tangential spatial frequencies k_tan
-    centres_hat = decomp.centres_ndim[box_idx, :] / L_phys  # (B, d_data)
-    # Euclidean norm in boundary frequency space, used only for direction
-    # normalisation. The beam frequency parameter itself is |tau|; otherwise
-    # omega * p_tan would not reproduce the tangential carrier 2*pi*k_tan.
-    norm_xi = jnp.linalg.norm(centres_hat, axis=-1, keepdims=True)  # |(τ, k_tan)|
+    # Physical frequencies are ordered as (tau, tangential wave numbers).
+    centres_hat = decomp.centres_ndim[box_idx, :] / L_phys
+    # Normalize direction only; the beam frequency remains |tau|.
+    norm_xi = jnp.linalg.norm(centres_hat, axis=-1, keepdims=True)
     centres_normed = centres_hat / norm_xi
 
-    # Split into time and tangential components in the *data* coordinates
-    xi_tau = centres_normed[:, :1]  # normalized time frequency direction
-    xi_tan_hat = centres_normed[:, 1:]  # normalized tangential directions
+    xi_tau = centres_normed[:, :1]
+    xi_tan_hat = centres_normed[:, 1:]
 
-    # Physical (un-normalized) τ and k_tan — needed for correct dispersion
-    tau = centres_hat[:, 0:1]  # (B, 1)
-    k_tan = centres_hat[:, 1:]  # (B, d_data-1)
+    tau = centres_hat[:, 0:1]
+    k_tan = centres_hat[:, 1:]
 
-    # Physical box sizes and Gaussian widths in the data domain
-    bl = (
-        rearrange(box_lengths[nn_level], "j -> j 1") / L_phys * box_aspect
-    )  # (B, d_data)
-    # Physical modulation periods for the local MSWPT support.  Keep this in
-    # lockstep with transforms.compute_frames and compute_coeff_shapes: the
-    # support length is rho * box_length * aspect on each data axis.
+    bl = rearrange(box_lengths[nn_level], "j -> j 1") / L_phys * box_aspect
+    # Match the support convention in compute_frames and compute_coeff_shapes.
     Lls = bl * red
     sigmas = bl / 2.0
 
-    # Mode sign from sign(τ): signum = -sign τ selects outgoing vs incoming branch
     sign_tau = jnp.sign(centres_hat[:, 0])
     signum = rearrange(-sign_tau, "b -> b 1")
 
     omega_cyc = jnp.maximum(jnp.abs(tau), 1e-6)
-    ωs = rearrange(omega_cyc, "b 1 -> b")  # cyclic scalar frequency per beam
+    ωs = rearrange(omega_cyc, "b 1 -> b")
 
-    # Time coordinate for each beam: where in the time grid it lives (start)
     ts = jnp.zeros((nn_idx.shape[1], 2))
-    ts = ts.at[:, 0].set(nn_idx[1, :] / Lls[:, 0])  # consistent with MSWPT indexing
+    ts = ts.at[:, 0].set(nn_idx[1, :] / Lls[:, 0])
 
-    # Indices along tangential axes in the data domain → physical boundary coords
     if d_spatial == 1:
-        xstar_idx = nn_idx[1:, :]  # (1, B)
+        xstar_idx = nn_idx[1:, :]
     else:
-        xstar_idx = nn_idx[2:, :]  # (d_data-1, B)
-    xstar = jnp.stack(xstar_idx, axis=-1) / Lls[:, 1:]  # (B, d_data-1)
+        xstar_idx = nn_idx[2:, :]
+    xstar = jnp.stack(xstar_idx, axis=-1) / Lls[:, 1:]
 
-    # -------------------------------------------------------------------------
-    # 2. Map data-domain tangential coords to spatial boundary coords x_T
-    # -------------------------------------------------------------------------
     B_ = xstar.shape[0]
     xts = jnp.zeros((B_, d_spatial))
     p_unit_spatial = jnp.zeros((B_, d_spatial))
 
-    # Build tangential/normal masks with integer gathers (JIT-friendly)
     axis_ids = jnp.arange(d_spatial)
-    mask_tan = axis_ids != normal_axis  # (d_spatial,)
+    mask_tan = axis_ids != normal_axis
     tan_index = jnp.where(
         mask_tan, jnp.cumsum(mask_tan.astype(jnp.int32)) - 1, 0
     ).astype(jnp.int32)
@@ -335,44 +348,27 @@ def compute_TR_parameters(
     else:
         xts = jnp.where(mask_tan, xstar[:, tan_index], normal_value)
 
-    # Local physical wave speed at x_T. ``domain_data`` describes the sampled
-    # (time, tangential-position) array and is not the authoritative spatial
-    # medium; the source sensor's domain is. Using ``c_fn`` also supports the
-    # documented scalar-speed Domain API.
+    # Source geometry, not boundary-data coordinates, owns the sound speed.
     physical_c = sources.domain.c_fn
-    cxts = physical_c(xts).reshape(-1, 1)  # (B_, 1)
+    cxts = physical_c(xts).reshape(-1, 1)
 
-    # -------------------------------------------------------------------------
-    # 3. Spatial momentum direction p_unit(x_T) from (τ, k_tan)
-    #
-    # For 1D spatial: keep existing behaviour (which you've verified works)
-    # For d_spatial > 1: use dispersion relation
-    #
-    #   ω = |τ|, k = (k_n, k_tan),  ω^2 = c^2 |k|^2
-    #   => |k| = |ω| / c, p̂ = k / |k|
-    #   => p̂_tan = c k_tan / |ω|,  p̂_n = ±sqrt(1 - |p̂_tan|^2)
-    # -------------------------------------------------------------------------
-    # Default: 1D spatial case – preserve your current behaviour
+    # For d > 1, dispersion gives p̂_tan = c k_tan / |tau| and
+    # p̂_n = ±sqrt(1 - |p̂_tan|^2).
     if d_spatial == 1:
-        p_tan_unit = xi_tan_hat  # empty for pure 1D boundary, harmless
+        p_tan_unit = xi_tan_hat
         radicand = jnp.maximum(
             (xi_tau / cxts) ** 2 - jnp.sum(xi_tan_hat**2, axis=1, keepdims=True),
             0.0,
         )
     else:
-        # Multi-D spatial case: use ω–k dispersion for the tangential angles
-        tau_abs = jnp.maximum(jnp.abs(tau), 1e-6)  # avoid divide-by-zero
-        # Tangential components of unit spatial momentum
-        p_tan_unit = cxts * k_tan / tau_abs  # (B_, d_data-1)
+        tau_abs = jnp.maximum(jnp.abs(tau), 1e-6)
+        p_tan_unit = cxts * k_tan / tau_abs
         tan_norm_sq = jnp.sum(p_tan_unit**2, axis=1, keepdims=True)
         radicand = jnp.maximum(1.0 - tan_norm_sq, 0.0)
 
-    p_n_unit = jnp.sqrt(radicand)  # (B_, 1)
+    p_n_unit = jnp.sqrt(radicand)
 
-    # Orient the normal component so beams point *into* the domain:
-    # The detector side is a spatial-domain property, not a boundary-data-domain
-    # property. Using domain_data here confuses acquisition time with x_1 for
-    # max-side or non-x_1 detector planes.
+    # Orient the normal component inward using the spatial sensor domain.
     spatial_dx = jnp.array(sources.domain.dx)
     spatial_size = jnp.array(sources.domain.grid_size)
     grid_max = spatial_size[normal_axis] - spatial_dx[normal_axis]
@@ -386,25 +382,26 @@ def compute_TR_parameters(
         ),
     )
     inward_sign = jnp.where(inward_sign == 0.0, 1.0, inward_sign)
-    p_n_unit = inward_sign * p_n_unit  # (B_, 1)
+    p_n_unit = inward_sign * p_n_unit
 
     if d_spatial == 1:
         p_unit_spatial = p_unit_spatial.at[:, 0].set(p_n_unit[:, 0])
     else:
         p_unit_spatial = jnp.where(mask_tan, p_tan_unit[:, tan_index], p_n_unit)
 
-    # Scale by 2π to get actual spatial momentum at the boundary
-    pts = (2.0 * jnp.pi) * p_unit_spatial  # (B_, d_spatial)
+    pts = (2.0 * jnp.pi) * p_unit_spatial
 
     if d_spatial != 1:
-        pts = pts / cxts  # scale by local c to get correct momentum
+        pts = pts / cxts
 
-    # -------------------------------------------------------------------------
-    # 4. Initial complex curvature and geometric amplitude
-    # -------------------------------------------------------------------------
-    alpha = 2j * (jnp.pi * sigmas) ** 2 / omega_cyc  # (B_, d_data)
+    alpha = 2j * (jnp.pi * sigmas) ** 2 / omega_cyc
 
-    M_init = jnp.einsum("bi,ij->bij", alpha, jnp.eye(d_spatial))
+    M_init = jnp.einsum(
+        "bi,ij->bij",
+        alpha,
+        jnp.eye(d_spatial),
+        precision=jax.lax.Precision.HIGHEST,
+    )
 
     Mts = compute_mT_linear_system(xts, pts, None, M_init, signum, physical_c)
 
@@ -420,9 +417,7 @@ def compute_TR_parameters(
     local_k = jnp.stack(nn_idx[1:, :], axis=-1)
     ats = ats * compute_frame_phase(decomp, box_idx, local_k, red)[:, None]
 
-    # -------------------------------------------------------------------------
-    # 5. Grazing handling: zero contributions and keep numerically safe values
-    # -------------------------------------------------------------------------
+    # Replace zero-contribution grazing geometry with safe ODE inputs.
     is_grazing_final = jnp.abs(jnp.take(pts, normal_axis, axis=1)) == 0.0
     is_grazing_final = rearrange(is_grazing_final, "b -> b 1")
 
@@ -433,11 +428,6 @@ def compute_TR_parameters(
     Mts = jnp.where(is_grazing_final[:, :, None], identity_mats, Mts)
 
     return pts, Mts, xts, ωs, ats, signum, ts
-
-
-# ============================================================================
-# TR Beam Computation (refactored to match forward solver pattern)
-# ============================================================================
 
 
 def _compute_tr_beams(
@@ -532,18 +522,19 @@ def _aggregate_tr_beams(
     periodic: jnp.ndarray,
     ode_solver: SolverFn,
     solver_config: Optional[SolverConfig] = None,
+    pallas_config: PallasConfig | None = None,
 ):
     """
-    Generic TR beam aggregation supporting scan, vmap, or direct computation.
+    Generic TR beam aggregation supporting scan, vmap, Pallas, or direct computation.
 
     Similar structure to _aggregate_beams but for time reversal.
-    Takes the final time point (t=0 for TR) from each batch.
+    Takes the final time point ($t=0$ for TR) from each batch.
 
     Parameters
     ----------
     params : Tuple[jnp.ndarray, ...]
         Beam parameters ``(p0, M0, x0, omega, a0, mode, ts)``.
-    aggregate_method : {"scan", "vmap", "all"}
+    aggregate_method : {"scan", "pallas", "terminal_xla", "all"}
         Aggregation strategy.
     init_shape : Tuple[int, ...]
         Shape of the output field.
@@ -577,8 +568,20 @@ def _aggregate_tr_beams(
         ts_batches,
     ) = params
 
-    if aggregate_method == "scan":
-        init = jnp.zeros(init_shape)
+    if aggregate_method in {"scan", "pallas", "terminal_xla"}:
+        effective_pallas_config = pallas_config or PallasConfig()
+        fused_pallas_carry = (
+            aggregate_method == "pallas" and jax.default_backend() != "tpu"
+        )
+        num_flat_sensors = math.prod(sensors.shape[:-1])
+        padded_sensors = (
+            math.ceil(num_flat_sensors / effective_pallas_config.sensor_block_size)
+            * effective_pallas_config.sensor_block_size
+        )
+        init = jnp.zeros(
+            (padded_sensors,) if fused_pallas_carry else init_shape,
+            dtype=x0_batches.dtype,
+        )
 
         def scan_fn(carry, inp):
             """
@@ -599,61 +602,72 @@ def _aggregate_tr_beams(
                 Empty scan output.
             """
             p0, M0, x0, ω, a0, mode, ts_batch = inp
-            batch_result = _compute_tr_beams(
-                x0,
-                p0,
-                M0,
-                a0,
-                ω,
-                mode,
-                c,
-                lam,
-                ts_batch,
-                sensors,
-                domain_size,
-                periodic,
-                ode_solver,
-                sum_beams=True,
-                solver_config=solver_config,
-            )
-            # Take the final time point (t=0 for TR)
-            return carry + batch_result[-1, ...], None
+            if aggregate_method == "pallas":
+                terminal_result = core.compute_gaussian_beam_real_TR_pallas_terminal(
+                    x0=x0,
+                    p0=p0,
+                    M0=M0,
+                    a0=a0,
+                    omega0=ω,
+                    mode=mode,
+                    c=c,
+                    lam=lam,
+                    ts=ts_batch,
+                    sensors=sensors,
+                    domain_size=domain_size,
+                    periodic=periodic,
+                    ode_solver=ode_solver,
+                    solver_config=solver_config,
+                    pallas_config=effective_pallas_config,
+                    initial_field=carry if fused_pallas_carry else None,
+                    return_padded=fused_pallas_carry,
+                )
+            elif aggregate_method == "terminal_xla":
+                terminal_result = core.compute_gaussian_beam_real_TR_xla_terminal(
+                    x0=x0,
+                    p0=p0,
+                    M0=M0,
+                    a0=a0,
+                    omega0=ω,
+                    mode=mode,
+                    c=c,
+                    lam=lam,
+                    ts=ts_batch,
+                    sensors=sensors,
+                    domain_size=domain_size,
+                    periodic=periodic,
+                    ode_solver=ode_solver,
+                    solver_config=solver_config,
+                )
+            else:
+                batch_result = _compute_tr_beams(
+                    x0,
+                    p0,
+                    M0,
+                    a0,
+                    ω,
+                    mode,
+                    c,
+                    lam,
+                    ts_batch,
+                    sensors,
+                    domain_size,
+                    periodic,
+                    ode_solver,
+                    sum_beams=True,
+                    solver_config=solver_config,
+                )
+                terminal_result = batch_result[-1, ...]
+            if fused_pallas_carry:
+                return terminal_result, None
+            return carry + terminal_result, None
 
         result, _ = lax.scan(scan_fn, init, params)
+        if fused_pallas_carry:
+            return result[:num_flat_sensors].reshape(init_shape)
         return result
 
-    elif aggregate_method == "vmap":
-        beam_sums = vmap(
-            lambda p0, M0, x0, ω, a0, mode, ts_batch: _compute_tr_beams(
-                x0,
-                p0,
-                M0,
-                a0,
-                ω,
-                mode,
-                c,
-                lam,
-                ts_batch,
-                sensors,
-                domain_size,
-                periodic,
-                ode_solver,
-                sum_beams=True,
-                solver_config=solver_config,
-            )
-        )(
-            p0_batches,
-            M0_batches,
-            x0_batches,
-            ω_batches,
-            a0_batches,
-            mode_batches,
-            ts_batches,
-        )
-        # Take final time point and sum over batches
-        return jnp.sum(beam_sums[:, -1, ...], axis=0)
-
-    else:  # "all"
+    else:
         beams = _compute_tr_beams(
             x0_batches,
             p0_batches,
@@ -671,7 +685,7 @@ def _aggregate_tr_beams(
             sum_beams=True,
             solver_config=solver_config,
         )
-        return beams[-1, ...]  # Final time point
+        return beams[-1, ...]
 
 
 def compute_TR_result(
@@ -684,7 +698,7 @@ def compute_TR_result(
     ode_solver: Optional[SolverFn] = None,
     aggregate_method: str = "scan",
     solver_config: Optional[SolverConfig] = None,
-    dt0: float | None = None,
+    pallas_config: PallasConfig | None = None,
 ) -> jnp.ndarray:
     """
     Compute time-reversal solution using Gaussian beams.
@@ -707,12 +721,10 @@ def compute_TR_result(
         Boundary periodicity flags.
     ode_solver : SolverFn, optional
         ODE solver. If ``None``, uses :func:`solve_ODE_batch_t`.
-    aggregate_method : {"scan", "vmap", "all"}, default="scan"
+    aggregate_method : {"scan", "pallas", "terminal_xla", "all"}, default="scan"
         Beam aggregation method.
     solver_config : SolverConfig, optional
         Numerical ODE configuration.
-    dt0 : float, optional
-        Optional initial time step passed to ``solve_ODE_batch_t``.
 
     Returns
     -------
@@ -725,14 +737,8 @@ def compute_TR_result(
         must support this. Default is solve_ODE_batch_t. If passing a custom
         solver, ensure it handles per-beam time arrays correctly.
     """
-    # TR requires solve_ODE_batch_t (or compatible) due to per-beam time intervals
     if ode_solver is None:
-        print("Using default ODE solver: solve_ODE_batch_t for TR.")
         ode_solver = gb_solvers.solve_ODE_batch_t
-    if dt0 is None and solver_config is not None and hasattr(solver_config, "dt0"):
-        dt0 = getattr(solver_config, "dt0")
-    if dt0 is not None:
-        ode_solver = partial(ode_solver, dt0=dt0)
 
     init_shape = sensors.shape[:-1]
 
@@ -747,4 +753,5 @@ def compute_TR_result(
         periodic=periodic,
         ode_solver=ode_solver,
         solver_config=solver_config,
+        pallas_config=pallas_config,
     )

@@ -1,16 +1,7 @@
-"""
-Cross-method consistency tests for MSGB forward, time-reversal, and adjoint.
+"""Cross-method consistency tests for MSGB forward, TR, and adjoint.
 
-For each public method we sweep ``sum_method`` (all/scan/vmap × real/complex)
-and assert that every variant produces the same result. The existing
-:class:`tests.solvers.test_fwd_solver.TestMSGBSolverAggregation` covers the
-forward path in 1D; this file extends that coverage to 2D and to the TR /
-adjoint paths.
-
-Each test uses a tiny grid (N <= (32, 32)) so the full matrix runs in a few
-seconds. The cross-method assertions catch (a) regressions in the
-``_prepare_tr_params`` / ``_prepare_adj_params`` batching path, and
-(b) silent shape/sign drifts between aggregation strategies.
+Tiny grids exercise all/scan/Pallas and real/complex aggregation while checking
+batching, shape, and sign consistency.
 """
 
 import jax
@@ -40,7 +31,7 @@ def _make_test_signal_2d(dyadic, wpt, *, box_indices=(34, 6), k_values=None):
     return signal / jnp.max(jnp.abs(signal))
 
 
-def _solver(sum_method, *, batch_size=64):
+def _solver(sum_method, *, batch_size=64, experimental_config=None):
     return MSGBSolver(
         thr=200,
         thr_strat="top_n",
@@ -49,12 +40,8 @@ def _solver(sum_method, *, batch_size=64):
         ode_solver=gb_solvers.solve_ODE_base,
         tr_ode_solver=gb_solvers.solve_ODE_batch_t,
         sum_method=sum_method,
+        experimental_config=experimental_config,
     )
-
-
-# ============================================================================
-# Forward — extend the existing 1D consistency check to 2D
-# ============================================================================
 
 
 @pytest.fixture(scope="module")
@@ -102,9 +89,9 @@ class TestForwardAggregationConsistency2D:
         ts = jnp.array([0.0])
 
         methods = (
-            ["all_complex", "vmap_complex", "scan_complex"]
+            ["all_complex", "scan_complex"]
             if use_complex
-            else ["all_real", "vmap_real", "scan_real"]
+            else ["all_real", "scan_real"]
         )
 
         results = []
@@ -124,11 +111,6 @@ class TestForwardAggregationConsistency2D:
                 f"forward 2D: method {m!r} differs from {methods[0]!r} "
                 f"by max abs diff {diff:.3e}"
             )
-
-
-# ============================================================================
-# Time reversal — cross-method consistency in 1D and 2D
-# ============================================================================
 
 
 def _build_data_domain(domain, ts, *, over_resolve=2):
@@ -176,8 +158,7 @@ def _build_data_domain(domain, ts, *, over_resolve=2):
 
 
 def _synth_sensor_data(domain, ts, *, key_seed=0):
-    """Cheap synthetic sensor record; we only care that solvers agree, not that
-    the reconstruction looks like anything in particular."""
+    """Create a synthetic record for solver-agreement tests."""
     key = jax.random.PRNGKey(key_seed)
     nt_data = 2 * domain.N[0]
     if domain.ndim == 1:
@@ -205,8 +186,9 @@ class TestTimeReversalAggregationConsistency:
 
         data = _synth_sensor_data(domain, ts)
 
+        methods = ["all_real", "scan_real", "pallas_real"]
         results = []
-        for sm in ["all_real", "scan_real", "vmap_real"]:
+        for sm in methods:
             out = _solver(sm, batch_size=16).time_reversal(
                 data=data,
                 domain=domain,
@@ -218,11 +200,11 @@ class TestTimeReversalAggregationConsistency:
             )
             results.append(np.asarray(out))
 
-        for i, sm in enumerate(["scan_real", "vmap_real"], 1):
+        for i, sm in enumerate(methods[1:], 1):
             diff = np.max(np.abs(results[0] - results[i]))
-            assert (
-                diff < 1e-8
-            ), f"TR 1D: {sm!r} differs from all_real by max abs diff {diff:.3e}"
+            assert diff < 1e-8, (
+                f"TR 1D: {sm!r} differs from all_real by max abs diff {diff:.3e}"
+            )
 
     def test_2d_all_methods_match(self):
         n = (32, 32)
@@ -242,7 +224,8 @@ class TestTimeReversalAggregationConsistency:
         data = _synth_sensor_data(domain, ts)
 
         results = []
-        for sm in ["all_real", "scan_real", "vmap_real"]:
+        methods = ["all_real", "scan_real"]
+        for sm in methods:
             out = _solver(sm, batch_size=8).time_reversal(
                 data=data,
                 domain=domain,
@@ -254,16 +237,13 @@ class TestTimeReversalAggregationConsistency:
             )
             results.append(np.asarray(out))
 
-        for i, sm in enumerate(["scan_real", "vmap_real"], 1):
+        assert results[0].size == n[0] * n[1]
+        assert np.all(np.isfinite(results[0]))
+        for i, sm in enumerate(methods[1:], 1):
             diff = np.max(np.abs(results[0] - results[i]))
-            assert (
-                diff < 1e-8
-            ), f"TR 2D: {sm!r} differs from all_real by max abs diff {diff:.3e}"
-
-
-# ============================================================================
-# Adjoint — cross-method consistency in 2D (with the post-bug-fix indexing)
-# ============================================================================
+            assert diff < 1e-8, (
+                f"TR 2D: {sm!r} differs from all_real by max abs diff {diff:.3e}"
+            )
 
 
 class TestAdjointAggregationConsistency:
@@ -287,7 +267,8 @@ class TestAdjointAggregationConsistency:
         data = _synth_sensor_data(domain, ts)
 
         results = []
-        for sm in ["all_real", "scan_real", "vmap_real"]:
+        methods = ["all_real", "scan_real"]
+        for sm in methods:
             out = _solver(sm, batch_size=8).adjoint(
                 data=data,
                 domain=domain,
@@ -296,62 +277,14 @@ class TestAdjointAggregationConsistency:
                 ts=ts,
                 data_domain=data_domain,
                 data_wpt=data_wpt,
+                window=jnp.ones(data.shape[0]),
             )
             results.append(np.asarray(out))
 
-        for i, sm in enumerate(["scan_real", "vmap_real"], 1):
+        assert results[0].size == n[0] * n[1]
+        assert np.all(np.isfinite(results[0]))
+        for i, sm in enumerate(methods[1:], 1):
             diff = np.max(np.abs(results[0] - results[i]))
-            assert (
-                diff < 1e-8
-            ), f"adjoint 2D: {sm!r} differs from all_real by max abs diff {diff:.3e}"
-
-
-# ============================================================================
-# Regression: the _prepare_tr_params unconditional batch_data bug
-# ============================================================================
-
-
-def test_tr_2d_all_real_regression():
-    """Regression for the _prepare_tr_params batching bug.
-
-    `_prepare_tr_params` used to call ``utils.batch_data(...)`` unconditionally,
-    leaving the TR params in ``(num_batches, batch_size, ...)`` form even for
-    ``aggregate_method == 'all'``. Downstream, ``solve_ODE_batch_t``'s inner
-    vmap stripped only one of the two batch axes, so ``mode`` arrived at
-    ``coupled_rhs`` with shape ``(batch_size, 1)`` and tripped the broadcast
-    against the 2x2 Hessian inside ``riccati_rhs``.
-
-    Fixed by gating the ``batch_data`` call on
-    ``self.aggregate_method in ["scan", "vmap"]`` (matching ``_prepare_adj_params``).
-    """
-    n = (32, 32)
-    domain = geometry.Domain(
-        N=n,
-        dx=(1e-4, 1e-4),
-        c=lambda x: 1500.0 + 0.0 * x[..., 0],
-        cfl=0.3,
-        periodic=(False, False),
-    )
-    ts = domain.generate_time_domain()
-    data_domain, data_wpt = _build_data_domain(domain, ts)
-    sensor_mask = jnp.zeros(n).at[0, :].set(1.0)
-    sources = geometry.Sensor(domain=domain, binary_mask=sensor_mask)
-    eval_sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(n))
-
-    data = _synth_sensor_data(domain, ts)
-    out = _solver("all_real", batch_size=8).time_reversal(
-        data=data,
-        domain=domain,
-        sensors=eval_sensors,
-        sources=sources,
-        ts=ts,
-        data_domain=data_domain,
-        data_wpt=data_wpt,
-    )
-    out_np = np.asarray(out)
-    assert int(out_np.size) == n[0] * n[1]
-    assert np.all(np.isfinite(out_np))
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
+            assert diff < 1e-8, (
+                f"adjoint 2D: {sm!r} differs from all_real by max abs diff {diff:.3e}"
+            )

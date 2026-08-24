@@ -1,20 +1,43 @@
-"""
-Unit tests for thin validation / dispatch paths in ``kwave_solver`` that the
-existing integration tests don't reach. Pure-Python, no k-Wave required.
-"""
+"""Pure-Python k-Wave validation and dispatch tests."""
 
 import numpy as np
 import pytest
 import jax.numpy as jnp
 
-from beamax.geometry import Domain
-from beamax.solvers import kwave_solver as kwave_solver_module
-from beamax.solvers.kwave_solver import KWaveSolver
+try:
+    from beamax.geometry import Domain
+    from beamax.solvers import kwave_solver as kwave_solver_module
+    from beamax.solvers.kwave_solver import KWaveSolver
+except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency.
+    missing = exc.name or ""
+    if missing != "kwave" and not missing.startswith("kwave."):
+        raise
+    pytest.skip(
+        f"k-wave-python stack is unavailable: {exc}",
+        allow_module_level=True,
+    )
 
 
-# ---------------------------------------------------------------------------
-# _normalize_kwave_binary_path
-# ---------------------------------------------------------------------------
+def test_uniform_time_step_accepts_long_float32_physical_grid():
+    count = 1024
+    nominal_dt = np.float32(2.0e-8)
+    times = np.arange(count, dtype=np.float32) * nominal_dt
+
+    spacing = kwave_solver_module._uniform_time_step(times)
+
+    expected = (float(times[-1]) - float(times[0])) / (count - 1)
+    assert spacing == pytest.approx(expected, rel=0.0, abs=0.0)
+    assert not np.allclose(np.diff(times), np.diff(times)[0], rtol=1e-6, atol=0.0)
+
+
+def test_uniform_time_step_rejects_material_nonuniformity():
+    count = 1024
+    nominal_dt = np.float32(2.0e-8)
+    times = np.arange(count, dtype=np.float32) * nominal_dt
+    times[count // 2] += np.float32(0.2) * nominal_dt
+
+    with pytest.raises(ValueError, match="uniformly spaced"):
+        kwave_solver_module._uniform_time_step(times)
 
 
 def test_normalize_binary_path_missing_directory_raises(tmp_path):
@@ -30,16 +53,6 @@ def test_normalize_binary_path_nonexistent_file_raises(tmp_path):
     bogus = tmp_path / "nope"
     with pytest.raises(FileNotFoundError, match="does not exist"):
         kwave_solver_module._normalize_kwave_binary_path(bogus, device="cpu")
-
-
-# The _metadata_marks_bad_darwin_omp and _domain_has_nonzero_absorption tests
-# were removed along with the bad-Darwin-OMP guards once k-wave-python was
-# pinned to >=0.6.2.
-
-
-# ---------------------------------------------------------------------------
-# _coerce_sensor_data_layout — full error-path matrix
-# ---------------------------------------------------------------------------
 
 
 class TestCoerceSensorDataLayout:
@@ -132,11 +145,6 @@ class TestCoerceSensorDataLayout:
                 data_layout="auto",
                 op_name="test",
             )
-
-
-# ---------------------------------------------------------------------------
-# _build_adjoint_source / _binary_name small helpers
-# ---------------------------------------------------------------------------
 
 
 def test_binary_name_cpu_vs_gpu():
@@ -299,7 +307,3 @@ def test_adjoint_rejects_nonlinear_restore_max_smoothing():
             np.array([0.0, 0.01, 0.02]),
             data_layout="ns_nt",
         )
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

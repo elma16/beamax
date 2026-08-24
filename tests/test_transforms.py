@@ -28,17 +28,10 @@ def generate_test_params():
                     (num_levels, N, num_boxes_outer_level, box_aspect_ratio, windowing)
                 )
 
-    # rectangular params
     for num_levels in range(1, 3):
         N = (128, 128)
         num_boxes_outer_level = tuple([2 ** (level + 2) for level in range(num_levels)])
-        for box_aspect_ratio in [
-            (1, 1),
-            (2, 1),
-            (4, 1),
-            (1, 2),
-            (1, 4),
-        ]:
+        for box_aspect_ratio in [(2, 1), (4, 1), (1, 2), (1, 4)]:
             for windowing in ["rectangular", "rectangular_mirror"]:
                 params.append(
                     (num_levels, N, num_boxes_outer_level, box_aspect_ratio, windowing)
@@ -48,6 +41,20 @@ def generate_test_params():
 
 
 all_params = generate_test_params()
+
+
+# These cases pair dimensions, levels, window types, and anisotropy without
+# rerunning every algebraic identity over the full round-trip matrix.
+algebraic_params = [
+    (1, (128,), (4,), (1,), "rectangular"),
+    (2, (128,), (4, 8), (1,), "rectangular_mirror"),
+    (1, (128, 128), (4,), (1, 1), "rectangular_mirror"),
+    (2, (256, 128), (4, 8), (1, 1), "rectangular"),
+    (1, (128, 128), (4,), (2, 1), "rectangular"),
+    (2, (128, 128), (4, 8), (1, 4), "rectangular_mirror"),
+]
+
+multilevel_algebraic_params = [param for param in algebraic_params if param[0] > 1]
 
 
 def test_redundancy_one_mirror_window_is_rejected_before_dual_division():
@@ -75,6 +82,14 @@ def test_unwindowed_fast_analysis_is_rejected_but_synthesis_remains_available():
     assert jnp.array_equal(synthesized, rectangular_atom)
 
 
+def test_half_mask_exposes_one_representative_per_pair():
+    decomp = DyadicDecomposition(1, (64,), (4,), (1,))
+    wpt = transforms.MSWPT(decomp, redundancy=2, windowing="rectangular")
+
+    assert wpt.half_mask.shape == (wpt.total_coeffs,)
+    assert int(jnp.sum(wpt.half_mask)) == wpt.total_coeffs // 2
+
+
 def test_redundancy_one_anisotropic_rectangular_roundtrip():
     decomp = DyadicDecomposition(2, (64, 32), (4, 8), (2, 1))
     wpt = transforms.MSWPT(decomp, redundancy=1, windowing="rectangular")
@@ -100,8 +115,8 @@ def setup_transform(request):
 @pytest.fixture
 def random_input(setup_transform):
     _, N, _ = setup_transform
-    key = jax.random.PRNGKey(0)
-    return jax.random.normal(key, N) + 1j * jax.random.normal(key, N)
+    real_key, imag_key = jax.random.split(jax.random.PRNGKey(0))
+    return jax.random.normal(real_key, N) + 1j * jax.random.normal(imag_key, N)
 
 
 @pytest.mark.parametrize("setup_transform", all_params, indirect=True)
@@ -117,7 +132,7 @@ def test_inv_fwd_is_f(setup_transform, random_input):
     assert jnp.allclose(p0, p0_recon, atol=1e-16)
 
 
-@pytest.mark.parametrize("setup_transform", all_params, indirect=True)
+@pytest.mark.parametrize("setup_transform", algebraic_params, indirect=True)
 def test_inv_fwd_inv_is_f(setup_transform):
     """Test that the inverse, and the forward applied to the inverse give the same result."""
     wpt, N, dyadic_decomp = setup_transform
@@ -134,11 +149,9 @@ def test_inv_fwd_inv_is_f(setup_transform):
     assert jnp.allclose(f_rec, f_rec_rec, atol=1e-16)
 
 
-@pytest.mark.parametrize("setup_transform", all_params, indirect=True)
-def test_fwd_is_linear_levels(setup_transform):
-    """
-    Test that the forward transform is linear
-    """
+@pytest.mark.parametrize("setup_transform", multilevel_algebraic_params, indirect=True)
+def test_inverse_is_additive_across_levels(setup_transform):
+    """Synthesizing all levels at once equals summing each level."""
     wpt, N, dyadic_decomp = setup_transform
     num_levels = dyadic_decomp.num_levels
     key = jax.random.PRNGKey(0)
@@ -170,7 +183,7 @@ def test_fwd_is_linear_levels(setup_transform):
     assert jnp.allclose(f, f_sum, atol=1e-16)
 
 
-@pytest.mark.parametrize("setup_transform", all_params, indirect=True)
+@pytest.mark.parametrize("setup_transform", algebraic_params, indirect=True)
 def test_fwd_transform_linear(setup_transform):
     """
     Test that the forward transform is linear
@@ -179,12 +192,12 @@ def test_fwd_transform_linear(setup_transform):
      and F(a * c1) = a * F(c1)
     """
     wpt, N, _ = setup_transform
-    key = jax.random.PRNGKey(0)
+    f1_key, f2_key, scalar_key = jax.random.split(jax.random.PRNGKey(0), 3)
 
     input_type = "spatial"
-    f1 = jax.random.normal(key, N)
-    f2 = jax.random.normal(key, N)
-    a = jax.random.normal(key)
+    f1 = jax.random.normal(f1_key, N)
+    f2 = jax.random.normal(f2_key, N)
+    a = jax.random.normal(scalar_key)
 
     c1 = wpt.forward(f1, input_type)
     c2 = wpt.forward(f2, input_type)
@@ -195,17 +208,17 @@ def test_fwd_transform_linear(setup_transform):
     assert jnp.allclose(c_scaled, a * c1, atol=1e-16)
 
 
-@pytest.mark.parametrize("setup_transform", all_params, indirect=True)
+@pytest.mark.parametrize("setup_transform", algebraic_params, indirect=True)
 def test_inv_transform_linear(setup_transform):
     wpt, N, _ = setup_transform
-    key = jax.random.PRNGKey(0)
+    c1_key, c2_key, scalar_key = jax.random.split(jax.random.PRNGKey(0), 3)
 
     total_coeffs = jnp.prod(redundancy * jnp.array(N))
 
     input_type = "spatial"
-    c1 = jax.random.normal(key, (total_coeffs,))
-    c2 = jax.random.normal(key, (total_coeffs,))
-    a = jax.random.normal(key)
+    c1 = jax.random.normal(c1_key, (total_coeffs,))
+    c2 = jax.random.normal(c2_key, (total_coeffs,))
+    a = jax.random.normal(scalar_key)
 
     f1 = wpt.inverse(c1, input_type)
     f2 = wpt.inverse(c2, input_type)
@@ -214,7 +227,3 @@ def test_inv_transform_linear(setup_transform):
 
     assert jnp.allclose(f_sum, f1 + f2, atol=1e-16)
     assert jnp.allclose(f_scaled, a * f1, atol=1e-16)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

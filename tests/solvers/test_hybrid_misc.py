@@ -1,42 +1,26 @@
-"""
-Unit tests for thin validation / configuration / dispatch paths in
-``hybrid_solver`` and ``hybrid_solver_utils`` that the existing integration
-tests don't reach.
-
-These are deliberately small and fast: no k-Wave, no MSGB, no real forward
-solves. The goal is to lock in the error/validation behaviour and the
-analytic-helper edge cases so the heavier integration tests don't have to
-re-cover them.
-"""
+"""Fast hybrid-solver validation, dispatch, and helper tests."""
 
 import warnings
-from typing import Literal
 
 import jax.numpy as jnp
 import pytest
 
 from beamax import geometry, utils
 from beamax.solvers.hybrid_solver import (
-    FourierInterpolation,
     HybridBackend,
     HybridContext,
     HybridSolver,
     HybridSolverConfig,
-    ZoomInterpolation,
+    _interpolate_fourier,
+    _interpolate_zoom,
 )
 from beamax.solvers.hybrid_solver_utils import (
-    are_opposing,
     downsample_domain,
     find_bounding_corner_indices,
     get_indices_between_two_opposing_corners,
     get_indices_with_norm_less_than,
     split_frequency_components,
 )
-
-
-# ---------------------------------------------------------------------------
-# HybridSolverConfig validation
-# ---------------------------------------------------------------------------
 
 
 class TestHybridSolverConfigValidation:
@@ -133,29 +117,16 @@ def _small_hybrid_inputs():
     return domain, wpt, sensors, ts
 
 
-def _manual_context(
-    operation: Literal["forward", "time_reversal", "adjoint"] = "forward",
-) -> HybridContext:
-    domain, wpt, sensors, ts = _small_hybrid_inputs()
+def _manual_context() -> HybridContext:
+    domain, _, sensors, ts = _small_hybrid_inputs()
     mask = sensors.binary_mask
     return HybridContext(
-        operation=operation,
-        config=HybridSolverConfig(box_corners=jnp.array([0, 1]), downsample=False),
         domain=domain,
-        input_domain=domain,
         component_domain=domain,
-        full_sensors=sensors,
-        component_sensors=mask,
-        full_sensor_mask=mask,
         component_sensor_mask=mask,
         ts=ts,
-        original_ts=ts,
         target_shape=domain.N,
         sources=sensors,
-        wpt=wpt,
-        data_wpt=wpt,
-        img_wpt=wpt,
-        data_domain=domain,
     )
 
 
@@ -218,7 +189,7 @@ def test_hybrid_backend_from_beamax_solver_wraps_forward_signature():
             return jnp.asarray(data) + 1
 
     backend = HybridBackend.from_beamax_solver(BeamaxStyleSolver())
-    context = _manual_context("forward")
+    context = _manual_context()
     out = backend.require("forward")(jnp.zeros(context.domain.N), context)
 
     assert jnp.allclose(out, 1)
@@ -249,7 +220,6 @@ def test_forward_only_lf_backend_works_with_hybrid_forward():
     assert jnp.allclose(out, 1)
     assert seen["component_shape"] == domain.N
     assert isinstance(seen["context"], HybridContext)
-    assert seen["context"].operation == "forward"
     assert seen["context"].target_shape == out.shape
 
 
@@ -307,9 +277,7 @@ def test_lf_time_reversal_receives_hybrid_context():
     assert jnp.allclose(out, 1)
     assert seen["component_shape"] == domain.N
     assert isinstance(seen["context"], HybridContext)
-    assert seen["context"].operation == "time_reversal"
     assert seen["context"].sources is sensors
-    assert seen["context"].data_domain is domain
     assert seen["context"].target_shape == domain.N
 
 
@@ -344,9 +312,7 @@ def test_lf_adjoint_receives_hybrid_context():
     assert jnp.allclose(out, 1)
     assert seen["component_shape"] == domain.N
     assert isinstance(seen["context"], HybridContext)
-    assert seen["context"].operation == "adjoint"
     assert seen["context"].sources is sensors
-    assert seen["context"].data_domain is domain
     assert seen["context"].target_shape == domain.N
 
 
@@ -357,27 +323,8 @@ def test_hybrid_solver_unknown_interp_method_raises():
             hf_solver=_DummySolver(),
             lf_backend=_dummy_backend(),
             box_corners=jnp.array([0, 1]),
-            interp_method="bilinear",  # not 'fourier' or 'zoom'
+            interp_method="bilinear",
         )
-
-
-# ---------------------------------------------------------------------------
-# Interpolation strategies (the public abstract classes both have concrete
-# implementations that are simple enough to test directly).
-# ---------------------------------------------------------------------------
-
-
-def test_fourier_interpolation_upsamples_constant_array():
-    """A constant input stays spatially flat after Fourier resampling.
-
-    The unitary FFT used internally rescales the DC term by ``N/N_target`` so
-    the pointwise value is not preserved, but the output is still spatially
-    uniform — that's the property we care about for interpolation correctness.
-    """
-    arr = jnp.ones((4, 4))
-    out = FourierInterpolation().interpolate(arr, (8, 8))
-    assert out.shape == (8, 8)
-    assert float(jnp.std(out)) < 1e-8
 
 
 def test_fourier_interpolation_inverts_unitary_lf_crop():
@@ -387,7 +334,7 @@ def test_fourier_interpolation_inverts_unitary_lf_crop():
     coarse_ft = utils.crop_centered(utils.unitary_fft(full), (4, 4))
     coarse = utils.unitary_ifft(coarse_ft)
 
-    reconstructed = FourierInterpolation().interpolate(coarse, full.shape)
+    reconstructed = _interpolate_fourier(coarse, full.shape)
 
     assert jnp.allclose(reconstructed, full, atol=5e-7)
 
@@ -418,17 +365,10 @@ def test_hybrid_forward_fourier_normalization_for_planar_sensor_data():
         hf_solver=_StrictHybridHFSolver(), lf_backend=backend, config=config
     )
     context = HybridContext(
-        operation="forward",
-        config=config,
         domain=full_domain,
-        input_domain=full_domain,
         component_domain=coarse_domain,
-        full_sensors=None,
-        component_sensors=None,
-        full_sensor_mask=jnp.ones(full_domain.N),
         component_sensor_mask=jnp.ones(coarse_domain.N),
         ts=jnp.arange(3.0),
-        original_ts=jnp.arange(3.0),
         target_shape=(3, 8),
     )
 
@@ -445,15 +385,31 @@ def test_hybrid_forward_fourier_normalization_for_planar_sensor_data():
 
 
 def test_zoom_interpolation_returns_target_shape():
-    """ZoomInterpolation must return exactly the requested shape."""
+    """Spline interpolation returns exactly the requested shape."""
     arr = jnp.arange(16.0).reshape(4, 4)
-    out = ZoomInterpolation(order=3).interpolate(arr, (8, 8))
+    out = _interpolate_zoom(arr, (8, 8), order=3)
     assert out.shape == (8, 8)
 
 
-# ---------------------------------------------------------------------------
-# Window helpers — edge cases that bypass the kaiser/tukey tapering.
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("factory", [HybridSolver, HybridSolver.create_with_domain])
+def test_hybrid_solver_rejects_config_with_keyword_configuration(factory):
+    """Explicit and keyword configuration cannot be mixed."""
+    kwargs = {
+        "hf_solver": _DummySolver(),
+        "lf_backend": _dummy_backend(),
+        "config": HybridSolverConfig(box_corners=jnp.array([0, 1])),
+        "cutoff_freq": 1.0,
+    }
+    if factory is HybridSolver.create_with_domain:
+        kwargs["domain"] = geometry.Domain(
+            N=(4, 4),
+            dx=(1.0, 1.0),
+            c=lambda x: 1.0 + 0.0 * x[..., 0],
+            periodic=(True, True),
+        )
+
+    with pytest.raises(ValueError, match="either config"):
+        factory(**kwargs)
 
 
 def test_apply_kaiser_window_zero_oversample_is_passthrough():
@@ -496,7 +452,7 @@ def test_apply_kaiser_window_1d_input():
     data = jnp.ones((20,))
     out = solver._apply_kaiser_window(data)
     assert out.shape == data.shape
-    assert float(out[-1]) < 1.0  # taper kicks in at the end
+    assert float(out[-1]) < 1.0
 
 
 def test_apply_tukey_window_1d_input():
@@ -554,11 +510,6 @@ def test_downsample_domain_preserves_and_resamples_medium_fields():
     assert coarse.lam == pytest.approx(0.25)
 
 
-# ---------------------------------------------------------------------------
-# hybrid_solver_utils helpers
-# ---------------------------------------------------------------------------
-
-
 def test_find_bounding_corner_indices_empty_raises():
     """find_bounding_corner_indices must reject empty index sets."""
     centers = jnp.array([[0.0, 0.0], [1.0, 1.0]])
@@ -579,15 +530,8 @@ def test_find_bounding_corner_indices_1d_falls_back_to_extremes():
     """
     centers = jnp.array([[-3.0], [-1.0], [2.0], [5.0]])
     c1, c2 = find_bounding_corner_indices(centers, jnp.arange(4))
-    assert c1 != c2  # fallback fired
+    assert c1 != c2
     assert {c1, c2} == {0, 3}
-
-
-def test_are_opposing_smoke():
-    """are_opposing should accept any two ints and return a bool."""
-    assert isinstance(are_opposing(0, 1), bool) or isinstance(
-        are_opposing(0, 1), (jnp.ndarray,)
-    )
 
 
 def test_get_indices_between_two_opposing_corners_smoke():
@@ -601,7 +545,7 @@ def test_get_indices_between_two_opposing_corners_smoke():
     idx_set = set(int(i) for i in idx)
     assert 0 in idx_set
     assert 3 in idx_set
-    assert 4 not in idx_set  # outside the box
+    assert 4 not in idx_set
 
 
 def test_get_indices_with_norm_less_than_inclusive_vs_exclusive():
@@ -672,7 +616,6 @@ def test_split_frequency_components_empty_lf_warns_and_returns_zero_lf():
         c=lambda x: 1.0 + 0.0 * x[..., 0],
         periodic=(True, True),
     )
-    # cutoff_freq below the smallest dyadic centre norm → empty idx_box.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         p0_hf, p0_lf, mask_out, dom_out = split_frequency_components(
@@ -690,7 +633,3 @@ def test_split_frequency_components_empty_lf_warns_and_returns_zero_lf():
     assert jnp.allclose(p0_lf, 0.0)
     assert mask_out is sensors_mask
     assert dom_out is domain
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

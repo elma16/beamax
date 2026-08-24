@@ -1,12 +1,5 @@
 # `beamax.gb.gb_utils`
 
-Mathematical helper routines for Gaussian beam dynamics.
-
-## Scope
-
-- Hamiltonian derivatives and geometric quantities.
-- Matrix helpers and vectorized utilities used by ODE solvers.
-
-## API Reference
+Hamiltonian, geometric, and matrix utilities for Gaussian beam dynamics.
 
 ::: beamax.gb.gb_utils

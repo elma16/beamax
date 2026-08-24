@@ -1,60 +1,15 @@
-"""
-Utilities public API (explicit). Heavy things must be imported inside call-sites.
-"""
+"""Public utility API, loaded on first attribute access."""
 
-# device/memory
-from .device import (
-    get_devices,
-    memory_estimate,
-    memory_str,
-    array_str,
-    detect_root,
-    example_plot_dir,
-)
-
-# FFT helpers
-from .fft import unitary_fft, unitary_ifft, convert_space
-
-# Interpolation
-from .interp import make_c_function_from_grid, Interpolator
-
-# Array shape and resampling helpers
-from .arrays import (
-    interpolate_nearest,
-    pad_array,
-    pad_zero,
-    pad_edge,
-    crop_centered,
-    interpolate_fourier,
-    extract_centered_box,
-    rel_l2,
-)
-
-# Coefficient indexing helpers used by transforms and solvers
-from .coeff_index import (
-    batch_data,
-    find_level,
-    find_tensor_and_multiindex,
-    compute_coeff_shapes,
-)
+from importlib import import_module
+from typing import Any
 
 
 __all__ = [
-    # device/mem
-    "get_devices",
-    "memory_estimate",
-    "memory_str",
-    "array_str",
-    "detect_root",
-    "example_plot_dir",
-    # fft
     "unitary_fft",
     "unitary_ifft",
     "convert_space",
-    # interp
     "make_c_function_from_grid",
     "Interpolator",
-    # arrays
     "interpolate_nearest",
     "pad_array",
     "pad_zero",
@@ -63,9 +18,51 @@ __all__ = [
     "interpolate_fourier",
     "extract_centered_box",
     "rel_l2",
-    # coeff index
     "batch_data",
     "find_level",
     "find_tensor_and_multiindex",
     "compute_coeff_shapes",
+    "DeviceCapabilities",
+    "MemoryEstimate",
+    "device_capabilities",
+    "estimate_msgb_memory",
 ]
+
+
+_EXPORT_MODULES = {
+    "unitary_fft": ".fft",
+    "unitary_ifft": ".fft",
+    "convert_space": ".fft",
+    "make_c_function_from_grid": ".interp",
+    "Interpolator": ".interp",
+    "interpolate_nearest": ".arrays",
+    "pad_array": ".arrays",
+    "pad_zero": ".arrays",
+    "pad_edge": ".arrays",
+    "crop_centered": ".arrays",
+    "interpolate_fourier": ".arrays",
+    "extract_centered_box": ".arrays",
+    "rel_l2": ".arrays",
+    "batch_data": ".coeff_index",
+    "find_level": ".coeff_index",
+    "find_tensor_and_multiindex": ".coeff_index",
+    "compute_coeff_shapes": ".coeff_index",
+    "DeviceCapabilities": ".memory",
+    "MemoryEstimate": ".memory",
+    "device_capabilities": ".memory",
+    "estimate_msgb_memory": ".memory",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Load and cache a public utility on first access."""
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Union, Tuple
+from typing import Any, Union
 import os
-import re
 import sys
-import time
-from io import StringIO
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +10,6 @@ import jax
 import jax.numpy as jnp
 
 from beamax.geometry import Domain
-from beamax.solvers.solverbase import Solver
 
 from kwave.kgrid import kWaveGrid
 from kwave.kmedium import kWaveMedium
@@ -26,39 +22,50 @@ from kwave.compat import options_to_kwargs
 _KWAVE_BINARY_ENV = "BEAMAX_KWAVE_BINARY_PATH"
 
 
-def _patch_cpp_simulation_stale_hdf5() -> None:
+def _uniform_time_step(ts: Any) -> float:
+    """Validate a representably uniform time grid and return its spacing.
+
+    Comparing against the endpoint-defined grid avoids cancellation in
+    adjacent float32 differences at PAT time scales.
     """
-    Patch stale HDF5 handling in k-wave-python.
+    ts_array = np.asarray(ts)
+    if ts_array.ndim != 1 or ts_array.size < 2:
+        raise ValueError("ts must be one-dimensional with at least two points.")
+    if np.iscomplexobj(ts_array):
+        raise ValueError("ts must be real-valued.")
+    if not np.all(np.isfinite(ts_array)):
+        raise ValueError("ts must contain only finite values.")
 
-    Notes
-    -----
-    Even at k-wave-python>=0.6.2, ``CppSimulation._write_hdf5`` doesn't remove
-    a pre-existing file before writing. Reusing the same temp path across
-    multiple forward calls — which happens whenever a single ``KWaveSolver``
-    runs forward twice in a process, e.g. inside ``HybridSolver`` — then
-    fails with "name already exists". This wrapper deletes the stale file
-    first and delegates otherwise.
-
-    Idempotent: a guard attribute prevents re-patching the same class twice.
-    """
-    from kwave.solvers.cpp_simulation import CppSimulation
-
-    if getattr(CppSimulation._write_hdf5, "_beamax_stale_hdf5_patch", False):
-        return
-
-    _orig_write = CppSimulation._write_hdf5
-
-    def _patched_write(self, filepath):
-        """Remove an existing HDF5 file before delegating to k-Wave."""
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        _orig_write(self, filepath)
-
-    _patched_write._beamax_stale_hdf5_patch = True
-    CppSimulation._write_hdf5 = _patched_write
-
-
-_patch_cpp_simulation_stale_hdf5()
+    differences = np.diff(ts_array)
+    real_dtype = np.dtype(ts_array.dtype)
+    precision_dtype = (
+        real_dtype if np.issubdtype(real_dtype, np.floating) else np.dtype(np.float64)
+    )
+    epsilon = float(np.finfo(precision_dtype).eps)
+    start = float(ts_array[0])
+    stop = float(ts_array[-1])
+    ideal = np.linspace(start, stop, ts_array.size)
+    spacing = (stop - start) / (ts_array.size - 1)
+    magnitude = max(
+        float(np.max(np.abs(ts_array))),
+        abs(spacing),
+        float(np.finfo(precision_dtype).tiny),
+    )
+    rounding_atol = 8.0 * epsilon * magnitude
+    if (
+        spacing <= 0.0
+        or np.any(differences <= 0.0)
+        or not np.allclose(
+            np.asarray(ts_array, dtype=np.float64),
+            ideal,
+            rtol=0.0,
+            atol=rounding_atol,
+        )
+    ):
+        raise ValueError(
+            "ts must be finite, strictly increasing, and uniformly spaced."
+        )
+    return float(spacing)
 
 
 def _binary_name(device: str) -> str:
@@ -123,24 +130,31 @@ def _configure_cpp_binary_kwargs(kwargs: dict) -> Path:
     return binary_path
 
 
+def _remove_stale_cpp_input(kwargs: dict) -> None:
+    """Remove k-Wave's fixed input filename when reusing ``data_path``."""
+    data_path = kwargs.get("data_path")
+    if data_path is not None:
+        (Path(data_path).expanduser() / "kwave_input.h5").unlink(missing_ok=True)
+
+
 Array = Union[np.ndarray, jnp.ndarray]
 
 
-class KWaveSolver(Solver):
+class KWaveSolver:
     """
     :mod:`k-wave-python` wrapper (2D/3D) for forward, time-reversal, and adjoint solves.
 
-    Provides a :class:`beamax.solvers.Solver`-compatible interface backed by
-    the k-Wave pseudo-spectral time-domain solver. Used as the "reference" in
-    examples and as the low-frequency leg of :class:`HybridSolver`.
+    Used as the reference solver in examples and as the low-frequency leg of
+    :class:`HybridSolver`.
 
     Parameters
     ----------
     simulation_options : kwave.options.SimulationOptions, optional
-        Legacy simulation-options object. If provided with
-        ``execution_options``, they are converted to the unified kwargs dict.
+        Legacy simulation-options object. It cannot be mixed with unified
+        keyword options.
     execution_options : kwave.options.SimulationExecutionOptions, optional
-        Legacy execution-options object. See ``simulation_options``.
+        Legacy execution-options object. It cannot be mixed with unified
+        keyword options.
     **kwargs
         Unified k-Wave arguments forwarded to
         :func:`kwave.kspaceFirstOrder`. If neither legacy options nor kwargs
@@ -187,26 +201,30 @@ class KWaveSolver(Solver):
             Unified keyword options forwarded to
             :func:`kwave.kspaceFirstOrder`.
         """
-        self._solver_kwargs: dict[str, Any]
-        if simulation_options is not None:
-            # Legacy path: convert old option objects to unified kwargs
-            self._solver_kwargs = options_to_kwargs(
-                simulation_options, execution_options
+        uses_legacy_options = (
+            simulation_options is not None or execution_options is not None
+        )
+        if uses_legacy_options and kwargs:
+            raise TypeError(
+                "Legacy simulation/execution options cannot be mixed with "
+                "unified keyword options. Convert them to keyword options first."
             )
-            self._explicit_solver_options = set(self._solver_kwargs)
-        elif kwargs:
-            self._solver_kwargs = dict(kwargs)
-            self._explicit_solver_options = set(kwargs)
-        else:
-            self._solver_kwargs = dict(
-                pml_inside=False,
-                pml_size=20,
-                smooth_p0=False,
-                backend="cpp",
-                device="cpu",
-                debug=True,
-            )
-            self._explicit_solver_options = set()
+
+        defaults = {
+            "pml_inside": False,
+            "pml_size": 20,
+            "smooth_p0": False,
+            "backend": "cpp",
+            "device": "cpu",
+            "debug": False,
+        }
+        supplied = (
+            options_to_kwargs(simulation_options, execution_options)
+            if uses_legacy_options
+            else dict(kwargs)
+        )
+        self._solver_kwargs = {**defaults, **supplied}
+        self._explicit_solver_options = set(supplied)
 
     def _create_kgrid(self, domain: Domain, ts: Array) -> kWaveGrid:
         """
@@ -225,20 +243,10 @@ class KWaveSolver(Solver):
         x64_enabled = bool(getattr(jax.config, "x64_enabled", False))
         dtype = np.float64 if x64_enabled else np.float32
         ts = np.asarray(ts, dtype=dtype)
-        if ts.ndim != 1 or ts.size < 2:
-            raise ValueError("ts must be one-dimensional with at least two points.")
-        dt_values = np.diff(ts)
-        if (
-            not np.all(np.isfinite(ts))
-            or np.any(dt_values <= 0)
-            or not np.allclose(dt_values, dt_values[0], rtol=1e-6, atol=0.0)
-        ):
-            raise ValueError(
-                "ts must be finite, strictly increasing, and uniformly spaced."
-            )
+        dt = _uniform_time_step(ts)
         kgrid = kWaveGrid(N=domain.N, spacing=domain.dx)
 
-        kgrid.setTime(len(ts), dt_values[0])
+        kgrid.setTime(len(ts), dt)
         return kgrid
 
     def _kwargs_for_domain(self, domain: Domain) -> dict[str, Any]:
@@ -346,6 +354,7 @@ class KWaveSolver(Solver):
 
         if kwargs.get("backend") == "cpp":
             _configure_cpp_binary_kwargs(kwargs)
+            _remove_stale_cpp_input(kwargs)
 
         result = kspaceFirstOrder(
             kgrid,
@@ -412,13 +421,7 @@ class KWaveSolver(Solver):
         if out.ndim == 2 and out.shape == (ns, nt):
             out = out.T
 
-        # The standalone C++/CUDA binaries enumerate mask points using
-        # MATLAB/Fortran linear order, whereas the Python backend and
-        # ``Sensor.positions`` use NumPy C order.  Leaving the C++ channels in
-        # Fortran order is invisible for a 2D detector line, but swaps the two
-        # tangential axes of a 3D detector plane when those data are injected
-        # by the Python TR/adjoint backend or consumed by MSGB.  Expose one
-        # canonical (C-order) channel convention from the public wrapper.
+        # C++ enumerates masks in Fortran order; the public API uses C order.
         if backend == "cpp" and out.ndim == 2 and out.shape == (nt, ns):
             out = out[:, self._cpp_sensor_channels_to_c_order(sensor_mask)]
 
@@ -566,7 +569,7 @@ class KWaveSolver(Solver):
         record: str = "p_final",
         data_layout: str = "auto",
     ) -> np.ndarray:
-        """
+        r"""
         Run classic k-Wave time reversal.
 
         Parameters
@@ -593,7 +596,8 @@ class KWaveSolver(Solver):
 
         Notes
         -----
-        Enforces ``p(x_s, t) = sensor_data(t, x_s)`` as a Dirichlet source.
+        Enforces $p(\mathbf{x}_s,t)=d(t,\mathbf{x}_s)$ as a Dirichlet source,
+        where $d$ denotes ``sensor_data``.
         """
         sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
         source_mask = self._validate_mask(np.asarray(sources), domain, name="sources")
@@ -613,8 +617,7 @@ class KWaveSolver(Solver):
 
         sensor = kSensor(mask=sensor_mask, record=[record])
 
-        # v0.6.1 cpp backend lacks source-term scaling for time-varying
-        # sources; force python backend until upstream fix.
+        # The C++ backend lacks time-varying source scaling.
         out = self._run_simulation(domain, ts, src, sensor, force_python=True)
         return out[record]
 
@@ -629,7 +632,7 @@ class KWaveSolver(Solver):
         record: str = "p_final",
         data_layout: str = "auto",
     ) -> np.ndarray:
-        """
+        r"""
         Discrete k-Wave adjoint following Arridge et al., Appendix B.
 
         Parameters
@@ -649,25 +652,29 @@ class KWaveSolver(Solver):
         Returns
         -------
         np.ndarray
-            Euclidean discrete adjoint image ``A.T @ data`` with shape
-            ``domain.N``.
+            Euclidean discrete adjoint image $A^{\mathsf T}d$
+            (``A.T @ data``) with shape ``domain.N``.
 
         Notes
         -----
         The returned field is the algebraic transpose under unweighted
         discrete sums. To represent a one-cell planar detector under the
-        thesis's continuous surface and volume rectangle rules, multiply this
-        result by ``dt / dx_normal``.
+        continuous surface and volume rectangle rules of Arridge et al. (2016), multiply this
+        result by $\Delta t/\Delta x_{\mathrm{normal}}$.
 
         The source is Eq. (B.2) of Arridge et al. (2016). k-Wave's additive
         pressure-source preprocessing multiplies a user source by
-        ``2*dt/(d*c*dx)`` before adding it to each split density field.
+        $2\Delta t/(d\,c\,\Delta x)$ before adding it to each split density
+        field.
         Consequently the user source must be
 
-        ``rho_source*c_source*dx/(4*dt) * beta``,
+        $$
+        \frac{\rho_{\mathrm{source}}c_{\mathrm{source}}\Delta x}
+        {4\Delta t}\,\beta,
+        $$
 
         and the terminal pressure must be divided pointwise by
-        ``c**2*rho``. ``additive-no-correction`` is intentional: the optional
+        $c^2\rho$. ``additive-no-correction`` is intentional: the optional
         cosine k-space filter on the injected source is not part of Eq. (B.2).
         This mode still applies k-Wave's additive-source amplitude scaling and
         does not disable the sinc k-space correction used by the propagation
@@ -697,19 +704,7 @@ class KWaveSolver(Solver):
                 f"spacing; got domain.dx={domain.dx}."
             )
 
-        ts_array = np.asarray(ts, dtype=float)
-        if ts_array.ndim != 1 or ts_array.size < 2:
-            raise ValueError("ts must be one-dimensional with at least two points.")
-        dt_values = np.diff(ts_array)
-        if (
-            not np.all(np.isfinite(ts_array))
-            or np.any(dt_values <= 0.0)
-            or not np.allclose(dt_values, dt_values[0], rtol=1e-6, atol=0.0)
-        ):
-            raise ValueError(
-                "ts must be finite, strictly increasing, and uniformly spaced."
-            )
-        dt = float(dt_values[0])
+        dt = _uniform_time_step(ts)
 
         source_mask = self._validate_mask(np.asarray(sources), domain, name="sources")
         sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
@@ -744,10 +739,7 @@ class KWaveSolver(Solver):
 
         sensor = kSensor(mask=sensor_mask, record=[record])
 
-        # k-wave-python 0.6.2's unified C++ path writes source.p directly to
-        # HDF5 and does not request p_final. The Python backend performs the
-        # documented time-varying source preprocessing and returns the
-        # terminal field needed by the Appendix-B construction.
+        # Only the Python backend preprocesses this source and returns p_final.
         out = self._run_simulation(domain, ts, src, sensor, force_python=True)
         terminal_pressure = np.asarray(out[record])
         if tuple(terminal_pressure.shape) != domain.N:
@@ -756,242 +748,3 @@ class KWaveSolver(Solver):
                 f"{terminal_pressure.shape}; expected {domain.N}."
             )
         return terminal_pressure / (sound_speed**2 * density)
-
-
-class TimedKWaveSolver(KWaveSolver):
-    """
-    k-Wave wrapper that also returns a timing.
-
-    Timing modes
-    ------------
-    mode="stdout" (default):
-        Parse k-Wave's own "Total execution time: <Xs>" line from stdout.
-        Intended to reflect *simulation kernel time*, not wrapper overhead.
-        Fallback to wall-clock if parsing fails.
-
-    mode="wall":
-        Wall-clock around the internal `_run()` call (includes whatever k-Wave
-        does internally, excludes your pre/post Python work).
-    """
-
-    _RE = re.compile(r"Total execution time:\s*([\d.]+)s")
-
-    def __init__(self, *args, mode: str = "stdout", **kwargs):
-        """
-        Initialize timed k-Wave solver.
-
-        Parameters
-        ----------
-        *args
-            Positional arguments forwarded to :class:`KWaveSolver`.
-        mode : {"stdout", "wall"}, default="stdout"
-            Timing mode. ``"stdout"`` parses k-Wave output; ``"wall"`` uses
-            Python wall-clock timing.
-        **kwargs
-            Keyword arguments forwarded to :class:`KWaveSolver`.
-
-        Raises
-        ------
-        ValueError
-            If ``mode`` is not ``"stdout"`` or ``"wall"``.
-        """
-        super().__init__(*args, **kwargs)
-        if mode not in {"stdout", "wall"}:
-            raise ValueError("mode must be 'stdout' or 'wall'")
-        self._mode = mode
-
-    def _time_call(self, fn, *a, **k) -> Tuple[np.ndarray, float]:
-        """
-        Execute a solver call and measure elapsed time.
-
-        Parameters
-        ----------
-        fn : Callable
-            Solver function to call.
-        *a
-            Positional arguments forwarded to ``fn``.
-        **k
-            Keyword arguments forwarded to ``fn``.
-
-        Returns
-        -------
-        result : np.ndarray
-            Solver result.
-        seconds : float
-            Parsed kernel time or wall-clock fallback.
-        """
-        if self._mode == "wall":
-            t0 = time.perf_counter()
-            out = fn(*a, **k)
-            t1 = time.perf_counter()
-            return out, (t1 - t0)
-
-        # stdout parsing mode
-        old = sys.stdout
-        buf = StringIO()
-        try:
-            sys.stdout = buf
-            t0 = time.perf_counter()
-            out = fn(*a, **k)
-            t1 = time.perf_counter()
-        finally:
-            sys.stdout = old
-        txt = buf.getvalue()
-        m = self._RE.search(txt)
-        if m:
-            return out, float(m.group(1))
-        # fallback
-        return out, (t1 - t0)
-
-    # ---- override public API to return (result, seconds) ----
-
-    def forward(
-        self,
-        p0,
-        domain,
-        sensors,
-        ts,
-        *,
-        record: str = "p",
-        **solver_kwargs,
-    ) -> Tuple[np.ndarray, float]:
-        """
-        Same as KWaveSolver.forward, but returns (result, seconds).
-
-        Parameters
-        ----------
-        p0 : array-like
-            Initial pressure.
-        domain : Domain
-            Computational domain.
-        sensors : array-like
-            Sensor mask or positions.
-        ts : array-like, shape (Nt,)
-            Time grid.
-        record : str, default="p"
-            k-Wave field to record.
-        **solver_kwargs
-            Additional solver keyword arguments.
-
-        Returns
-        -------
-        result : np.ndarray
-            Forward simulation result.
-        seconds : float
-            Execution time.
-        """
-        return self._time_call(
-            super().forward,
-            p0=p0,
-            domain=domain,
-            sensors=sensors,
-            ts=ts,
-            record=record,
-            **solver_kwargs,
-        )
-
-    def time_reversal(
-        self,
-        data,
-        domain,
-        sensors,
-        sources,
-        ts,
-        *,
-        record: str = "p_final",
-        data_layout: str = "auto",
-        **solver_kwargs,
-    ) -> Tuple[np.ndarray, float]:
-        """
-        Same as KWaveSolver.time_reversal, but returns (result, seconds).
-
-        Parameters
-        ----------
-        data : array-like
-            Sensor measurements.
-        domain : Domain
-            Reconstruction domain.
-        sensors : array-like
-            Sensor mask.
-        sources : array-like
-            Source mask.
-        ts : array-like, shape (Nt,)
-            Time grid.
-        record : str, default="p_final"
-            k-Wave field to return.
-        data_layout : {"auto", "ns_nt", "nt_ns"}, default="auto"
-            Sensor-data layout interpretation.
-        **solver_kwargs
-            Additional solver keyword arguments.
-
-        Returns
-        -------
-        result : np.ndarray
-            Time-reversal result.
-        seconds : float
-            Execution time.
-        """
-        return self._time_call(
-            super().time_reversal,
-            data=data,
-            domain=domain,
-            sensors=sensors,
-            sources=sources,
-            ts=ts,
-            record=record,
-            data_layout=data_layout,
-            **solver_kwargs,
-        )
-
-    def adjoint(
-        self,
-        data,
-        domain,
-        sensors,
-        sources,
-        ts,
-        *,
-        record: str = "p_final",
-        data_layout: str = "auto",
-        **solver_kwargs,
-    ) -> Tuple[np.ndarray, float]:
-        """
-        Same as KWaveSolver.adjoint, but returns (result, seconds).
-
-        Parameters
-        ----------
-        data : array-like
-            Sensor measurements.
-        domain : Domain
-            Reconstruction domain.
-        sensors : array-like
-            Sensor mask.
-        sources : array-like
-            Source mask.
-        ts : array-like, shape (Nt,)
-            Time grid.
-        record : str, default="p_final"
-            k-Wave field to return.
-        data_layout : {"auto", "ns_nt", "nt_ns"}, default="auto"
-            Sensor-data layout interpretation.
-        **solver_kwargs
-            Additional solver keyword arguments.
-
-        Returns
-        -------
-        result : np.ndarray
-            Adjoint result.
-        seconds : float
-            Execution time.
-        """
-        return self._time_call(
-            super().adjoint,
-            data=data,
-            domain=domain,
-            sensors=sensors,
-            sources=sources,
-            ts=ts,
-            record=record,
-            data_layout=data_layout,
-            **solver_kwargs,
-        )

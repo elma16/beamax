@@ -1,13 +1,60 @@
 # `beamax.utils`
 
-General utilities shared across decomposition, transforms, and solvers.
+Shared array, FFT, interpolation, indexing, batching, device, and memory-planning
+utilities.
 
-## Typical Use Cases
+## Arrays
 
-- FFT/interpolation helpers for resampling and signal manipulation.
-- Batching/index utilities for coefficient and beam pipelines.
-- Miscellaneous helpers for device checks, synthetic data generation, and numeric convenience operations.
+::: beamax.utils.arrays
+    options:
+      show_root_heading: false
+      members:
+        - interpolate_nearest
+        - pad_array
+        - pad_zero
+        - pad_edge
+        - crop_centered
+        - interpolate_fourier
+        - extract_centered_box
+        - rel_l2
 
-## API Reference
+## Fourier transforms
 
-::: beamax.utils
+::: beamax.utils.fft
+    options:
+      show_root_heading: false
+      members:
+        - unitary_fft
+        - unitary_ifft
+        - convert_space
+
+## Interpolation
+
+::: beamax.utils.interp
+    options:
+      show_root_heading: false
+      members:
+        - make_c_function_from_grid
+        - Interpolator
+
+## Coefficient indexing
+
+::: beamax.utils.coeff_index
+    options:
+      show_root_heading: false
+      members:
+        - batch_data
+        - find_level
+        - find_tensor_and_multiindex
+        - compute_coeff_shapes
+
+## Memory planning
+
+::: beamax.utils.memory
+    options:
+      show_root_heading: false
+      members:
+        - DeviceCapabilities
+        - MemoryEstimate
+        - device_capabilities
+        - estimate_msgb_memory

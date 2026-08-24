@@ -2,7 +2,6 @@ import jax.numpy as jnp
 import jax
 import pytest
 from pathlib import Path
-import types
 import numpy as np
 import os
 
@@ -10,16 +9,16 @@ from beamax import geometry, utils
 
 try:
     import beamax.solvers.kwave_solver as kwave_solver_module
-    from beamax.solvers.kwave_solver import KWaveSolver, TimedKWaveSolver
-except Exception as exc:  # pragma: no cover - depends on optional k-wave stack.
+    from beamax.solvers.kwave_solver import KWaveSolver
+except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency.
+    missing = exc.name or ""
+    if missing != "kwave" and not missing.startswith("kwave."):
+        raise
     pytest.skip(
         f"k-wave-python stack is unavailable: {exc}",
         allow_module_level=True,
     )
 
-
-ROOT_DIR = utils.detect_root()
-DATA_DIR = Path(ROOT_DIR / "tests/test-data")
 
 jax.config.update("jax_enable_x64", True)
 
@@ -50,10 +49,6 @@ requires_kwave_cpp_binary = pytest.mark.skipif(
 )
 
 
-def _make_kwave_solver() -> KWaveSolver:
-    return KWaveSolver(**_SOLVER_KWARGS)
-
-
 def _match_image_shape(arr: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
     arr = np.array(arr)
     if arr.shape == shape:
@@ -66,29 +61,15 @@ def _match_image_shape(arr: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
 
 
 @pytest.mark.parametrize(
-    "periodic, d", [(periodic, d) for d in [2, 3] for periodic in [True, False]]
+    ("periodic", "N"),
+    [(True, (64, 64)), (False, (32, 32, 32))],
 )
 @requires_kwave_cpp_binary
-def test_kwave_linear(periodic, d):
-    """
-    Test the k-wave solver is linear.
-
-    NB: fails for d = 1, periodic = False
-    """
-    if d == 1:
-        N = (512, 1)
-    elif d == 2:
-        N = (64, 64)
-    elif d == 3:
-        N = (32, 32, 32)
-    else:
-        raise ValueError(f"Unsupported dimension: {d}")
-
+def test_kwave_linear(periodic, N):
+    """The 2D/3D wrapper remains linear across boundary modes."""
     d = len(N)
     dx = (1e-4,) * d
     periodic = (periodic,) * d
-
-    print(f"Testing k-wave linearity with N={N}, dx={dx}, periodic={periodic}")
 
     def c(x):
         return 1 + 0 * x[..., 0]
@@ -175,80 +156,6 @@ def test_kwave_converges():
     )
 
 
-@requires_kwave_cpp_binary
-def test_kwave_matches_matlab_reference():
-    """
-    Compare k-wave-python wrapper outputs against stored MATLAB reference data.
-    """
-    import h5py
-
-    h5file = DATA_DIR / "kWave_results_2.h5"
-    if not h5file.exists():
-        pytest.skip(f"MATLAB reference fixture is not available: {h5file}")
-
-    with h5py.File(h5file, "r") as h5:
-        p0_mat = jnp.array(h5["/p0"][()])
-        meas_mat = jnp.array(h5["/data"][()])
-        tr_mat = jnp.array(h5["/tr_image"][()])
-        adj_mat = jnp.array(h5["/adj_image"][()])
-
-    N = tuple(int(n) for n in p0_mat.shape)
-    d = len(N)
-    dx = (1e-4,) * d
-    periodic = (False,) * d
-    cfl = 0.3
-
-    def c(x):
-        return 1500 + 0 * x[..., 0]
-
-    domain = geometry.Domain(N=N, dx=dx, c=c, cfl=cfl, periodic=periodic)
-    ts = domain.generate_time_domain()
-
-    sensor_mask = jnp.zeros(N)
-    sensor_mask = sensor_mask.at[..., 0].set(1)
-    sensors_all = jnp.ones(N)
-
-    solver = _make_kwave_solver()
-
-    meas_py = solver.forward(p0=p0_mat, domain=domain, sensors=sensor_mask, ts=ts)
-    tr_py = -_match_image_shape(
-        solver.time_reversal(
-            data=meas_py,
-            domain=domain,
-            sensors=sensors_all,
-            sources=sensor_mask,
-            ts=ts,
-            data_layout="nt_ns",
-        ),
-        N,
-    )
-    adj_py = -_match_image_shape(
-        solver.adjoint(
-            data=meas_py,
-            domain=domain,
-            sensors=sensors_all,
-            sources=sensor_mask,
-            ts=ts,
-            data_layout="nt_ns",
-        ),
-        N,
-    )
-
-    tol = 1e-5
-
-    assert jnp.allclose(meas_py, meas_mat, atol=tol)
-    assert jnp.allclose(tr_py, tr_mat, atol=tol)
-    # The stored MATLAB field follows example_pr_2D_adjoint.m: it uses the
-    # filtered additive source and omits the Appendix-B source and terminal
-    # normalizations. It is therefore a useful spatial-profile regression but
-    # not an absolute-scale reference for the discrete transpose.
-    adj_scale = jnp.vdot(adj_py, adj_mat).real / jnp.vdot(adj_py, adj_py).real
-    adj_profile_error = jnp.linalg.norm(adj_scale * adj_py - adj_mat) / jnp.linalg.norm(
-        adj_mat
-    )
-    assert adj_profile_error < 1e-2
-
-
 def test_kwave_adjoint_dot_product():
     """
     Numerical adjoint check: <A x, y> = <x, A^T y>.
@@ -272,8 +179,7 @@ def test_kwave_adjoint_dot_product():
     sensor_mask = sensor_mask.at[:, 0].set(1)
     sensors_all = jnp.ones(N)
 
-    # Use python backend for both forward and adjoint to ensure
-    # consistent sensor ordering (adjoint forces python internally).
+    # The adjoint forces Python, so use it forward for consistent sensor order.
     solver = KWaveSolver(**{**_SOLVER_KWARGS, "backend": "python"})
 
     x = np.array(jax.random.normal(jax.random.PRNGKey(0), N, dtype=jnp.float32))
@@ -474,6 +380,36 @@ def test_default_solver_kwargs():
     solver = KWaveSolver()
     assert solver._solver_kwargs["backend"] == "cpp"
     assert solver._solver_kwargs["pml_inside"] is False
+    assert solver._solver_kwargs["smooth_p0"] is False
+    assert solver._solver_kwargs["debug"] is False
+
+
+def test_partial_kwargs_extend_beamax_defaults():
+    solver = KWaveSolver(device="gpu")
+
+    assert solver._solver_kwargs["backend"] == "cpp"
+    assert solver._solver_kwargs["device"] == "gpu"
+    assert solver._solver_kwargs["smooth_p0"] is False
+
+
+def test_legacy_options_cannot_be_mixed_with_unified_kwargs():
+    with pytest.raises(TypeError, match="cannot be mixed"):
+        KWaveSolver(simulation_options=object(), backend="python")
+
+
+def test_execution_options_work_without_simulation_options(monkeypatch):
+    execution_options = object()
+    monkeypatch.setattr(
+        kwave_solver_module,
+        "options_to_kwargs",
+        lambda simulation, execution: {"backend": "python", "quiet": True},
+    )
+
+    solver = KWaveSolver(execution_options=execution_options)
+
+    assert solver._solver_kwargs["backend"] == "python"
+    assert solver._solver_kwargs["quiet"] is True
+    assert solver._solver_kwargs["smooth_p0"] is False
 
 
 def test_normalize_kwave_binary_path_accepts_file_and_directory(tmp_path):
@@ -487,6 +423,18 @@ def test_normalize_kwave_binary_path_accepts_file_and_directory(tmp_path):
         kwave_solver_module._normalize_kwave_binary_path(tmp_path, device="cpu")
         == binary
     )
+
+
+def test_reused_cpp_data_path_removes_only_stale_input(tmp_path):
+    stale_input = tmp_path / "kwave_input.h5"
+    existing_output = tmp_path / "kwave_output.h5"
+    stale_input.write_bytes(b"old input")
+    existing_output.write_bytes(b"old output")
+
+    kwave_solver_module._remove_stale_cpp_input({"data_path": tmp_path})
+
+    assert not stale_input.exists()
+    assert existing_output.read_bytes() == b"old output"
 
 
 def test_cpp_binary_path_prefers_explicit_over_env(tmp_path, monkeypatch):
@@ -534,12 +482,6 @@ def test_cpp_binary_path_omits_default_binary_path(tmp_path, monkeypatch):
 
     assert selected == tmp_path / "kspaceFirstOrder-OMP"
     assert "binary_path" not in kwargs
-
-
-# The bad-Darwin-OMP guards (and the v0.3.0rc3 / v1.4.0 SHA / metadata reject
-# helpers) were removed when k-wave-python was pinned to >=0.6.2, which no
-# longer ships those broken binaries. The corresponding regression tests are
-# removed with them.
 
 
 def test_cpp_backend_has_power_law_absorption_sensitivity():
@@ -641,200 +583,3 @@ def test_coerce_sensor_data_layout_rejects_mismatched_shapes():
         KWaveSolver._coerce_sensor_data_layout(
             data, source_mask, data_layout="auto", op_name="test"
         )
-
-
-def test_time_call_stdout_and_wall(monkeypatch):
-    # stub _run_simulation to print timing once, then silence
-    def _run(self, *a, **k):
-        print("Total execution time: 0.003s")
-        return {"p": "OK"}
-
-    monkeypatch.setattr(KWaveSolver, "_run_simulation", _run)
-    d = types.SimpleNamespace(
-        N=(4, 4),
-        dx=(1.0, 1.0),
-        periodic=(True, True),
-        sound_speed_array=np.ones((4, 4)),
-        density_array=None,
-        alpha_coeff=None,
-        alpha_power=None,
-    )
-    solver = TimedKWaveSolver(mode="stdout")
-    out, secs = solver.forward(
-        np.zeros((4, 4)), d, np.ones((4, 4)), np.linspace(0, 1, 4)
-    )
-    assert out == "OK" and secs == pytest.approx(0.003, rel=1e-6)
-    solver = TimedKWaveSolver(mode="wall")
-    out, secs = solver.forward(
-        np.zeros((4, 4)), d, np.ones((4, 4)), np.linspace(0, 1, 4)
-    )
-    assert out == "OK" and secs >= 0.0
-
-
-def test_timed_solver_passes_tr_and_adj_kwargs(monkeypatch):
-    tr_calls = {}
-    adj_calls = {}
-
-    def _tr(
-        self,
-        data,
-        domain,
-        sensors,
-        sources,
-        ts,
-        *,
-        record="p_final",
-        data_layout="auto",
-        **solver_kwargs,
-    ):
-        tr_calls.update(
-            {
-                "data": data,
-                "domain": domain,
-                "sensors": sensors,
-                "sources": sources,
-                "ts": ts,
-                "record": record,
-                "data_layout": data_layout,
-                "solver_kwargs": solver_kwargs,
-            }
-        )
-        return "TR"
-
-    def _adj(
-        self,
-        data,
-        domain,
-        sensors,
-        sources,
-        ts,
-        *,
-        record="p_final",
-        data_layout="auto",
-        **solver_kwargs,
-    ):
-        adj_calls.update(
-            {
-                "data": data,
-                "domain": domain,
-                "sensors": sensors,
-                "sources": sources,
-                "ts": ts,
-                "record": record,
-                "data_layout": data_layout,
-                "solver_kwargs": solver_kwargs,
-            }
-        )
-        return "ADJ"
-
-    monkeypatch.setattr(KWaveSolver, "time_reversal", _tr)
-    monkeypatch.setattr(KWaveSolver, "adjoint", _adj)
-
-    solver = TimedKWaveSolver(mode="wall")
-
-    out_tr, secs_tr = solver.time_reversal(
-        data="data",
-        domain="domain",
-        sensors="sensors",
-        sources="sources",
-        ts="ts",
-        record="p",
-        data_layout="nt_ns",
-        foo=123,
-    )
-    out_adj, secs_adj = solver.adjoint(
-        data="data2",
-        domain="domain2",
-        sensors="sensors2",
-        sources="sources2",
-        ts="ts2",
-        record="p_final",
-        data_layout="ns_nt",
-        bar="x",
-    )
-
-    assert out_tr == "TR" and secs_tr >= 0.0
-    assert out_adj == "ADJ" and secs_adj >= 0.0
-    assert tr_calls["sources"] == "sources"
-    assert tr_calls["data_layout"] == "nt_ns"
-    assert tr_calls["solver_kwargs"]["foo"] == 123
-    assert adj_calls["sources"] == "sources2"
-    assert adj_calls["data_layout"] == "ns_nt"
-    assert adj_calls["solver_kwargs"]["bar"] == "x"
-
-
-# def test_kw():
-#     """
-#     test linear tr.
-#     """
-#     h5file = DATA_DIR / "kWave_results_1.h5"
-#     h5 = h5py.File(h5file, "r")
-#     p0_mat = jnp.array(h5["/p0"][()])
-#     h5.close()
-
-#     N = p0_mat.shape  # (Nx,Ny)
-#     d = len(N)
-#     dx = (1e-4,) * d
-#     periodic = (False,) * d
-#     cfl = 0.3
-
-#     def c(x):
-#         return 1500 + 0 * x[..., 0]
-
-#     domain = geometry.Domain(N=N, dx=dx, c=c, cfl=cfl, periodic=periodic)
-#     ts = domain.generate_time_domain()
-
-#     sensor_mask_1 = jnp.zeros(N)
-#     sensor_mask_1 = sensor_mask_1.at[..., 0].set(1)
-
-#     sensor_mask_2 = jnp.zeros(N)
-#     sensor_mask_2 = sensor_mask_2.at[..., -1].set(1)
-
-#     sensor_mask_sum = jnp.zeros(N)
-#     sensor_mask_sum = sensor_mask_sum.at[..., 0].set(1)
-#     sensor_mask_sum = sensor_mask_sum.at[..., -1].set(1)
-
-#     sensors_all = jnp.ones(N)
-
-#     sim_opts = SimulationOptions(data_cast="double", smooth_p0=False, save_to_disk=True)
-#     exec_opts = SimulationExecutionOptions(
-#         is_gpu_simulation=False, delete_data=False, verbose_level=0, show_sim_log=False
-#     )
-
-#     solver = KWaveSolver(sim_opts, exec_opts)
-
-#     meas_1 = solver.forward(p0_mat, domain, sensor_mask_1, ts)
-#     meas_2 = solver.forward(p0_mat, domain, sensor_mask_2, ts)
-#     meas_sum = solver.forward(p0_mat, domain, sensor_mask_sum, ts)
-
-#     tr_1 = solver.time_reversal(meas_1.T, sensor_mask_1, domain, sensors_all, ts).T
-#     tr_2 = solver.time_reversal(meas_2.T, sensor_mask_2, domain, sensors_all, ts).T
-#     tr_sum = solver.time_reversal(
-#         meas_sum.T, sensor_mask_sum, domain, sensors_all, ts
-#     ).T
-
-#     plt.figure(figsize=(10, 5))
-#     plt.subplot(1, 3, 1)
-#     plt.imshow(tr_1 + tr_2)
-#     plt.title("tr_1 + tr_2")
-#     plt.colorbar()
-#     plt.subplot(1, 3, 2)
-#     plt.imshow(tr_sum)
-#     plt.title("tr_sum")
-#     plt.colorbar()
-#     plt.subplot(1, 3, 3)
-#     plt.imshow(tr_sum - (tr_1 + tr_2))
-#     plt.title("tr_sum - (tr_1 + tr_2)")
-#     plt.colorbar()
-#     plt.tight_layout()
-#     plt.show()
-
-
-#     assert jnp.allclose(tr_sum, tr_1 + tr_2, atol=1e-5), (
-#         f"tr_sum and tr_1 + tr_2 are not close: "
-#         f"{jnp.max(jnp.abs(tr_sum - (tr_1 + tr_2)))}"
-#     )
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

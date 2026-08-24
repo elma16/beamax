@@ -1,65 +1,46 @@
-"""Solver API; the optional k-Wave stack is imported only on first use."""
-
 from importlib import import_module
 from typing import Any
 
-# Always-light, internal base types
-from .solverbase import Solver  # protocol/ABC only; safe
+from .hybrid_solver import (
+    HybridBackend,
+    HybridContext,
+    HybridSolver,
+    HybridSolverConfig,
+)
 
-from .hybrid_solver import HybridBackend, HybridContext, HybridSolver
-
-# Always available solvers implemented within this package:
-from .msgb_solvers.msgb_solver import MSGBSolver, ShardingStrategy
+from .msgb_solvers.msgb_solver import (
+    MSGBExperimentalConfig,
+    MSGBSolver,
+    ShardingStrategy,
+)
 
 __all__ = [
-    "Solver",
     "MSGBSolver",
+    "MSGBExperimentalConfig",
     "ShardingStrategy",
     "HybridBackend",
     "HybridContext",
     "HybridSolver",
-    # optional solvers exposed lazily via __getattr__
+    "HybridSolverConfig",
     "KWaveSolver",
 ]
 
-# Map attribute → (module path, symbol)
-_LAZY = {
-    "KWaveSolver": ("beamax.solvers.kwave_solver", "KWaveSolver"),
-}
-
 
 def __getattr__(name: str) -> Any:
-    """
-    Lazily import optional solver classes.
+    """Load the optional k-Wave solver on first access."""
+    if name != "KWaveSolver":
+        raise AttributeError(name)
 
-    Parameters
-    ----------
-    name : str
-        Solver symbol requested from ``beamax.solvers``.
-
-    Returns
-    -------
-    Any
-        Imported solver class, cached in ``globals()``.
-
-    Raises
-    ------
-    ImportError
-        If the requested optional solver cannot be imported.
-    AttributeError
-        If ``name`` is not part of the lazy solver map.
-    """
-    if name in _LAZY:
-        modpath, sym = _LAZY[name]
-        try:
-            mod = import_module(modpath)
-        except Exception as e:
-            # Defer the failure until first touch with a precise message.
-            raise ImportError(
-                f"{name} is optional. Install the relevant extra and its dependencies "
-                f"to use it (failed to import {modpath!r}: {e})"
-            ) from e
-        obj = getattr(mod, sym)
-        globals()[name] = obj
-        return obj
-    raise AttributeError(name)
+    module_name = "beamax.solvers.kwave_solver"
+    try:
+        solver = getattr(import_module(module_name), name)
+    except ModuleNotFoundError as error:
+        missing = error.name or ""
+        if missing != "kwave" and not missing.startswith("kwave."):
+            raise
+        raise ImportError(
+            "KWaveSolver requires the optional k-Wave dependencies; "
+            "install beamax[kwave]."
+        ) from error
+    globals()[name] = solver
+    return solver

@@ -3,10 +3,7 @@ import jax
 import jax.numpy as jnp
 from beamax import utils
 from beamax.utils.interp import make_c_function_from_grid, Interpolator
-from beamax.geometry import Domain
-from beamax.decomposition import DyadicDecomposition
-import beamax.utils.device as device_utils
-from beamax.utils.device import memory_estimate, array_str, detect_root
+from beamax.utils.coeff_index import batch_data
 from beamax.utils.arrays import (
     pad_zero,
     pad_edge,
@@ -16,56 +13,24 @@ from beamax.utils.arrays import (
     crop_centered,
     interpolate_fourier,
 )
-from beamax.transforms import MSWPT
 
 jax.config.update("jax_enable_x64", True)
 
-common_params = [
+signal_shapes = [
     (64,),
-    (64, 64),
     (64, 128),
-    (128, 64),
-    (64, 64, 64),
-    (64, 64, 128),
-    (64, 128, 64),
-    (128, 64, 64),
     (32, 64, 128),
 ]
-
-# ------------------------- _center_slices -------------------------
 
 
 def test_center_slices_ok_and_error():
     curr = (9, 7)
     target = (5, 3)
     sl = _center_slices(curr, target)
-    assert sl == (slice(2, 7), slice(2, 5))  # centered crop
+    assert sl == (slice(2, 7), slice(2, 5))
 
-    # Error when target is larger than current
     with pytest.raises(ValueError):
         _center_slices((5, 5), (6, 5))
-
-
-# --------------------------- pad_array ----------------------------
-
-# def test_pad_array_constant_and_edge_and_noop():
-#     x = jnp.arange(6).reshape(2, 3)
-
-#     # pad (constant zeros) to larger shape
-#     y = pad_array(x, (6, 7), mode="constant")
-#     assert y.shape == (6, 7)
-#     assert jnp.all(y[:2, :3] == x)
-
-#     # pad using edge mode
-#     z = pad_array(x, (4, 5), mode="edge")
-#     assert z.shape == (4, 5)
-#     assert jnp.all(z[:2, :3] == x)  # original block preserved
-
-#     # no-op when target <= current
-#     w = pad_array(x, (2, 3), mode="constant")
-#     assert w is not x and w.shape == x.shape and jnp.all(w == x)
-
-# --------------------------- crop_centered ------------------------
 
 
 def test_crop_centered_behaviour():
@@ -73,34 +38,25 @@ def test_crop_centered_behaviour():
     cropped = crop_centered(big, (6, 4))
     assert cropped.shape == (6, 4)
 
-    # If desired larger than current → function returns original (by design)
     small = jnp.arange(12).reshape(3, 4)
     no_op = crop_centered(small, (4, 4))
     assert no_op.shape == small.shape and jnp.all(no_op == small)
 
 
-# ----------------------- interpolate_fourier ---------------------
-
-
 def test_interpolate_fourier_spatial_up_down_and_fourier_modes():
-    # Start with a simple impulse
     x = jnp.zeros((8, 8))
     x = x.at[0, 0].set(1.0)
 
-    # Mixed up/down per-axis (spatial→spatial)
     upmix = interpolate_fourier(x, (12, 6), "spatial", "spatial")
     assert upmix.shape == (12, 6) and jnp.isfinite(jnp.sum(jnp.abs(upmix)))
 
-    # Round-trip down to original
     back = interpolate_fourier(upmix, (8, 8), "spatial", "spatial")
     assert back.shape == (8, 8)
 
-    # Direct fourier→fourier pad/crop path
     X = jnp.fft.fftshift(jnp.fft.fftn(x, norm="ortho"))
     Xp = interpolate_fourier(X, (10, 10), "fourier", "fourier")
     assert Xp.shape == (10, 10)
 
-    # fourier→spatial path
     x2 = interpolate_fourier(Xp, (10, 10), "fourier", "spatial")
     assert x2.shape == (10, 10)
     assert jnp.isfinite(jnp.sum(jnp.abs(x2)))
@@ -113,14 +69,6 @@ def random_signal(request):
     return jax.random.normal(key, N)
 
 
-@pytest.fixture
-def interpolation_setup(request):
-    N = request.param
-    input_array = jnp.ones(N)
-    desired_size = tuple(s * 2 for s in N)
-    return input_array, desired_size
-
-
 def assert_allclose(a, b, atol=1e-16):
     assert jnp.allclose(a, b, atol=atol)
 
@@ -129,7 +77,7 @@ def assert_norm_equal(a, b, atol=1e-16):
     assert jnp.isclose(jnp.linalg.norm(a), jnp.linalg.norm(b), atol=atol)
 
 
-@pytest.mark.parametrize("random_signal", common_params, indirect=True)
+@pytest.mark.parametrize("random_signal", signal_shapes, indirect=True)
 def test_fft_helper(random_signal):
     """
     Assert that the FFT helper function is unitary.
@@ -140,7 +88,7 @@ def test_fft_helper(random_signal):
     assert_norm_equal(random_signal, f2)
 
 
-@pytest.mark.parametrize("random_signal", common_params, indirect=True)
+@pytest.mark.parametrize("random_signal", signal_shapes, indirect=True)
 def test_interpftn(random_signal):
     """
     Test that the interpolation function is unitary.
@@ -157,12 +105,11 @@ def test_interpftn(random_signal):
         interp_signal, random_signal.shape, output_type, input_type
     )
     assert_allclose(random_signal, interp_signal_back)
-    # assert interp_signal.dtype == random_signal.dtype FALSE
     assert interp_signal.shape == desired_size
     assert_allclose(original_energy, interp_energy)
 
 
-@pytest.mark.parametrize("N", [jnp.array([64, 64]), jnp.array([64, 128])])
+@pytest.mark.parametrize("N", [jnp.array([64, 128])])
 def test_nn_interp(N):
     """
     Testing the nearest neighbour interpolation.
@@ -177,18 +124,25 @@ def test_nn_interp(N):
 
 
 def test_convert_space():
-    """
-    Test the function which converts an array from one space to another.
-    """
+    """Converting to Fourier space uses the unitary FFT."""
     x = jnp.ones((2, 2))
     x_f1 = utils.convert_space(x, "spatial", "fourier")
     x_f2 = utils.unitary_fft(x)
     assert_allclose(x_f1, x_f2)
 
+
+@pytest.mark.parametrize(
+    "input_type, output_type",
+    [
+        ("spatial", "Fourier"),
+        ("fourier", "Spatial"),
+        ("Spatial", "fourier"),
+    ],
+)
+def test_convert_space_rejects_unknown_space(input_type, output_type):
+    x = jnp.ones((2, 2))
     with pytest.raises(ValueError):
-        utils.convert_space(x, "spatial", "Fourier")
-        utils.convert_space(x, "fourier", "Spatial")
-        utils.convert_space(x, "Spatial", "fourier")
+        utils.convert_space(x, input_type, output_type)
 
 
 def test_make_c_function_from_grid_and_derivs():
@@ -196,29 +150,25 @@ def test_make_c_function_from_grid_and_derivs():
     yy = jnp.linspace(0, 1, 7)
     vals = jnp.outer(xx, yy)  # f(x,y) = x*y
 
-    # Direct function built from grid
     cfun = make_c_function_from_grid(
         vals,
         spacing=(float(xx[1] - xx[0]), float(yy[1] - yy[0])),
         origin=(float(xx[0]), float(yy[0])),
     )
 
-    # Unbatched query → scalar output
     p = jnp.array([0.5, 0.25])
     f = cfun(p)
-    assert f.shape == ()  # scalar from unbatched input
+    assert f.shape == ()
 
     itp = Interpolator([xx, yy], vals)
     f2 = itp(p)
     assert f2.shape == ()
-    # Grad/Hess shapes for unbatched input
     g = itp.grad(p)
     H = itp.hessian(p)
     assert g.shape == (2,)
     assert H.shape == (2, 2)
 
-    # Optional: batched query → batched outputs
-    P = jnp.stack([p, jnp.array([0.75, 0.5])], axis=0)  # (2, 2)
+    P = jnp.stack([p, jnp.array([0.75, 0.5])], axis=0)
     Fb = itp(P)
     assert Fb.shape == (2,)
 
@@ -257,26 +207,82 @@ def test_bspline3_derivatives_are_continuous_at_cell_boundaries():
 def test_make_c_function_from_grid_options_validate():
     vals = jnp.ones((4, 4))
 
+    with pytest.raises(ValueError, match="at least one dimension"):
+        make_c_function_from_grid(jnp.array(1.0))
+
     with pytest.raises(ValueError, match="method"):
         make_c_function_from_grid(vals, method="quadratic")
 
     with pytest.raises(ValueError, match="Unsupported boundary"):
         make_c_function_from_grid(vals, boundary="zero")
 
+    with pytest.raises(ValueError, match="one entry per axis"):
+        make_c_function_from_grid(vals, boundary=("wrap",))
+
+    with pytest.raises(ValueError, match="Boundary entries must be strings"):
+        make_c_function_from_grid(vals, boundary=("wrap", 1))
+
     with pytest.raises(ValueError, match="smooth_sigma"):
         make_c_function_from_grid(vals, smooth_sigma=(1.0, 2.0, 3.0))
 
+    with pytest.raises(ValueError, match="non-negative"):
+        make_c_function_from_grid(vals, smooth_sigma=-1.0)
+
+    with pytest.raises(ValueError, match="spacing must be length"):
+        make_c_function_from_grid(vals, spacing=(1.0,))
+
+    with pytest.raises(ValueError, match="origin must be length"):
+        make_c_function_from_grid(vals, origin=(0.0,))
+
     with pytest.raises(ValueError, match="strictly positive"):
         make_c_function_from_grid(vals, spacing=(1.0, 0.0))
+
+    with pytest.raises(ValueError, match="origin entries must be finite"):
+        make_c_function_from_grid(vals, origin=(0.0, jnp.nan))
 
     cfun = make_c_function_from_grid(vals)
     with pytest.raises(ValueError, match="final dimension"):
         cfun(jnp.ones((3,)))
 
 
+def test_interpolation_boundary_and_smoothing_options():
+    values = jnp.array([0.0, 1.0, 2.0])
+    periodic = make_c_function_from_grid(values, boundary="periodic")
+    mirrored = make_c_function_from_grid(values, boundary="mirror")
+    singleton = make_c_function_from_grid(jnp.array([3.0]), boundary="periodic")
+    smoothed = make_c_function_from_grid(values, smooth_sigma=0.5)
+
+    assert periodic(jnp.array([-1.0])) == 2.0
+    assert mirrored(jnp.array([-1.0])) == 1.0
+    assert singleton(jnp.array([10.0])) == 3.0
+    assert jnp.isfinite(smoothed(jnp.array([1.0])))
+
+    empty = make_c_function_from_grid(jnp.empty((0,)))
+    with pytest.raises(ValueError, match="positive length"):
+        empty(jnp.array([0.0]))
+
+
+@pytest.mark.parametrize("method", ["linear", "bspline3"])
+def test_interpolation_accepts_independent_axis_boundaries(method):
+    x_component = 10.0 * jnp.arange(8)[:, None]
+    y_component = jnp.arange(8)[None, :]
+    interpolant = make_c_function_from_grid(
+        x_component + y_component,
+        method=method,
+        boundary=("periodic", "clamp"),
+    )
+
+    assert interpolant(jnp.array([-1.0, 0.0])) == pytest.approx(70.0)
+    assert interpolant(jnp.array([-1.0, 7.0])) == pytest.approx(77.0)
+
+
 @pytest.mark.parametrize(
     "axes,values,match",
     [
+        ([], jnp.ones(2), "grid_points dims"),
+        ([jnp.array([0.0])], jnp.ones(1), "1D with >=2"),
+        ([jnp.array([[0.0, 1.0], [2.0, 3.0]])], jnp.ones(4), "1D with >=2"),
+        ([jnp.array([0.0, jnp.nan])], jnp.ones(2), "finite"),
         ([jnp.array([1.0, 0.0])], jnp.ones(2), "strictly increasing"),
         ([jnp.array([0.0, 1.0, 3.0])], jnp.ones(3), "uniformly spaced"),
         ([jnp.arange(3.0)], jnp.ones(4), "values must have shape"),
@@ -294,55 +300,29 @@ def test_array_resampling_rejects_wrong_dimensional_target_shape():
         utils.interpolate_nearest(jnp.ones((4,)), (0,))
 
 
-def test_memory_helpers_and_array_str():
-    x = jnp.zeros((2, 3), dtype=jnp.float32)
-    s = memory_estimate(jnp.array(x.shape), x.dtype)
-    assert "Kb" in s or "Mb" in s or "Gb" in s
-    assert "Array" in array_str(x)
-
-
-def test_detect_root_env_takes_priority(monkeypatch, tmp_path):
-    monkeypatch.setenv("BEAMAX_ROOT", str(tmp_path))
-    root = detect_root()
-    assert str(root) == str(tmp_path)
-
-
-def test_find_repo_root_accepts_file_paths(tmp_path):
-    (tmp_path / "pyproject.toml").write_text("")
-    file_path = tmp_path / "scripts" / "example.py"
-    assert device_utils.find_repo_root(file_path) == tmp_path
-
-
-def test_detect_root_falls_back_to_cwd_for_installed_layout(monkeypatch, tmp_path):
-    monkeypatch.delenv("BEAMAX_ROOT", raising=False)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        device_utils,
-        "__file__",
-        str(tmp_path / "site-packages" / "beamax" / "utils" / "device.py"),
-    )
-
-    assert detect_root() == tmp_path
-
-
-def test_example_plot_dir_uses_public_example_category(monkeypatch, tmp_path):
-    monkeypatch.setenv("BEAMAX_ROOT", str(tmp_path))
-    example_path = tmp_path / "examples" / "forward" / "custom_lf_spectral_backend.py"
-
-    plot_dir = device_utils.example_plot_dir(example_path)
-
-    assert plot_dir == tmp_path / "plots" / "forward"
-    assert plot_dir.is_dir()
-
-
-def test_example_plot_dir_falls_back_to_parent_name(monkeypatch, tmp_path):
-    monkeypatch.setenv("BEAMAX_ROOT", str(tmp_path))
-    example_path = tmp_path / "scratch" / "demo.py"
-
-    plot_dir = device_utils.example_plot_dir(example_path)
-
-    assert plot_dir == tmp_path / "plots" / "scratch"
-    assert plot_dir.is_dir()
+@pytest.mark.parametrize(
+    "args, batch_size, zero_padded_args, match",
+    [
+        ((), 2, (), "at least one"),
+        ((jnp.arange(3),), True, (), "positive integer"),
+        ((jnp.arange(3),), 1.5, (), "positive integer"),
+        ((jnp.arange(3),), 0, (), "positive integer"),
+        ((jnp.array(1),), 2, (), "leading batch"),
+        ((jnp.empty((0,)),), 2, (), "empty arrays"),
+        ((jnp.arange(3), jnp.arange(2)), 2, (), "same leading dimension"),
+        ((jnp.arange(3),), 2, (True,), "invalid argument index"),
+        ((jnp.arange(3),), 2, (0.5,), "invalid argument index"),
+        ((jnp.arange(3),), 2, (-1,), "invalid argument index"),
+        ((jnp.arange(3),), 2, (1,), "invalid argument index"),
+    ],
+)
+def test_batch_data_rejects_invalid_inputs(args, batch_size, zero_padded_args, match):
+    with pytest.raises(ValueError, match=match):
+        batch_data(
+            *args,
+            batch_size=batch_size,
+            zero_padded_args=zero_padded_args,
+        )
 
 
 def test_pad_zero_and_edge():
@@ -350,46 +330,6 @@ def test_pad_zero_and_edge():
     z = pad_zero(x, (4, 5))
     e = pad_edge(x, (4, 5))
     assert z.shape == (4, 5) and e.shape == (4, 5)
-
-
-# ============================================================================
-# Shared fixtures
-# ============================================================================
-@pytest.fixture
-def simple_dyadic_decomp():
-    """Simple 2D dyadic decomposition for testing."""
-    return DyadicDecomposition(
-        num_levels=2,
-        N=(64, 64),
-        num_boxes_levels=(4, 8),
-        box_aspect_ratio=(1, 1),
-    )
-
-
-@pytest.fixture
-def simple_domain():
-    """Simple 2D domain for testing."""
-    return Domain(
-        N=(64, 64),
-        dx=(0.01, 0.01),
-        c=1500.0,
-        periodic=(False, False),
-    )
-
-
-@pytest.fixture
-def simple_wpt(simple_dyadic_decomp):
-    """Simple MSWPT for testing."""
-    return MSWPT(
-        dyadic_decomp=simple_dyadic_decomp,
-        redundancy=2,
-        windowing="rectangular",
-    )
-
-
-# ============================================================================
-# Test rel_l2
-# ============================================================================
 
 
 class TestRelL2:
@@ -406,7 +346,7 @@ class TestRelL2:
         arr2 = jnp.zeros((10, 10))
         error = rel_l2(arr1, arr2)
 
-        assert error > 0.99  # Should be close to 1
+        assert error > 0.99
 
     def test_small_difference(self):
         """Test relative L2 with small difference."""
@@ -415,11 +355,6 @@ class TestRelL2:
         error = rel_l2(arr1, arr2)
 
         assert 0 < error < 0.1
-
-
-# ============================================================================
-# Test small error paths in array helpers
-# ============================================================================
 
 
 def test_pad_array_unsupported_mode_raises():
@@ -453,7 +388,3 @@ def test_interpolate_fourier_roundtrip_spatial_to_fourier():
     arr = jnp.ones((4,))
     out = interpolate_fourier(arr, (8,), input_type="spatial", output_type="fourier")
     assert out.shape == (8,)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

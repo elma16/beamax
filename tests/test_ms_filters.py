@@ -8,44 +8,18 @@ jax.config.update("jax_enable_x64", True)
 redundancy = 2
 
 
-def generate_test_params():
-    params = []
-    for num_levels in range(1, 3):
-        for N in [
-            (128,),
-            (128, 128),
-            (256, 128),
-            (128, 256),
-        ]:
-            for windowing in ["rectangular", "rectangular_mirror"]:
-                num_boxes_outer_level = tuple(
-                    [2 ** (level + 2) for level in range(num_levels)]
-                )
-                box_aspect_ratio = (1,) * len(N)
-                params.append(
-                    (num_levels, N, num_boxes_outer_level, box_aspect_ratio, windowing)
-                )
-
-    # Add rectangular params
-    for num_levels in range(1, 3):
-        N = (128, 128)
-        num_boxes_outer_level = tuple([2 ** (level + 2) for level in range(num_levels)])
-        for box_aspect_ratio in [
-            (1, 1),
-            (2, 1),
-            (4, 1),
-            (1, 2),
-            (1, 4),
-        ]:
-            for windowing in ["rectangular", "rectangular_mirror"]:
-                params.append(
-                    (num_levels, N, num_boxes_outer_level, box_aspect_ratio, windowing)
-                )
-
-    return params
-
-
-all_params = generate_test_params()
+filter_params = [
+    (1, (128,), (4,), (1,), "rectangular"),
+    (2, (128,), (4, 8), (1,), "rectangular_mirror"),
+    (1, (128, 128), (4,), (1, 1), "rectangular_mirror"),
+    (2, (128, 128), (4, 8), (1, 1), "rectangular"),
+    (1, (256, 128), (4,), (1, 1), "rectangular"),
+    (2, (128, 256), (4, 8), (1, 1), "rectangular_mirror"),
+    (1, (128, 128), (4,), (2, 1), "rectangular_mirror"),
+    (2, (128, 128), (4, 8), (4, 1), "rectangular"),
+    (2, (128, 128), (4, 8), (1, 2), "rectangular"),
+    (1, (128, 128), (4,), (1, 4), "rectangular_mirror"),
+]
 
 
 @pytest.fixture
@@ -78,14 +52,14 @@ def assert_gfilt_admissable(gfilt):
 
     FAST MULTISCALE GAUSSIAN WAVEPACKET TRANSFORMS AND MULTISCALE GAUSSIAN BEAMS FOR THE WAVE EQUATION
     """
-    assert jnp.all(gfilt >= 0) and jnp.all(
-        gfilt <= 1
-    ), "gfilter values are not bounded between 0 and 1"
+    assert jnp.all(gfilt >= 0) and jnp.all(gfilt <= 1), (
+        "gfilter values are not bounded between 0 and 1"
+    )
     assert jnp.isfinite(jnp.max(jnp.sum((gfilt > 0), axis=0)))
     assert jnp.min(jnp.where(gfilt > 0, gfilt, jnp.inf)) > 0
 
 
-@pytest.mark.parametrize("setup_dyadic_decomposition", all_params, indirect=True)
+@pytest.mark.parametrize("setup_dyadic_decomposition", filter_params, indirect=True)
 def test_filters(setup_dyadic_decomposition):
     _, gfilt, hfilt = setup_dyadic_decomposition
     assert_partition_of_unity(gfilt, hfilt)
@@ -127,7 +101,3 @@ def test_hfilt_have_mirror_pairs():
         g2 = gfilt[boxes_level - idx]
         g2_flipped = g2[sym_indices]
         assert jnp.allclose(g1, g2_flipped)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

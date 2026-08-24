@@ -17,24 +17,11 @@ __pycache__/
 .pytest_cache/
 htmlcov/
 coverage.json
+coverage.xml
 *.coverage
 
-# Local output directories
-private/
-examples/private/
-examples/thesis/
-examples/learned/
-examples/benchmarks/
+# Public-example output
 plots/
-plots_focusing/
-outputs/
-profiler/
-data/
-wandb/
-traces/
-trace/
-cache/
-checkpoints/
 
 # Python runtime
 *.pyc

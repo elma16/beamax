@@ -1,7 +1,7 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral, Real
-from typing import Union, Optional, Tuple
+from typing import Literal, Union, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import equinox as eqx
@@ -21,21 +21,77 @@ from beamax.solvers.msgb_solvers.tr_solver_utils import (
 from beamax.geometry import Domain, Sensor
 from beamax.transforms import MSWPT
 from beamax import utils
-from beamax.gb.gb_solvers import SolverFn, SolverConfig
+from beamax.gb.gb_solvers import SolverFn, SolverConfig, solve_hom_diag
+from beamax.gb.pallas_config import PallasConfig
 from beamax.solvers.msgb_solvers.adjoint_solver_utils import compute_adj_parameters
+from beamax.coefficients import streamed_top_n_coefficients
 
 
-__all__ = ["MSGBSolver", "ShardingStrategy"]
+__all__ = [
+    "MSGBExperimentalConfig",
+    "MSGBSolver",
+    "ShardingStrategy",
+    "apply_adjoint_image_weight",
+    "form_adjoint_source",
+]
 
 complex_dtypes = (jnp.complex64, jnp.complex128)
 
-# Coefficient selection is intentionally eager because hard/percentile
-# thresholds have data-dependent output sizes. The expensive propagation
-# remains compiled through these fixed-shape kernels.
-_original_compute_forward_result = compute_forward_result
-_original_compute_tr_result = compute_TR_result
-_compute_forward_result_jit = eqx.filter_jit(_original_compute_forward_result)
-_compute_tr_result_jit = eqx.filter_jit(_original_compute_tr_result)
+CoefficientSelection = Literal["auto", "streaming_top_n"]
+ForwardKernel = Literal["auto", "trajectory_pallas", "hom_diag_3d_pallas"]
+InverseEvaluator = Literal["auto", "terminal_xla", "terminal_pallas"]
+
+DEFAULT_BOXES_PER_CHUNK = 8
+
+
+@dataclass(frozen=True)
+class MSGBExperimentalConfig:
+    """Experimental per-stage execution overrides.
+
+    ``"auto"`` selects supported defaults. Streaming top-n requires real,
+    zero-velocity, fixed-size input. Generic Pallas supports GPU and TPU;
+    ``hom_diag_3d_pallas`` requires a GPU.
+    """
+
+    coefficient_selection: CoefficientSelection = "auto"
+    boxes_per_chunk: int = DEFAULT_BOXES_PER_CHUNK
+    forward_kernel: ForwardKernel = "auto"
+    inverse_evaluator: InverseEvaluator = "auto"
+
+    def __post_init__(self) -> None:
+        if self.coefficient_selection not in {"auto", "streaming_top_n"}:
+            raise ValueError(
+                "coefficient_selection must be 'auto' or 'streaming_top_n'; "
+                f"got {self.coefficient_selection!r}."
+            )
+        if (
+            isinstance(self.boxes_per_chunk, bool)
+            or not isinstance(self.boxes_per_chunk, int)
+            or self.boxes_per_chunk <= 0
+        ):
+            raise ValueError(
+                "boxes_per_chunk must be a positive integer; got "
+                f"{self.boxes_per_chunk!r}."
+            )
+        if self.forward_kernel not in {
+            "auto",
+            "trajectory_pallas",
+            "hom_diag_3d_pallas",
+        }:
+            raise ValueError(
+                "forward_kernel must be 'auto', 'trajectory_pallas', or "
+                f"'hom_diag_3d_pallas'; got {self.forward_kernel!r}."
+            )
+        if self.inverse_evaluator not in {"auto", "terminal_xla", "terminal_pallas"}:
+            raise ValueError(
+                "inverse_evaluator must be 'auto', 'terminal_xla', or "
+                f"'terminal_pallas'; got {self.inverse_evaluator!r}."
+            )
+
+
+# Data-dependent selection stays eager; fixed-shape propagation is compiled.
+_compute_forward_result_jit = eqx.filter_jit(compute_forward_result)
+_compute_tr_result_jit = eqx.filter_jit(compute_TR_result)
 
 
 def _validate_time_grid(
@@ -46,11 +102,13 @@ def _validate_time_grid(
     """Validate a finite, increasing, uniform time grid and return ``dt``.
 
     A singleton grid is useful for evaluating a forward solution only at
-    ``t=0``. In that case there is no time step to return.
+    $t=0$. In that case there is no time step to return.
     """
     ts_np = np.asarray(ts)
     if ts_np.ndim != 1 or ts_np.size == 0:
         raise ValueError("ts must be a non-empty one-dimensional array.")
+    if np.iscomplexobj(ts_np):
+        raise ValueError("ts must be real-valued.")
     if not np.all(np.isfinite(ts_np)):
         raise ValueError("ts must contain only finite values.")
     if ts_np.size == 1:
@@ -58,24 +116,46 @@ def _validate_time_grid(
             return None
         raise ValueError("ts must be one-dimensional with at least two points.")
     diffs = np.diff(ts_np)
-    if np.any(diffs <= 0) or not np.allclose(diffs, diffs[0], rtol=1e-6, atol=0.0):
+    # Endpoint-defined grids avoid cancellation in adjacent float32 differences.
+    real_dtype = np.dtype(ts_np.dtype)
+    precision_dtype = (
+        real_dtype if np.issubdtype(real_dtype, np.floating) else np.dtype(np.float64)
+    )
+    epsilon = float(np.finfo(precision_dtype).eps)
+    ideal = np.linspace(float(ts_np[0]), float(ts_np[-1]), ts_np.size)
+    ideal_spacing = abs(float(ideal[-1] - ideal[0])) / (ts_np.size - 1)
+    magnitude = max(
+        float(np.max(np.abs(ts_np))),
+        ideal_spacing,
+        float(np.finfo(precision_dtype).tiny),
+    )
+    rounding_atol = 8.0 * epsilon * magnitude
+    if np.any(diffs <= 0) or not np.allclose(
+        np.asarray(ts_np, dtype=np.float64),
+        ideal,
+        rtol=0.0,
+        atol=rounding_atol,
+    ):
         raise ValueError(
             "ts must be finite, strictly increasing, and uniformly spaced."
         )
-    return float(diffs[0])
+    return float((float(ts_np[-1]) - float(ts_np[0])) / (ts_np.size - 1))
 
 
-def _form_adjoint_source(
+def form_adjoint_source(
     data: jnp.ndarray,
     dt: float,
     c_at_sources: jnp.ndarray,
     window: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
-    """Form the acquisition-time source for the unweighted wave equation.
+    r"""Form the acquisition-time source for the unweighted wave equation.
 
-    For detector residual ``r(s, x_s)`` this returns
+    For detector residual $r(s,\mathbf{x}_s)$, this returns
 
-    ``-c(x_s)**2 * d_s(window(s, x_s) * r(s, x_s))``.
+    $$
+    -c(\mathbf{x}_s)^2\,\partial_s
+    \left[w(s,\mathbf{x}_s)r(s,\mathbf{x}_s)\right].
+    $$
 
     It is the acquisition-time representation of the time-reversed source in
     the continuous PAT adjoint.  A one-dimensional window is interpreted as a
@@ -88,13 +168,9 @@ def _form_adjoint_source(
             window = window.reshape((window.shape[0],) + (1,) * (data.ndim - 1))
         windowed_data = window * data
 
-    # The adjoint construction is microlocal/Fourier based.  A centred
-    # two-point difference has multiplier i*sin(Omega*dt)/dt and therefore
-    # suppresses precisely the high temporal frequencies on which the
-    # principal-symbol approximation operates.  Differentiate on the sampled
-    # Fourier grid instead.  The documented endpoint/taper condition makes the
-    # periodic extension appropriate; for real data the Nyquist contribution
-    # is projected to the real derivative (hence zero, as required).
+    # Spectral differentiation preserves the high frequencies used by the
+    # principal-symbol approximation; the endpoint/taper contract permits a
+    # periodic extension.
     frequencies = jnp.fft.fftfreq(windowed_data.shape[0], d=dt).astype(
         windowed_data.real.dtype
     )
@@ -104,10 +180,7 @@ def _form_adjoint_source(
     if not jnp.issubdtype(windowed_data.dtype, jnp.complexfloating):
         derivative = derivative.real
 
-    # ``c_at_sources`` is flat over detectors, ``(Ns,)``.  Data may carry the
-    # detector grid unflattened -- a planar 3D array is ``(Nt, Ny, Nz)`` -- so
-    # fold the speeds back onto those trailing axes before multiplying.  In 2D
-    # (``(Nt, Ns)``) the flat vector already broadcasts and is left untouched.
+    # Restore an unflattened detector grid before broadcasting sound speeds.
     c_at_sources = jnp.asarray(c_at_sources)
     detector_shape = derivative.shape[1:]
     if c_at_sources.ndim == 1 and c_at_sources.shape != detector_shape:
@@ -120,10 +193,10 @@ def _form_adjoint_source(
     return -(c_at_sources**2) * derivative
 
 
-def _apply_adjoint_image_weight(
+def apply_adjoint_image_weight(
     terminal_field: jnp.ndarray, c_at_image: jnp.ndarray
 ) -> jnp.ndarray:
-    """Apply the ``c^{-2}`` weight for an unweighted image-space pairing."""
+    r"""Apply the $c^{-2}$ weight for an unweighted image-space pairing."""
     return terminal_field / (c_at_image**2)
 
 
@@ -175,7 +248,7 @@ class ShardingStrategy:
 
         Notes
         -----
-        For batched tensors `(num_batches, batch_size, ...)` used by scan/vmap
+        For batched tensors ``(num_batches, batch_size, ...)`` used by scanned
         aggregation, we keep all axes replicated. This avoids unsupported
         sharding interactions inside nested `scan`/`diffrax` transforms.
         """
@@ -356,7 +429,7 @@ class ShardingStrategy:
 
 
 class MSGBSolver(eqx.Module):
-    """
+    r"""
     Multiscale Gaussian Beam solver for the linear wave equation.
 
     Implements forward, time-reversal, and adjoint operators by:
@@ -370,12 +443,10 @@ class MSGBSolver(eqx.Module):
     Parameters
     ----------
     thr : int or float
-        Threshold value for coefficient selection. Semantics depend on
-        ``thr_strat`` (e.g. absolute magnitude, percentile, top-k count).
+        Absolute magnitude threshold or top-k count, depending on
+        ``thr_strat``.
     thr_strat : str
-        Thresholding strategy; one of ``"hard"``, ``"top_n"``,
-        ``"percentile"``, ``"hard_reassign"``, ``"bao_energy"``, or
-        ``"perc_max_abs"``.
+        Thresholding strategy: ``"hard"`` or ``"top_n"``.
     batch_size : int
         Batch size along the beam axis for ODE integration. Tune to fit
         device memory; larger values amortise kernel launches.
@@ -386,8 +457,8 @@ class MSGBSolver(eqx.Module):
         :mod:`beamax.gb.gb_solvers`).
     sum_method : str
         Method for summing beam contributions. One of ``"all_real"``,
-        ``"scan_real"``, ``"vmap_real"``, ``"all_complex"``,
-        ``"scan_complex"``, or ``"vmap_complex"``.
+        ``"scan_real"``, ``"all_complex"``, ``"scan_complex"``, or the
+        experimental accelerator mode ``"pallas_real"``.
     tr_ode_solver : SolverFn, optional
         ODE integrator for the time-reversal dynamics. Falls back to
         ``ode_solver`` when ``None``.
@@ -397,8 +468,16 @@ class MSGBSolver(eqx.Module):
         Numerical configuration passed through to the ODE integrator. Falls
         back to ``SolverConfig.from_precision()``.
     adjoint_relative_guard : float, default=5e-2
-        Dimensionless near-grazing exclusion ``Gamma / abs(tau)`` used by the
+        Dimensionless near-grazing exclusion $\Gamma/|\tau|$ used by the
         principal-symbol adjoint. Tune together with the ODE configuration.
+    pallas_config : PallasConfig, optional
+        Experimental static kernel configuration used by ``pallas_real`` and
+        any explicitly selected Pallas stage.
+    experimental_config : MSGBExperimentalConfig, optional
+        Per-stage pipeline overrides. Omitting it is equivalent to passing a
+        configuration with every field set to ``"auto"``: streamed top-n
+        selection and terminal-only inverse evaluation apply whenever they
+        are output-equivalent, and Pallas kernels stay off.
     """
 
     thr: Union[int, float] = eqx.field()
@@ -409,9 +488,11 @@ class MSGBSolver(eqx.Module):
     tr_ode_solver: SolverFn = eqx.field()
     use_real: bool = eqx.field(static=True)
     aggregate_method: str = eqx.field(static=True)
+    ode_config: SolverConfig = eqx.field(static=True)
+    experimental_config: MSGBExperimentalConfig = eqx.field(static=True)
     sharding: Optional[ShardingStrategy] = eqx.field(default=None, static=True)
-    ode_config: Optional[SolverConfig] = eqx.field(default=None, static=True)
     adjoint_relative_guard: float = eqx.field(default=5e-2, static=True)
+    pallas_config: Optional[PallasConfig] = eqx.field(default=None, static=True)
 
     def __init__(
         self,
@@ -425,8 +506,10 @@ class MSGBSolver(eqx.Module):
         sharding: Optional[ShardingStrategy] = None,
         ode_config: Optional[SolverConfig] = None,
         adjoint_relative_guard: float = 5e-2,
+        pallas_config: Optional[PallasConfig] = None,
+        experimental_config: Optional[MSGBExperimentalConfig] = None,
     ):
-        """
+        r"""
         Initialize the MSGB solver.
 
         Parameters
@@ -436,7 +519,7 @@ class MSGBSolver(eqx.Module):
         thr_strat : str
             Thresholding strategy name.
         batch_size : int
-            Number of beams per batch for scan/vmap aggregation.
+            Number of beams per batch for scanned aggregation.
         input_type : {"spatial", "fourier"}
             Domain of inputs supplied to the solver.
         ode_solver : SolverFn
@@ -453,16 +536,16 @@ class MSGBSolver(eqx.Module):
             ``SolverConfig.from_precision()``.
         adjoint_relative_guard : float, default=5e-2
             Dimensionless near-grazing exclusion for the adjoint. Must lie in
-            ``[0, 1)``.
+            $[0,1)$.
+        pallas_config : PallasConfig, optional
+            Experimental static Pallas layout and launch configuration.
+        experimental_config : MSGBExperimentalConfig, optional
+            Per-stage overrides: force the streamed selector, choose the
+            inverse evaluator, or opt in to the experimental Pallas
+            forward/inverse kernels. Omitting it selects the supported
+            defaults for every stage.
         """
-        valid_thresholds = {
-            "hard",
-            "top_n",
-            "percentile",
-            "hard_reassign",
-            "bao_energy",
-            "perc_max_abs",
-        }
+        valid_thresholds = {"hard", "top_n"}
         if thr_strat not in valid_thresholds:
             allowed = ", ".join(sorted(valid_thresholds))
             raise ValueError(f"thr_strat must be one of {allowed}; got {thr_strat!r}.")
@@ -474,14 +557,6 @@ class MSGBSolver(eqx.Module):
             if not isinstance(thr, Integral) or int(thr) <= 0:
                 raise ValueError("top_n threshold must be a positive integer.")
             thr = int(thr)
-        elif thr_strat == "percentile":
-            if not 0 <= float(thr) <= 100:
-                raise ValueError("percentile threshold must lie in [0, 100].")
-            thr = float(thr)
-        elif thr_strat in {"hard_reassign", "perc_max_abs"}:
-            if not 0 <= float(thr) <= 1:
-                raise ValueError(f"{thr_strat} threshold must lie in [0, 1].")
-            thr = float(thr)
         else:
             if float(thr) < 0:
                 raise ValueError(f"{thr_strat} threshold must be non-negative.")
@@ -490,27 +565,91 @@ class MSGBSolver(eqx.Module):
             raise ValueError(
                 f"input_type must be 'spatial' or 'fourier'; got {input_type!r}."
             )
-        if batch_size <= 0:
-            raise ValueError(f"batch_size must be positive; got {batch_size}.")
+        if (
+            isinstance(batch_size, (bool, np.bool_))
+            or not isinstance(batch_size, Integral)
+            or batch_size <= 0
+        ):
+            raise ValueError(
+                f"batch_size must be a positive integer; got {batch_size!r}."
+            )
+        batch_size = int(batch_size)
         if not 0.0 <= adjoint_relative_guard < 1.0:
             raise ValueError(
                 "adjoint_relative_guard must lie in [0, 1); got "
                 f"{adjoint_relative_guard}."
             )
+        if pallas_config is not None and not isinstance(pallas_config, PallasConfig):
+            raise TypeError(
+                "pallas_config must be a PallasConfig instance or None; got "
+                f"{type(pallas_config).__name__}."
+            )
+        if experimental_config is None:
+            experimental_config = MSGBExperimentalConfig()
+        elif not isinstance(experimental_config, MSGBExperimentalConfig):
+            raise TypeError(
+                "experimental_config must be an MSGBExperimentalConfig "
+                f"instance or None; got {type(experimental_config).__name__}."
+            )
+        if (
+            experimental_config.coefficient_selection == "streaming_top_n"
+            and thr_strat != "top_n"
+        ):
+            raise ValueError(
+                "coefficient_selection='streaming_top_n' requires "
+                "thr_strat='top_n'; use 'auto' to stream only when possible."
+            )
 
         valid_sum_methods = {
             "all_real",
             "scan_real",
-            "vmap_real",
+            "pallas_real",
             "all_complex",
             "scan_complex",
-            "vmap_complex",
         }
         if sum_method not in valid_sum_methods:
             allowed = ", ".join(sorted(valid_sum_methods))
             raise ValueError(
                 f"sum_method must be one of {allowed}; got {sum_method!r}."
             )
+        if "pallas" in sum_method and sharding is not None:
+            raise ValueError(
+                "pallas_real is a single-device experimental backend and "
+                "cannot be combined with sharding. Use scan_real on one "
+                "device or an all_* method with sharding."
+            )
+        requests_experimental_stage = (
+            experimental_config.coefficient_selection == "streaming_top_n"
+            or experimental_config.forward_kernel != "auto"
+            or experimental_config.inverse_evaluator
+            in {"terminal_xla", "terminal_pallas"}
+        )
+        if requests_experimental_stage and sharding is not None:
+            raise ValueError(
+                "Explicit MSGBExperimentalConfig stage overrides are "
+                "currently single-device and cannot be combined with "
+                "sharding."
+            )
+        if (
+            experimental_config.forward_kernel != "auto"
+            or experimental_config.inverse_evaluator
+            in {"terminal_xla", "terminal_pallas"}
+        ) and "real" not in sum_method:
+            raise ValueError(
+                "Explicit forward-kernel and terminal-inverse overrides "
+                "require a real sum_method."
+            )
+        if (
+            experimental_config.forward_kernel == "hom_diag_3d_pallas"
+            and ode_solver is not solve_hom_diag
+        ):
+            raise ValueError(
+                "forward_kernel='hom_diag_3d_pallas' requires "
+                "ode_solver=solve_hom_diag."
+            )
+
+        if ode_config is None:
+            ode_config = SolverConfig.from_precision()
 
         self.thr = thr
         self.thr_strat = thr_strat
@@ -519,19 +658,87 @@ class MSGBSolver(eqx.Module):
         self.ode_solver = ode_solver
         self.tr_ode_solver = ode_solver if tr_ode_solver is None else tr_ode_solver
         self.sharding = sharding
-        self.ode_config = (
-            ode_config if ode_config is not None else SolverConfig.from_precision()
-        )
+        self.ode_config = ode_config
         self.adjoint_relative_guard = float(adjoint_relative_guard)
+        self.pallas_config = pallas_config
+        self.experimental_config = experimental_config
 
-        # Parse sum_method
         self.use_real = "real" in sum_method
-        if "scan" in sum_method:
+        if "pallas" in sum_method:
+            self.aggregate_method = "pallas"
+        elif "scan" in sum_method:
             self.aggregate_method = "scan"
-        elif "vmap" in sum_method:
-            self.aggregate_method = "vmap"
         else:
             self.aggregate_method = "all"
+
+    def _effective_forward_aggregate_method(self) -> str:
+        """Resolve the static aggregation policy for a forward call."""
+        config = self.experimental_config
+        if config.forward_kernel == "auto":
+            return self.aggregate_method
+        if config.forward_kernel == "trajectory_pallas":
+            return "pallas"
+        return "pallas_fused_hom_diag_3d"
+
+    def _effective_inverse_aggregate_method(self) -> str:
+        """Resolve the static aggregation policy for TR/adjoint calls.
+
+        ``"auto"`` uses terminal XLA for unsharded real aggregation.
+        """
+        config = self.experimental_config
+        requested = config.inverse_evaluator
+        if requested == "terminal_pallas":
+            return "pallas"
+        if requested == "terminal_xla":
+            return "terminal_xla"
+        if (
+            self.use_real
+            and self.sharding is None
+            and "pallas" not in self.aggregate_method
+        ):
+            return "terminal_xla"
+        return self.aggregate_method
+
+    def _streams_top_n(self, wpt: MSWPT, data_dtype) -> bool:
+        """Return whether exact streamed top-n applies.
+
+        ``"auto"`` requires real, windowed, unsharded top-n input.
+        """
+        config = self.experimental_config
+        requested = config.coefficient_selection
+        if requested == "streaming_top_n":
+            return True
+        return (
+            self.thr_strat == "top_n"
+            and self.sharding is None
+            and wpt.windowing != "none"
+            and not jnp.issubdtype(data_dtype, jnp.complexfloating)
+        )
+
+    def _boxes_per_chunk(self) -> int:
+        """Chunk size for the streamed selector."""
+        return self.experimental_config.boxes_per_chunk
+
+    def _effective_pallas_config(
+        self,
+        periodic: Tuple[bool, ...],
+        *,
+        aggregate_method: Optional[str] = None,
+    ):
+        """Return a domain-specialized static config for Pallas calls."""
+        method = self.aggregate_method if aggregate_method is None else aggregate_method
+        if "pallas" not in method:
+            return self.pallas_config
+        periodic_axes = tuple(bool(value) for value in periodic)
+        config = self.pallas_config or PallasConfig()
+        if config.periodic_axes is None:
+            return replace(config, periodic_axes=periodic_axes)
+        if config.periodic_axes != periodic_axes:
+            raise ValueError(
+                "pallas_config.periodic_axes does not match domain.periodic: "
+                f"{config.periodic_axes} != {periodic_axes}."
+            )
+        return config
 
     def _effective_top_n(
         self, wpt: MSWPT, *, half_frame: bool = False
@@ -545,7 +752,7 @@ class MSGBSolver(eqx.Module):
                 for start, end in zip(wpt.coeffs_cumsum[:-1], wpt.coeffs_cumsum[1:])
             )
         else:
-            capacity = getattr(wpt, "total_coeffs", int(self.thr))
+            capacity = wpt.total_coeffs
         return min(int(self.thr), int(capacity))
 
     def _replicate_array(self, arr: jnp.ndarray) -> jnp.ndarray:
@@ -568,7 +775,11 @@ class MSGBSolver(eqx.Module):
         return jax.device_put(arr, NamedSharding(self.sharding.mesh, replicated))
 
     def _prepare_forward_params_real(
-        self, p0: jnp.ndarray, dpdt: jnp.ndarray, domain: Domain, wpt: MSWPT
+        self,
+        p0: jnp.ndarray,
+        dpdt: Optional[jnp.ndarray],
+        domain: Domain,
+        wpt: MSWPT,
     ) -> Tuple[jnp.ndarray, ...]:
         """
         Prepare beam parameters for a real-valued forward solve.
@@ -589,37 +800,58 @@ class MSGBSolver(eqx.Module):
         Tuple[jnp.ndarray, ...]
             Beam parameters ``(p0s, M0s, x0s, omegas, a0s, modes)``.
         """
-        c_pos = compute_coefficients(
-            p0, dpdt, self.input_type, domain, wpt, mode="pos_only"
-        )
-
         threshold = self.thr
         if self.thr_strat == "top_n":
-            # ``pos_only`` has already zeroed one conjugate-frequency half of
-            # every level.  Requesting more rows than the retained half-frame
-            # used to select zero coefficients and propagate zero-amplitude
-            # beams.  Clamp to the exact static capacity of ``_half_mask``;
-            # this removes wasted trajectories without changing the field.
+            # Positive-half analysis cannot exceed half of each level.
             threshold = self._effective_top_n(wpt, half_frame=True)
 
-        coeff_pos_idx, max_pos_coeffs = threshold_coefficients(
-            c_pos, threshold, self.thr_strat, wpt
-        )
+        if dpdt is None:
+            # Zero initial velocity gives c+ = 0.5 WPT(p0).
+            if self._streams_top_n(wpt, p0.dtype):
+                coeff_pos_idx, max_pos_coeffs = streamed_top_n_coefficients(
+                    p0,
+                    wpt,
+                    top_n=int(threshold),
+                    input_type=self.input_type,
+                    positive_half=True,
+                    scale=0.5,
+                    boxes_per_chunk=self._boxes_per_chunk(),
+                )
+            else:
+                c_pos = 0.5 * wpt.forward(p0, self.input_type) * wpt.half_mask
+                coeff_pos_idx, max_pos_coeffs = threshold_coefficients(
+                    c_pos, threshold, self.thr_strat
+                )
+        else:
+            c_pos = compute_coefficients(
+                p0,
+                dpdt,
+                self.input_type,
+                domain,
+                wpt,
+                mode="pos_only",
+            )
+            coeff_pos_idx, max_pos_coeffs = threshold_coefficients(
+                c_pos, threshold, self.thr_strat
+            )
 
         p0s, M0s, x0s, ωs, a0s, modes = compute_forward_parameters(
             coeff_pos_idx, wpt, domain
         )
         a0s = a0s * max_pos_coeffs
 
-        # Mirror to negative frequencies for real-valued field
         params_to_concat = (p0s, M0s, x0s, ωs, a0s)
         p0s, M0s, x0s, ωs, a0s = tuple(
             jnp.concatenate([p, p]) for p in params_to_concat
         )
         modes = jnp.concatenate([modes, -modes])
 
-        # Batch if using scan or vmap
-        if self.aggregate_method in ["scan", "vmap"]:
+        forward_aggregate = self._effective_forward_aggregate_method()
+        if forward_aggregate in {
+            "scan",
+            "pallas",
+            "pallas_fused_hom_diag_3d",
+        }:
             p0s, M0s, x0s, ωs, a0s, modes = utils.batch_data(
                 p0s,
                 M0s,
@@ -659,12 +891,8 @@ class MSGBSolver(eqx.Module):
         )
 
         (coeff_pos_idx, max_pos_coeffs), (coeff_neg_idx, max_neg_coeffs) = (
-            threshold_coefficients(
-                c_pos, self._effective_top_n(wpt), self.thr_strat, wpt
-            ),
-            threshold_coefficients(
-                c_neg, self._effective_top_n(wpt), self.thr_strat, wpt
-            ),
+            threshold_coefficients(c_pos, self._effective_top_n(wpt), self.thr_strat),
+            threshold_coefficients(c_neg, self._effective_top_n(wpt), self.thr_strat),
         )
 
         p0s, M0s, x0s, ωs, a0s, modes = compute_forward_parameters(
@@ -673,8 +901,7 @@ class MSGBSolver(eqx.Module):
         max_coeffs = jnp.concatenate([max_pos_coeffs, max_neg_coeffs])
         a0s = a0s * max_coeffs
 
-        # Batch if using scan or vmap
-        if self.aggregate_method in ["scan", "vmap"]:
+        if self.aggregate_method in ["scan", "pallas"]:
             p0s, M0s, x0s, ωs, a0s, modes = utils.batch_data(
                 p0s,
                 M0s,
@@ -717,44 +944,49 @@ class MSGBSolver(eqx.Module):
             ``(pts, Mts, xts, omegas, ats, signum, ts)``.
         """
         self._validate_boundary_data(data, data_domain, sources, ts=ts)
-        dpdt = jnp.zeros_like(data)
+        threshold = self._effective_top_n(data_wpt)
+        if self._streams_top_n(data_wpt, data.dtype):
+            coeff_idx, max_coeffs = streamed_top_n_coefficients(
+                data,
+                data_wpt,
+                top_n=int(threshold),
+                input_type=self.input_type,
+                positive_half=False,
+                scale=0.5,
+                boxes_per_chunk=self._boxes_per_chunk(),
+            )
+        else:
+            # Zero initial derivative gives c+ = 0.5 WPT(data).
+            c_pos = 0.5 * data_wpt.forward(data, self.input_type)
+            coeff_idx, max_coeffs = threshold_coefficients(
+                c_pos, threshold, self.thr_strat
+            )
 
-        c_pos, _ = compute_coefficients(
-            data, dpdt, self.input_type, data_domain, data_wpt, mode="both"
-        )
-
-        coeff_idx, max_coeffs = threshold_coefficients(
-            c_pos, self._effective_top_n(data_wpt), self.thr_strat, data_wpt
-        )
-
-        pts, Mts, xts, ωts, ats, signum, ts = compute_TR_parameters(
+        pts, Mts, xts, ωts, ats, signum, beam_times = compute_TR_parameters(
             coeff_idx, data_domain, data_wpt, sources
         )
 
         ats = ats * max_coeffs[:, None]
 
-        # Only reshape into (num_batches, batch_size, ...) when the downstream
-        # aggregator expects that layout. The "all" aggregator passes params
-        # straight to `solve_ODE_batch_t` whose internal vmap strips one batch
-        # axis; if we pre-batch here, that axis is mis-stripped and shapes
-        # collide inside `coupled_rhs` for d > 1.
-        if self.aggregate_method in ["scan", "vmap"]:
-            pts, Mts, xts, ωts, ats, signum, ts = utils.batch_data(
+        # Only these aggregators consume an explicit batch axis.
+        inverse_aggregate = self._effective_inverse_aggregate_method()
+        if inverse_aggregate in {"scan", "pallas", "terminal_xla"}:
+            pts, Mts, xts, ωts, ats, signum, beam_times = utils.batch_data(
                 pts,
                 Mts,
                 xts,
                 ωts,
                 ats,
                 signum,
-                ts,
+                beam_times,
                 batch_size=self.batch_size,
                 zero_padded_args=(4,),
             )
-        return pts, Mts, xts, ωts, ats, signum, ts
+        return pts, Mts, xts, ωts, ats, signum, beam_times
 
     def _infer_planar_surface(self, sensor_positions: jnp.ndarray, eps: float = 1e-9):
         """
-        Infer a planar detector surface x_axis = const from sensor positions.
+        Infer a planar detector surface from a constant sensor coordinate.
 
         Parameters
         ----------
@@ -865,11 +1097,19 @@ class MSGBSolver(eqx.Module):
         *,
         dpdt: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
-        """
-        Solve the forward wave equation ``u_tt - c²∇²u = 0`` with MSGB.
+        r"""
+        Solve the forward wave equation with MSGB:
 
-        Initial conditions are ``u(0, x) = p0`` and ``u_t(0, x) = dpdt`` (zero
-        for standard photoacoustic tomography).
+        $$
+        \partial_t^2u-c(\mathbf{x})^2\Delta u=0,
+        \qquad
+        u(0,\mathbf{x})=p_0(\mathbf{x}),
+        \qquad
+        \partial_tu(0,\mathbf{x})=\dot p_0(\mathbf{x}).
+        $$
+
+        The ``dpdt`` argument supplies $\dot p_0$ and is zero for standard
+        photoacoustic tomography.
 
         Parameters
         ----------
@@ -922,18 +1162,20 @@ class MSGBSolver(eqx.Module):
             Beam parameters used in the solve:
             ``(p0s, M0s, x0s, omegas, a0s, modes)``.
         """
-        if dpdt is None:
-            dpdt = jnp.zeros_like(p0)
-        if tuple(p0.shape) != domain.N or tuple(dpdt.shape) != domain.N:
+        dpdt_was_omitted = dpdt is None
+        if tuple(p0.shape) != domain.N or (
+            dpdt is not None and tuple(dpdt.shape) != domain.N
+        ):
             raise ValueError(
                 f"p0 and dpdt must both have shape {domain.N}; got "
-                f"{p0.shape} and {dpdt.shape}."
+                f"{p0.shape} and {None if dpdt is None else dpdt.shape}."
             )
         if wpt.dyadic_decomp.N != domain.N:
             raise ValueError("wpt grid shape must match domain.N.")
         _validate_time_grid(ts, allow_singleton=True)
 
-        use_sharding = self.sharding is not None and self.aggregate_method == "all"
+        forward_aggregate = self._effective_forward_aggregate_method()
+        use_sharding = self.sharding is not None and forward_aggregate == "all"
 
         sensor_positions = (
             sensors.positions
@@ -945,24 +1187,78 @@ class MSGBSolver(eqx.Module):
         if sensor_positions is None:
             raise ValueError("Unsupported sensor type")
 
-        # Prepare beam parameters
-        if (p0.dtype in complex_dtypes) or (dpdt.dtype in complex_dtypes):
-            params = self._prepare_forward_params_complex(p0, dpdt, domain, wpt)
-        else:
-            params = self._prepare_forward_params_real(p0, dpdt, domain, wpt)
+        forward_override = self.experimental_config.forward_kernel != "auto"
+        explicit_streaming = (
+            self.experimental_config.coefficient_selection == "streaming_top_n"
+        )
+        dpdt_is_complex = dpdt is not None and dpdt.dtype in complex_dtypes
+        input_is_complex = p0.dtype in complex_dtypes or dpdt_is_complex
+        if input_is_complex and self.use_real:
+            raise ValueError(
+                "Complex p0 or dpdt requires an *_complex sum_method; "
+                "the *_real methods use the conjugate-pair formulation for "
+                "real-valued initial data."
+            )
+        if input_is_complex and (forward_override or explicit_streaming):
+            raise ValueError(
+                "Streamed selection and forward-kernel overrides support "
+                "real float32 forward inputs only."
+            )
+        if explicit_streaming and not dpdt_was_omitted:
+            raise ValueError(
+                "coefficient_selection='streaming_top_n' requires a forward "
+                "solve with dpdt=None (zero initial velocity); use 'auto' to "
+                "stream only when possible."
+            )
+        if forward_aggregate == "pallas_fused_hom_diag_3d":
+            if domain.ndim != 3:
+                raise ValueError(
+                    "hom_diag_3d_pallas requires a three-dimensional domain."
+                )
+            if callable(domain.c) or np.asarray(domain.c).ndim != 0:
+                raise ValueError(
+                    "hom_diag_3d_pallas requires Domain.c to be a scalar "
+                    "constant; callable and grid-valued sound speeds must use "
+                    "the trajectory-based forward path."
+                )
+            if p0.dtype != jnp.float32 or (
+                dpdt is not None and dpdt.dtype != jnp.float32
+            ):
+                raise ValueError("hom_diag_3d_pallas requires float32 p0 and dpdt.")
+            if bool(getattr(jax.config, "x64_enabled", False)):
+                raise RuntimeError(
+                    "hom_diag_3d_pallas requires jax_enable_x64=False so all "
+                    "derived beam parameters remain float32/complex64."
+                )
+            if jax.default_backend() != "gpu":
+                raise RuntimeError(
+                    "hom_diag_3d_pallas requires a GPU backend. Use "
+                    "the low-level interpret=True entry point for CPU tests."
+                )
+            positions_np = np.asarray(sensor_positions)
+            if positions_np.ndim != 2 or positions_np.shape[1] != 3:
+                raise ValueError(
+                    "hom_diag_3d_pallas expects sensor positions of shape (Ns, 3)."
+                )
 
-        # Shard across devices if sharding strategy provided
+        if input_is_complex:
+            effective_dpdt = jnp.zeros_like(p0) if dpdt is None else dpdt
+            params = self._prepare_forward_params_complex(
+                p0, effective_dpdt, domain, wpt
+            )
+        else:
+            params = self._prepare_forward_params_real(
+                p0,
+                None if dpdt_was_omitted else dpdt,
+                domain,
+                wpt,
+            )
+
         if use_sharding:
             assert self.sharding is not None  # implied by `use_sharding`
             params = self.sharding.shard_beam_params(*params)
 
-        # Compute forward solution
-        result_fn = (
-            _compute_forward_result_jit
-            if compute_forward_result is _original_compute_forward_result
-            else compute_forward_result
-        )
-        sensor_data = result_fn(
+        sensor_data = _compute_forward_result_jit(
             params=params,
             c=domain.c_fn,
             lam=domain.lam,
@@ -972,8 +1268,11 @@ class MSGBSolver(eqx.Module):
             domain_size=domain.grid_size,
             periodic=jnp.array(domain.periodic),
             use_real=self.use_real,
-            aggregate_method=self.aggregate_method,
+            aggregate_method=forward_aggregate,
             solver_config=self.ode_config,
+            pallas_config=self._effective_pallas_config(
+                domain.periodic, aggregate_method=forward_aggregate
+            ),
         )
 
         if use_sharding:
@@ -1064,7 +1363,13 @@ class MSGBSolver(eqx.Module):
             raise ValueError(
                 "The MSGB time reversal solver only supports free space boundary conditions."
             )
-        use_sharding = self.sharding is not None and self.aggregate_method == "all"
+        if data.dtype in complex_dtypes and self.use_real:
+            raise ValueError(
+                "Complex time-reversal data requires an *_complex sum_method; "
+                "the *_real methods require real-valued boundary data."
+            )
+        inverse_aggregate = self._effective_inverse_aggregate_method()
+        use_sharding = self.sharding is not None and inverse_aggregate == "all"
 
         if use_sharding:
             data = self._replicate_array(data)
@@ -1079,28 +1384,25 @@ class MSGBSolver(eqx.Module):
         if sensor_positions is None:
             raise ValueError("Unsupported sensor type")
 
-        # Prepare TR parameters on host
         params = self._prepare_tr_params(data, data_domain, data_wpt, sources, ts)
 
         if use_sharding:
             assert self.sharding is not None  # implied by `use_sharding`
             params = self.sharding.shard_tr_params(*params)
 
-        result_fn = (
-            _compute_tr_result_jit
-            if compute_TR_result is _original_compute_tr_result
-            else compute_TR_result
-        )
-        p0_recon = result_fn(
+        p0_recon = _compute_tr_result_jit(
             params=params,
             c=domain.c_fn,
             lam=domain.lam,
             sensors=sensor_positions,
-            domain_size=data_domain.grid_size,
+            domain_size=domain.grid_size,
             periodic=jnp.array(domain.periodic),
             ode_solver=self.tr_ode_solver,
-            aggregate_method=self.aggregate_method,
+            aggregate_method=inverse_aggregate,
             solver_config=self.ode_config,
+            pallas_config=self._effective_pallas_config(
+                domain.periodic, aggregate_method=inverse_aggregate
+            ),
         )
 
         p0_recon = p0_recon * 2
@@ -1109,61 +1411,6 @@ class MSGBSolver(eqx.Module):
             p0_recon = self._replicate_array(p0_recon)
 
         return p0_recon, params
-
-    def solve_ivp(
-        self,
-        p0: jnp.ndarray,
-        dpdt: jnp.ndarray,
-        domain: Domain,
-        wpt: MSWPT,
-        sensors: Union[Sensor, jnp.ndarray],
-        ts: jnp.ndarray,
-    ) -> jnp.ndarray:
-        """
-        Solve the wave-equation IVP with non-zero initial velocity.
-
-        Equivalent to :meth:`forward` but requires an explicit ``dpdt``.
-        Use this when ``u_t(0, x) ≠ 0`` (Cauchy data); use :meth:`forward`
-        for standard photoacoustic settings where ``dpdt = 0``.
-
-        Parameters
-        ----------
-        p0 : jnp.ndarray, shape (*N,)
-            Initial pressure field.
-        dpdt : jnp.ndarray, shape (*N,)
-            Initial time derivative of the pressure.
-        domain : Domain
-            Computational domain.
-        wpt : MSWPT
-            Wave-packet transform for the beam decomposition.
-        sensors : Sensor or jnp.ndarray
-            Sensor geometry.
-        ts : jnp.ndarray, shape (Nt,)
-            Time grid.
-
-        Returns
-        -------
-        jnp.ndarray
-            Sensor time series. Equivalent to :meth:`forward` with explicit
-            ``dpdt``.
-        """
-        return self.forward(p0, domain, sensors, ts, wpt, dpdt=dpdt)
-
-    def solve_ivp_with_params(
-        self,
-        p0: jnp.ndarray,
-        dpdt: jnp.ndarray,
-        domain: Domain,
-        wpt: MSWPT,
-        sensors: Union[Sensor, jnp.ndarray],
-        ts: jnp.ndarray,
-    ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
-        """
-        IVP solve plus diagnostic beam parameters.
-
-        This is the explicit diagnostic variant of :meth:`solve_ivp`.
-        """
-        return self.forward_with_params(p0, domain, sensors, ts, wpt, dpdt=dpdt)
 
     def _prepare_adj_params(
         self,
@@ -1192,19 +1439,26 @@ class MSGBSolver(eqx.Module):
         -------
         Tuple of beam parameters suitable for `compute_TR_result`.
         """
-        # Analyse the spacetime source directly.  This is not an initial-value
-        # half-wave split: applying ``compute_coefficients(source, 0, ...)``
-        # would insert an erroneous factor 1/2.  The raw MSWPT coefficients
-        # still cover signed temporal Fourier boxes, which are required by the
-        # odd B^{-1} branch factor.
-        source_coeffs = data_wpt.forward(source, self.input_type)
-
-        coeff_idx, max_coeffs = threshold_coefficients(
-            source_coeffs,
-            self._effective_top_n(data_wpt),
-            self.thr_strat,
-            data_wpt,
-        )
+        # Direct source analysis avoids the IVP half-wave factor; B^{-1} needs
+        # the signed temporal boxes.
+        threshold = self._effective_top_n(data_wpt)
+        if self._streams_top_n(data_wpt, source.dtype):
+            coeff_idx, max_coeffs = streamed_top_n_coefficients(
+                source,
+                data_wpt,
+                top_n=int(threshold),
+                input_type=self.input_type,
+                positive_half=False,
+                scale=1.0,
+                boxes_per_chunk=self._boxes_per_chunk(),
+            )
+        else:
+            source_coeffs = data_wpt.forward(source, self.input_type)
+            coeff_idx, max_coeffs = threshold_coefficients(
+                source_coeffs,
+                threshold,
+                self.thr_strat,
+            )
 
         pts, Mts, xts, omegas, ats, signum, ts = compute_adj_parameters(
             coeff_idx,
@@ -1214,10 +1468,10 @@ class MSGBSolver(eqx.Module):
             relative_guard=self.adjoint_relative_guard,
         )
 
-        # Attach the (preconditioned) MSWPT coefficients to the beam amplitudes
         ats = ats * max_coeffs[:, None]
 
-        if self.aggregate_method in ["scan", "vmap"]:
+        inverse_aggregate = self._effective_inverse_aggregate_method()
+        if inverse_aggregate in {"scan", "pallas", "terminal_xla"}:
             pts, Mts, xts, omegas, ats, signum, ts = utils.batch_data(
                 pts,
                 Mts,
@@ -1244,29 +1498,27 @@ class MSGBSolver(eqx.Module):
         *,
         window: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
-        """
+        r"""
         Principal-symbol MSGB approximation of the continuous PAT adjoint.
 
         Parameters
         ----------
         data : jnp.ndarray
-            Boundary residual r(t, x_s) on Gamma. Shape (Nt, Ns) or (Nt,),
-            with time along axis 0.
+            Boundary residual $r(t,\mathbf{x}_s)$ on $\Gamma$. Shape (Nt, Ns)
+            or (Nt,), with time along axis 0.
         domain : Domain
-            Reconstruction (image) domain where we want q(T, x).
+            Reconstruction domain for $q(T,\mathbf{x})$.
         sensors : Sensor or jnp.ndarray
-            Locations at which to evaluate the adjoint field. For image
-            reconstruction this is typically `domain.grid` (so we get
-            q_T on the full grid).
+            Adjoint evaluation locations. Image reconstruction typically uses
+            ``domain.grid`` to evaluate $q_T$ on the full grid.
         sources : Sensor
-            Source geometry on Gamma, used to construct the boundary
+            Source geometry on $\Gamma$, used to construct the boundary
             beam parameters (same role as in time reversal).
         ts : jnp.ndarray
-            Time grid, shape (Nt,). Currently not used directly, but kept
-            for interface symmetry and possible future extensions.
+            Time grid, shape (Nt,). Reserved for interface consistency.
         data_domain : Domain
-            Domain describing the (t, x_s) grid of the boundary data.
-            Its `dx[0]` is used as the time step dt.
+            Domain describing the $(t,\mathbf{x}_s)$ grid of the boundary
+            data. Its `dx[0]` is used as the time step $\Delta t$.
         data_wpt : MSWPT
             MSWPT instance for analysing the boundary data / source.
 
@@ -1280,8 +1532,8 @@ class MSGBSolver(eqx.Module):
         Returns
         -------
         jnp.ndarray
-            Principal-symbol approximation to P*data for unweighted image and
-            data L2 pairings. This is not the exact transpose of the
+            Principal-symbol approximation to $P^*r$ for unweighted image and
+            data $L^2$ pairings. This is not the exact transpose of the
             thresholded discrete MSGB forward solver.
         """
         q_T, _ = self.adjoint_with_params(
@@ -1308,7 +1560,7 @@ class MSGBSolver(eqx.Module):
         *,
         window: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
-        """
+        r"""
         Adjoint MSGB solve plus diagnostic beam parameters.
 
         This is the explicit diagnostic variant of :meth:`adjoint`. Most users
@@ -1317,8 +1569,8 @@ class MSGBSolver(eqx.Module):
         Returns
         -------
         q_T : jnp.ndarray
-            Principal-symbol approximation to P*data on the reconstruction
-            domain under unweighted L2 pairings.
+            Principal-symbol approximation to $P^*r$ on the reconstruction
+            domain under unweighted $L^2$ pairings.
         params : tuple of jnp.ndarray
             Beam parameters used internally.
         """
@@ -1327,8 +1579,12 @@ class MSGBSolver(eqx.Module):
                 "MSGBSolver.adjoint currently assumes non-periodic spatial "
                 "boundaries in the reconstruction domain."
             )
+        if data.dtype in complex_dtypes and self.use_real:
+            raise ValueError(
+                "Complex adjoint data requires an *_complex sum_method; "
+                "the *_real methods require real-valued boundary data."
+            )
 
-        # Where do we want to evaluate q(T, ·)?
         sensor_positions = (
             sensors.positions
             if isinstance(sensors, Sensor)
@@ -1339,37 +1595,18 @@ class MSGBSolver(eqx.Module):
         if sensor_positions is None:
             raise ValueError("Unsupported sensor type for `sensors` in adjoint().")
 
-        # ------------------------------------------------------------------
-        # 1. Build the unweighted-equation source in acquisition time:
-        #    F_acq = -c_Gamma^2 d_s(window * r).
-        # ------------------------------------------------------------------
-
         self._validate_boundary_data(data, data_domain, sources, ts=ts)
         dt = data_domain.dx[0]
-        # The acquisition geometry owns the boundary medium. Using the image
-        # domain here could make the c_Gamma^2 source inconsistent with the TR
-        # geometry and B^{-1} multiplier when the two Domain objects differ.
+        # Boundary sound speed belongs to the acquisition geometry.
         c_at_sources = sources.domain.c_fn(sources.positions)
-        source = _form_adjoint_source(data, dt, c_at_sources, window)
+        source = form_adjoint_source(data, dt, c_at_sources, window)
 
-        # ------------------------------------------------------------------
-        # 2. Prepare adjoint (B^{-1}F) beams using the MSWPT + symbol logic.
-        # ------------------------------------------------------------------
+        inverse_aggregate = self._effective_inverse_aggregate_method()
         params = self._prepare_adj_params(source, data_domain, data_wpt, sources)
-        if self.sharding is not None:
+        if self.sharding is not None and inverse_aggregate == "all":
             params = self.sharding.shard_tr_params(*params)
 
-        # ------------------------------------------------------------------
-        # 3. Propagate beams with the TR machinery, evaluate in the image
-        #    domain, and apply the c^{-2} image weight required by the
-        #    unweighted L2 image pairing.
-        # ------------------------------------------------------------------
-        result_fn = (
-            _compute_tr_result_jit
-            if compute_TR_result is _original_compute_tr_result
-            else compute_TR_result
-        )
-        q_T = result_fn(
+        q_T = _compute_tr_result_jit(
             params=params,
             c=domain.c_fn,
             lam=domain.lam,
@@ -1377,10 +1614,13 @@ class MSGBSolver(eqx.Module):
             domain_size=domain.grid_size,
             periodic=jnp.array(domain.periodic),
             ode_solver=self.tr_ode_solver,
-            aggregate_method=self.aggregate_method,
+            aggregate_method=inverse_aggregate,
             solver_config=self.ode_config,
+            pallas_config=self._effective_pallas_config(
+                domain.periodic, aggregate_method=inverse_aggregate
+            ),
         )
 
-        q_T = _apply_adjoint_image_weight(q_T, domain.c_fn(sensor_positions))
+        q_T = apply_adjoint_image_weight(q_T, domain.c_fn(sensor_positions))
 
         return q_T, params

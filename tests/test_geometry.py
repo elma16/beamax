@@ -2,7 +2,6 @@ import pytest
 from beamax.geometry import Domain, Sensor
 import jax
 import jax.numpy as jnp
-import sys
 
 
 jax.config.update("jax_enable_x64", True)
@@ -15,18 +14,9 @@ def constant_one(x):
 @pytest.mark.parametrize(
     "N, dx",
     [
-        (
-            (64,),
-            (0.1,),
-        ),
-        (
-            (64, 32),
-            (0.1, 0.1),
-        ),
-        (
-            (64, 32, 64),
-            (0.1, 0.1, 0.1),
-        ),
+        ((8,), (0.1,)),
+        ((6, 8), (0.1, 0.1)),
+        ((4, 6, 8), (0.1, 0.1, 0.1)),
     ],
 )
 def test_domain_generate_meshgrid(N, dx):
@@ -36,7 +26,6 @@ def test_domain_generate_meshgrid(N, dx):
 
     domain = Domain(N=N, dx=dx, c=constant_one, periodic=periodic, cfl=cfl)
 
-    # check that i can compute the gradient and jit compile a function that uses it
     @jax.jit
     def f(x, domain):
         return x + domain.grid_size
@@ -59,7 +48,7 @@ def test_domain_generate_meshgrid(N, dx):
 
 
 def test_domain_compute_max_freq():
-    N = (64, 128)
+    N = (8, 10)
     dx = (0.1, 0.1)
     ndim = len(N)
 
@@ -72,6 +61,17 @@ def test_domain_compute_max_freq():
     max_freq = domain.compute_max_freq()
 
     assert max_freq == 10.0
+
+
+def test_domain_k_max_uses_finest_axis_spacing():
+    domain = Domain(
+        N=(8, 8),
+        dx=(0.1, 0.25),
+        c=1.0,
+        periodic=(False, False),
+    )
+
+    assert domain.k_max == pytest.approx(jnp.pi / 0.1)
 
 
 def test_domain_material_arrays_include_absorption():
@@ -92,7 +92,7 @@ def test_domain_material_arrays_include_absorption():
 
 
 def test_sensor():
-    N = (128, 128)
+    N = (8, 8)
     dx = (1 / N[0], 1 / N[1])
     ndim = len(N)
 
@@ -150,14 +150,11 @@ def test_sensor_positions_clip_to_grid_boundary():
     assert jnp.array_equal(sensor.binary_mask, expected)
 
 
-@pytest.mark.parametrize("d", [1, 2, 3])
-def test_geom_c(d):
-    """
-    Test the geometry module with different input c
-    """
-    N = (128,) * d
-    dx = (1 / N[0],) * d
-    periodic = (False,) * d
+def test_sound_speed_accepts_scalar_array_and_callable():
+    """Sound speed supports each public representation."""
+    N = (8, 10)
+    dx = (0.1, 0.2)
+    periodic = (False, False)
 
     c = 2
 
@@ -197,6 +194,22 @@ def test_grid_valued_sound_speed_is_interpolated_at_ray_points():
     assert jnp.allclose(domain.c_fn(points), 1.0 + points[:, 0] + 2.0 * points[:, 1])
 
 
+def test_grid_valued_sound_speed_applies_boundary_per_axis():
+    x_component = 10.0 * jnp.arange(3)[:, None]
+    y_component = jnp.arange(3)[None, :]
+    domain = Domain(
+        N=(3, 3),
+        dx=(1.0, 1.0),
+        c=1.0 + x_component + y_component,
+        periodic=(True, False),
+    )
+
+    # The first coordinate wraps between the last and first samples; the
+    # second remains clamped to its nearest edge.
+    assert domain.c_fn(jnp.array([-0.5, -0.5])) == pytest.approx(11.0)
+    assert domain.c_fn(jnp.array([-0.5, 2.5])) == pytest.approx(13.0)
+
+
 @pytest.mark.parametrize(
     "kwargs,match",
     [
@@ -227,7 +240,3 @@ def test_sensor_rejects_nonbinary_masks_and_quantised_duplicates():
         Sensor(domain, binary_mask=jnp.array([0.0, 0.5, 0.0, 1.0]))
     with pytest.raises(ValueError, match="distinct grid points"):
         Sensor(domain, positions=jnp.array([[0.01], [0.02]]))
-
-
-if __name__ == "__main__":
-    pytest.main(sys.argv)

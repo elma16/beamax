@@ -1,58 +1,23 @@
-#!/usr/bin/env python
-"""
-2D MSGB vs k-Wave reconstruction: time reversal + adjoint.
+"""Compare 2D MSGB and k-Wave time-reversal and adjoint reconstructions.
 
-Runs a compact inverse-comparison workflow on one small 2D problem. Steps:
-
-  1. Build a smooth two-Gaussian $p_0$ and a one-sided boundary sensor line.
-  2. Forward-simulate with k-Wave to get the sensor record.
-  3. Reconstruct with both k-Wave and MSGB via time reversal AND adjoint
-     back-propagation (four reconstructions in total).
-  4. Plot a 3-row comparison figure: $p_0$ + 2 TR images on top,
-     sensor data + 2 adjoint images in the middle, 1D profile through them on
-     the bottom. Print relative-L2 metrics against the truth.
-
-MSGB time-reversal in 2D needs a frequency-cropped data domain and a paired
-data-WPT — the helper ``prepare_data_domain_for_msgb`` below keeps that setup
-local and explicit.
-
-Example category: Reconstruction
 Example extras: kwave,viz-mpl
 Example smoke: false
 """
 
 import jax
 import jax.numpy as jnp
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 
 from beamax import utils
 from beamax.decomposition import DyadicDecomposition
 from beamax.geometry import Domain, Sensor
 from beamax.gb import gb_solvers
-from beamax.solvers import MSGBSolver
+from beamax.solvers import KWaveSolver, MSGBSolver
 from beamax.transforms import MSWPT
 
-
 jax.config.update("jax_enable_x64", True)
-
-INSTALL_HINT = 'pip install -e ".[kwave,viz-mpl]"'
-
-
-# ---------------------------------------------------------------------------
-# Setup helpers
-# ---------------------------------------------------------------------------
-
-
-def load_kwave_solver():
-    """Import k-Wave lazily so base beamax installs can still import this file."""
-    try:
-        from beamax.solvers import KWaveSolver
-    except ImportError as exc:
-        print(f"Skipping optional example: k-Wave is not installed ({INSTALL_HINT}).")
-        raise SystemExit(0) from exc
-    return KWaveSolver
 
 
 def c_homogeneous(x: jnp.ndarray) -> jnp.ndarray:
@@ -60,7 +25,7 @@ def c_homogeneous(x: jnp.ndarray) -> jnp.ndarray:
 
 
 def make_two_gaussian_phantom(domain: Domain) -> jnp.ndarray:
-    """Two smooth Gaussian inclusions with zero mean, normalised to peak |p| = 1."""
+    r"""Return a zero-mean phantom normalised to $\max|p_0|=1$."""
     lx, ly = domain.grid_size
     x, y = jnp.meshgrid(
         jnp.arange(domain.N[0]) * domain.dx[0],
@@ -78,7 +43,7 @@ def make_two_gaussian_phantom(domain: Domain) -> jnp.ndarray:
 
 
 def coerce_image(arr: jnp.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    """Coerce k-Wave image output to ``shape``; handle the transposed-output case."""
+    """Match k-Wave image orientation to ``shape``."""
     image = np.asarray(arr)
     if image.shape == shape:
         return image
@@ -88,24 +53,12 @@ def coerce_image(arr: jnp.ndarray, shape: tuple[int, int]) -> np.ndarray:
 
 
 def scaled(recon: np.ndarray, truth: np.ndarray) -> tuple[np.ndarray, float]:
-    """Best L2 scale of recon onto truth; returns (scaled, rel_l2)."""
+    r"""Fit the $\ell^2$ scale and return the scaled image and relative error."""
     r = np.asarray(recon).real
     t = np.asarray(truth).real
     s = float(np.vdot(r, t) / (np.vdot(r, r) + 1e-30))
     out = s * r
-    rel_l2 = float(np.linalg.norm(out - t) / (np.linalg.norm(t) + 1e-30))
-    return out, rel_l2
-
-
-# ---------------------------------------------------------------------------
-# MSGB data-domain construction
-# ---------------------------------------------------------------------------
-
-
-def _cut_out_middle(arr: jnp.ndarray, size: int) -> jnp.ndarray:
-    """Keep the middle ``size`` samples along axis 0 (after fftshift)."""
-    mid = arr.shape[0] // 2
-    return arr[mid - size // 2 : mid + size // 2]
+    return out, utils.rel_l2(t, out)
 
 
 def prepare_data_domain_for_msgb(
@@ -115,17 +68,7 @@ def prepare_data_domain_for_msgb(
     *,
     over_resolve: int = 2,
 ):
-    """
-    Build the (Nt', Ns) data domain and its paired MSWPT that MSGB needs for
-    TR/adjoint, by Fourier-cropping the k-Wave sensor record in time.
-
-    Returns
-    -------
-    sensor_data_cropped : (Nt', Ns)
-    domain_data : Domain on (Nt', Ns) with dx = (dt', dx_y)
-    wpt_data : MSWPT on the data domain
-    ts_data : (Nt',) new time grid
-    """
+    r"""Fourier-crop the record and build its $(N_t',N_s)$ MSGB data domain."""
     sensor_arr = jnp.asarray(sensor_data_kw)
     if sensor_arr.ndim != 2:
         raise ValueError(f"Expected (Nt, Ns) sensor data; got {sensor_arr.shape}")
@@ -136,7 +79,8 @@ def prepare_data_domain_for_msgb(
             f"Need >= {nt_cropped} time samples; got {sensor_arr.shape[0]}."
         )
     fft = utils.unitary_fft(sensor_arr)
-    cropped_fft = _cut_out_middle(fft, nt_cropped)
+    mid = fft.shape[0] // 2
+    cropped_fft = fft[mid - nt_cropped // 2 : mid + nt_cropped // 2]
     sensor_data_cropped = utils.unitary_ifft(cropped_fft).real
 
     nt_data, ns = sensor_data_cropped.shape
@@ -151,8 +95,7 @@ def prepare_data_domain_for_msgb(
         cfl=domain.cfl,
     )
 
-    # Aspect ratio set so the dyadic decomposition matches the rectangular data
-    # shape (nt_data is typically over_resolve * ns for over_resolve == 2).
+    # Match the dyadic aspect ratio to the rectangular data grid.
     n_min = min(nt_data, ns)
     box_aspect = (nt_data // n_min, ns // n_min)
     dyadic_data = DyadicDecomposition(
@@ -163,11 +106,6 @@ def prepare_data_domain_for_msgb(
     )
     wpt_data = MSWPT(dyadic_data, redundancy=2, windowing="rectangular_mirror")
     return sensor_data_cropped, domain_data, wpt_data, ts_data
-
-
-# ---------------------------------------------------------------------------
-# Plotting
-# ---------------------------------------------------------------------------
 
 
 def plot_comparison(
@@ -182,7 +120,6 @@ def plot_comparison(
     *,
     out_path,
 ):
-    """Thesis-style 3-row layout: 2 imshow rows + 1 profile row."""
     arrays = [np.asarray(a).real for a in (p0, tr_kw, tr_msgb, adj_kw, adj_msgb)]
     sensor_arr = np.asarray(sensor_data).real
     if sensor_arr.ndim != 2:
@@ -194,30 +131,24 @@ def plot_comparison(
     extent = (0.0, float(domain.grid_size[1]), 0.0, float(domain.grid_size[0]))
 
     fig = plt.figure(figsize=(12, 9))
-    gs = gridspec.GridSpec(
+    gs = fig.add_gridspec(
         3,
         3,
         height_ratios=[1.0, 1.0, 0.85],
         hspace=0.25,
         wspace=0.08,
-        figure=fig,
     )
 
-    top_titles = [
-        r"$p_0$",
-        r"$p_{\mathrm{TR}}^{\mathrm{k\!-\!Wave}}$",
-        r"$p_{\mathrm{TR}}^{\mathrm{MSGB}}$",
-    ]
-    mid_titles = [
-        r"$p_{\mathrm{Adj}}^{\mathrm{k\!-\!Wave}}$",
-        r"$p_{\mathrm{Adj}}^{\mathrm{MSGB}}$",
-    ]
-    top_arrays = [arrays[0], arrays[1], arrays[2]]
-    mid_arrays = [arrays[3], arrays[4]]
+    panels = (
+        (0, 0, r"$p_0$", arrays[0]),
+        (0, 1, r"$p_{\mathrm{TR}}^{\mathrm{k\!-\!Wave}}$", arrays[1]),
+        (0, 2, r"$p_{\mathrm{TR}}^{\mathrm{MSGB}}$", arrays[2]),
+        (1, 1, r"$p_{\mathrm{Adj}}^{\mathrm{k\!-\!Wave}}$", arrays[3]),
+        (1, 2, r"$p_{\mathrm{Adj}}^{\mathrm{MSGB}}$", arrays[4]),
+    )
     image_axes = []
-
-    for j, (title, arr) in enumerate(zip(top_titles, top_arrays)):
-        ax = fig.add_subplot(gs[0, j])
+    for row, column, title, arr in panels:
+        ax = fig.add_subplot(gs[row, column])
         ax.imshow(
             arr,
             origin="lower",
@@ -227,9 +158,7 @@ def plot_comparison(
             cmap="RdBu_r",
             aspect="equal",
         )
-        ax.set_title(title)
-        ax.set_xticks([])
-        ax.set_yticks([])
+        ax.set(title=title, xticks=[], yticks=[])
         image_axes.append(ax)
 
     ax_data = fig.add_subplot(gs[1, 0])
@@ -241,30 +170,10 @@ def plot_comparison(
         vmin=-sensor_vmax,
         vmax=sensor_vmax,
     )
-    ax_data.set_title("sensor data")
-    ax_data.set_xlabel(r"$x_s$")
-    ax_data.set_ylabel(r"$t$")
+    ax_data.set(title="sensor data", xlabel=r"$x_s$", ylabel=r"$t$")
     ax_data.set_box_aspect(1)
-    ax_data.set_xticks([])
-    ax_data.set_yticks([])
+    ax_data.set(xticks=[], yticks=[])
 
-    for j, (title, arr) in enumerate(zip(mid_titles, mid_arrays), start=1):
-        ax = fig.add_subplot(gs[1, j])
-        ax.imshow(
-            arr,
-            origin="lower",
-            extent=extent,
-            vmin=-vmax,
-            vmax=vmax,
-            cmap="RdBu_r",
-            aspect="equal",
-        )
-        ax.set_title(title)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        image_axes.append(ax)
-
-    # Overlay sensor positions on every image panel.
     rr, cc = jnp.where(sensors.binary_mask)
     xs = (np.asarray(cc) + 0.5) * float(domain.dx[1])
     ys = (np.asarray(rr) + 0.5) * float(domain.dx[0])
@@ -281,22 +190,30 @@ def plot_comparison(
             zorder=10,
         )
 
-    # 1D profile down the middle column of the image.
     ax_prof = fig.add_subplot(gs[2, :])
     idx = arrays[0].shape[1] // 2
     y_axis = np.arange(arrays[0].shape[0]) * float(domain.dx[0])
-    ax_prof.plot(y_axis, arrays[0][:, idx], color="black", lw=2.0, label=r"$p_0$")
-    ax_prof.plot(y_axis, arrays[1][:, idx], color="C0", lw=1.5, label="TR k-Wave")
-    ax_prof.plot(
-        y_axis, arrays[2][:, idx], color="C0", lw=1.5, ls="--", label="TR MSGB"
+    profiles = (
+        (arrays[0], "black", None, 2.0, r"$p_0$"),
+        (arrays[1], "C0", None, 1.5, "TR k-Wave"),
+        (arrays[2], "C0", "--", 1.5, "TR MSGB"),
+        (arrays[3], "C3", None, 1.5, "Adj k-Wave"),
+        (arrays[4], "C3", "--", 1.5, "Adj MSGB"),
     )
-    ax_prof.plot(y_axis, arrays[3][:, idx], color="C3", lw=1.5, label="Adj k-Wave")
-    ax_prof.plot(
-        y_axis, arrays[4][:, idx], color="C3", lw=1.5, ls="--", label="Adj MSGB"
+    for image, color, linestyle, width, label in profiles:
+        ax_prof.plot(
+            y_axis,
+            image[:, idx],
+            color=color,
+            lw=width,
+            label=label,
+            **({"ls": linestyle} if linestyle else {}),
+        )
+    ax_prof.set(
+        xlabel="y [m]",
+        ylabel="pressure",
+        title=f"profile at x = {idx * float(domain.dx[1]):.1e} m",
     )
-    ax_prof.set_xlabel("y [m]")
-    ax_prof.set_ylabel("pressure")
-    ax_prof.set_title(f"profile at x = {idx * float(domain.dx[1]):.1e} m")
     ax_prof.legend(loc="lower center", bbox_to_anchor=(0.5, -0.45), ncol=5)
     ax_prof.axvline(idx * float(domain.dx[0]), color="grey", ls=":", lw=0.8)
     for ax in image_axes:
@@ -306,14 +223,7 @@ def plot_comparison(
     plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
-    KWaveSolver = load_kwave_solver()
-
     n = (64, 64)
     dx = (1.0e-4, 1.0e-4)
     domain = Domain(
@@ -326,12 +236,10 @@ def main() -> None:
     ts = domain.generate_time_domain()
     p0 = make_two_gaussian_phantom(domain)
 
-    # Boundary sensors on the x = 0 row.
     sensor_mask = jnp.zeros(n).at[0, :].set(1.0)
     sensors = Sensor(domain=domain, binary_mask=sensor_mask)
     image_mask = jnp.ones(n)
 
-    # --- k-Wave forward to generate sensor data ---
     kwave = KWaveSolver(
         backend="python",
         device="cpu",
@@ -341,7 +249,6 @@ def main() -> None:
     )
     data = kwave.forward(p0, domain, sensor_mask, ts)
 
-    # --- k-Wave TR and Adjoint ---
     tr_kw = -coerce_image(
         kwave.time_reversal(
             data=data,
@@ -365,7 +272,6 @@ def main() -> None:
         n,
     )
 
-    # --- MSGB TR and Adjoint (with frequency-cropped data domain) ---
     sensor_cropped, domain_data, wpt_data, _ts_data = prepare_data_domain_for_msgb(
         data,
         domain,
@@ -409,7 +315,6 @@ def main() -> None:
     tr_msgb = np.asarray(tr_msgb_raw).real.reshape(n)
     adj_msgb = np.asarray(adj_msgb_raw).real.reshape(n)
 
-    # --- Best-L2 scale each reconstruction and print metrics ---
     truth = np.asarray(p0)
     tr_kw_s, tr_kw_l2 = scaled(tr_kw, truth)
     adj_kw_s, adj_kw_l2 = scaled(adj_kw, truth)
@@ -421,7 +326,8 @@ def main() -> None:
     print(f"Adj k-Wave  rel L2 = {adj_kw_l2:.3f}")
     print(f"Adj MSGB    rel L2 = {adj_msgb_l2:.3f}")
 
-    out_dir = utils.example_plot_dir(__file__)
+    out_dir = Path("plots/reconstruction")
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "2d_time_reversal_and_adjoint.png"
     plot_comparison(
         truth,

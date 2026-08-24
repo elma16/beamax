@@ -38,18 +38,15 @@ def create_symmetric_matrix_with_positive_definite_imag(n, key=None):
     if key is None:
         key = jax.random.PRNGKey(0)
 
-    # For the real part, we can use any symmetric matrix
     key, subkey = jax.random.split(key)
     real_part_raw = jax.random.normal(subkey, (n, n))
-    real_part = (real_part_raw + real_part_raw.T) / 2  # Make symmetric
+    real_part = (real_part_raw + real_part_raw.T) / 2
 
-    # For the imaginary part, we need a positive definite matrix
-    # We can create it as B*B.T + epsilon*I for some matrix B and small epsilon
+    # Construct a positive-definite imaginary part as B B^T + epsilon I.
     key, subkey = jax.random.split(key)
     B = jax.random.normal(subkey, (n, n))
     imag_part = jnp.matmul(B, B.T) + 0.1 * jnp.eye(n)
 
-    # Create the complex matrix
     matrix = real_part + 1j * imag_part
     return matrix
 
@@ -270,7 +267,7 @@ def test_linear_system(d):
     4. Check if the resulting matrix is symmetric and has positive definite imaginary parts.
     5. Reconstruct the original matrix from the linear system and check if it matches the original matrix.
     """
-    b = 4  # batch size
+    b = 4
     xt = jnp.ones((b, d))
     pt = jnp.ones((b, d))
     mode = jnp.ones((b,))
@@ -278,7 +275,6 @@ def test_linear_system(d):
     key = jax.random.PRNGKey(42)
     mt_data = create_batched_symmetric_matrices_with_positive_definite_imag(b, d, key)
 
-    # Verify each matrix in the batch is symmetric with positive definite imaginary part
     assert jnp.all(vmap_is_symmetric(mt_data))
     assert jnp.all(vmap_is_pos_def(jnp.imag(mt_data)))
 
@@ -290,12 +286,3 @@ def test_linear_system(d):
         xt, pt, mt_img, None, mode, c
     )
     assert jnp.allclose(mt_data, mt_data_recon, atol=1e-16)
-
-
-# The canonical end-to-end forward → time-reversal smoke test (with sharding)
-# lives in tests/solvers/test_sharding.py. A near-identical copy used to be
-# duplicated in this file and has been removed.
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])

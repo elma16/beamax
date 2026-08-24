@@ -77,7 +77,7 @@ def _validate_boxes_per_dim_levels(
                 f"Level {lvl}: boxes per axis must be even for symmetry; got {b}."
             )
 
-    # nondecreasing per axis across levels
+    # Counts must be nondecreasing per axis.
     for ax in range(ndim):
         seq = [int(boxes_per_dim_levels[lvl][ax]) for lvl in range(num_levels)]
         if any(seq[i] > seq[i + 1] for i in range(num_levels - 1)):
@@ -166,7 +166,7 @@ def validate_params(
             boxes_per_dim_levels, num_levels=num_levels, ndim=ndim
         )
 
-        # Enforce consistency with "boxes on the smallest axis" convention
+        # Enforce the smallest-axis convention.
         min_axis = int(np.argmin(np.asarray(N)))
         implied = tuple(
             int(boxes_per_dim_levels[lvl][min_axis]) for lvl in range(num_levels)
@@ -216,7 +216,7 @@ def validate_params(
 
 
 class DyadicDecomposition(eqx.Module):
-    """
+    r"""
     Multi-level dyadic tiling of Fourier space on a rectangular grid.
 
     The decomposition partitions Fourier space into frequency boxes organised
@@ -228,8 +228,10 @@ class DyadicDecomposition(eqx.Module):
     Parameters
     ----------
     num_levels : int
-        Number of scale levels. Must satisfy ``1 <= num_levels <= floor(log2(N_ref / num_boxes_levels[0])) + 1``
-        where ``N_ref = min(N)``.
+        Number of scale levels. Writing $L$ for ``num_levels``,
+        $N_{\mathrm{ref}} = \min_i N_i$, and $B_0$ for
+        ``num_boxes_levels[0]``, require
+        $1 \le L \le \lfloor \log_2(N_{\mathrm{ref}} / B_0) \rfloor + 1$.
     N : Tuple[int, ...]
         Grid shape of the underlying domain per spatial axis.
     num_boxes_levels : Tuple[int, ...]
@@ -355,13 +357,14 @@ class DyadicDecomposition(eqx.Module):
 
     @property
     def scaling(self) -> Float[Array, " d"]:
-        """
+        r"""
         Per-axis scaling factor that maps the domain aspect ratio onto the box aspect ratio.
 
         Returns
         -------
         jnp.ndarray, shape (ndim,)
-            ``(N / min(N)) / box_aspect_ratio``.
+            Writing $\mathbf{a}$ for ``box_aspect_ratio``, the componentwise
+            scaling is $\mathbf{N} / ((\min_i N_i)\mathbf{a})$.
         """
         N_arr = jnp.asarray(self.N)
         domain_aspect = N_arr / N_arr.min()
@@ -369,23 +372,28 @@ class DyadicDecomposition(eqx.Module):
 
     @property
     def box_lengths(self) -> Int[Array, " num_levels"]:
-        """
+        r"""
         Box side length (in Fourier indices, along the smallest axis) at each level.
 
         Returns
         -------
         jnp.ndarray, shape (num_levels,), int32
-            For zero-based level ``r``, the length is
-            ``min(N) // (num_boxes_levels[-1] * 2**(num_levels - 1 - r))``.
-            It doubles as ``r`` increases.
+            For zero-based level $r$,
+
+            $$
+            s_r = \left\lfloor
+            \frac{\min_i N_i}{B_{L-1}\,2^{L-1-r}}
+            \right\rfloor,
+            $$
+
+            where $L$ is ``num_levels`` and $B_{L-1}$ is
+            ``num_boxes_levels[-1]``. The length doubles as $r$ increases.
         """
         N_ref = int(min(self.N))
         levels_desc = np.arange(self.num_levels - 1, -1, -1, dtype=np.int32)
         denom_last = self.num_boxes_levels[-1]
         bl = (N_ref // (denom_last * (2**levels_desc))).astype(np.int32)
         return jnp.asarray(bl)
-
-    # ---------------------- Pure-Python builders ---------------------------
 
     def _outer_boxes_per_axis_py(self, lvl: int) -> np.ndarray:
         """

@@ -13,7 +13,7 @@ Param = Optional[Union[FieldFn, ScalarLike, Num[Array, "..."]]]
 
 
 class Domain(eqx.Module):
-    """
+    r"""
     Axis-aligned rectangular domain with physical spacing and medium fields.
 
     Attributes
@@ -27,15 +27,16 @@ class Domain(eqx.Module):
     cfl : float
         CFL number used to pick ``dt`` in ``generate_time_domain`` (default 0.3).
     c : Callable | float
-        Speed of sound ``c(x)`` or constant (default 1500.0).
+        Speed of sound $c(\mathbf{x})$ or constant (default 1500.0).
     density : Callable | float | None
-        Density ``rho(x)`` or constant.
+        Density $\rho(\mathbf{x})$ or constant.
     alpha_coeff : Callable | float | None
-        Absorption prefactor ``alpha0(x)``.
+        Absorption prefactor $\alpha_0(\mathbf{x})$.
     lam : float
         Absorption coefficient for GB ODEs (default 0.0).
     alpha_power : Callable | float | None
-        Absorption exponent ``y(x)`` in ``alpha = alpha0 * f**y``.
+        Absorption exponent $y(\mathbf{x})$ in
+        $\alpha(f, \mathbf{x}) = \alpha_0(\mathbf{x})f^{y(\mathbf{x})}$.
 
     Notes
     -----
@@ -46,13 +47,11 @@ class Domain(eqx.Module):
       as properties.
     """
 
-    # geometry
     N: Tuple[int, ...] = eqx.field(static=True)
     dx: Tuple[float, ...] = eqx.field()
     periodic: Tuple[bool, ...] = eqx.field(static=True)
     cfl: float = eqx.field(default=0.3)
 
-    # material parameters
     c: Param = eqx.field(default=1500.0)  # speed of sound (m s⁻¹)
     density: Param = eqx.field(default=1.0)  # ρ
     alpha_coeff: Param = eqx.field(default=None)  # α₀
@@ -145,9 +144,6 @@ class Domain(eqx.Module):
             "alpha_power", alpha_power, allow_none=True, strictly_positive=False
         )
 
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
     def _eval(self, p: Param) -> Optional[Num[Array, "*N"]]:
         """
         Evaluate a parameter on the spatial grid.
@@ -165,7 +161,7 @@ class Domain(eqx.Module):
         if p is None:
             return None
         arr = jnp.asarray(p(self.grid) if callable(p) else p)
-        if arr.ndim == 0:  # broadcast scalar
+        if arr.ndim == 0:
             arr = jnp.broadcast_to(arr, self.grid.shape[:-1])
         elif tuple(arr.shape) != self.N:
             raise ValueError(
@@ -199,7 +195,9 @@ class Domain(eqx.Module):
                 val,
                 spacing=self.dx,
                 origin=(0.0,) * self.ndim,
-                boundary="wrap" if all(self.periodic) else "clamp",
+                boundary=tuple(
+                    "wrap" if is_periodic else "clamp" for is_periodic in self.periodic
+                ),
             )
 
         def _const_c(x: Float[Array, "... d"]) -> Float[Array, "..."]:
@@ -220,25 +218,23 @@ class Domain(eqx.Module):
 
         return _const_c
 
-    # ------------------------------------------------------------------
-    # public accessors
-    # ------------------------------------------------------------------
     @property
     def grid_size(self) -> Float[Array, " d"]:
-        """
+        r"""
         Physical size of the domain per axis.
 
         Returns
         -------
         jnp.ndarray, shape (d,)
-            `N * dx` per axis.
+            Component $i$ is $L_i = N_i\,\Delta x_i$.
         """
         return jnp.array(self.N) * jnp.array(self.dx)
 
     @property
     def xmax(self) -> Float[Array, ""]:
-        """
-        Max extent (Euclidean norm of `grid_size`).
+        r"""
+        Maximum extent $x_{\max} = \lVert\mathbf{L}\rVert_2$, where
+        $\mathbf{L}$ is ``grid_size``.
 
         Returns
         -------
@@ -248,15 +244,15 @@ class Domain(eqx.Module):
 
     @property
     def k_max(self) -> Float[Array, ""]:
-        """
-        Max wavenumber given sampling.
+        r"""
+        Largest axis-aligned Nyquist wavenumber.
 
         Returns
         -------
         float
-            π * min(1/dx).
+            $k_{\max} = \pi / \min_i \Delta x_i$.
         """
-        return jnp.pi * jnp.min(1 / jnp.array(self.dx))
+        return jnp.pi / jnp.min(jnp.array(self.dx))
 
     @property
     def ndim(self) -> int:
@@ -328,39 +324,42 @@ class Domain(eqx.Module):
         return self._eval(self.alpha_power)
 
     def compute_max_speed(self) -> Float[Array, ""]:
-        """
+        r"""
         Maximum sound speed on grid.
 
         Returns
         -------
         jnp.ndarray
-            Scalar (0-D array) with ``max(c)``.
+            Scalar (0-D array) equal to $\max_{\mathbf{x}}c(\mathbf{x})$.
         """
         return jnp.max(self.sound_speed_array)
 
     def compute_min_speed(self) -> Float[Array, ""]:
-        """
+        r"""
         Minimum sound speed on grid.
 
         Returns
         -------
         jnp.ndarray
-            Scalar (0-D array) with ``min(c)``.
+            Scalar (0-D array) equal to $\min_{\mathbf{x}}c(\mathbf{x})$.
         """
         return jnp.min(self.sound_speed_array)
 
     def generate_meshgrid(
         self,
     ) -> Tuple[list[Float[Array, "*N"]], list[Int[Array, "*N"]]]:
-        """
+        r"""
         Spatial and Fourier meshgrids.
 
         Returns
         -------
         (spatial_meshgrid, fourier_meshgrid)
-            Each a tuple of length `d` with arrays shaped `N[i]` per axis.
-            - Spatial coordinates: 0..(N[i]-1) * dx[i].
-            - Fourier indices:     -N[i]//2 .. N[i]//2 - 1.
+            Each is a tuple of length ``d`` whose arrays have shape ``N``.
+
+            - Spatial coordinates: $x_{i,n} = n\,\Delta x_i$ for
+              $n = 0, \ldots, N_i - 1$.
+            - Fourier indices:
+              $-\lceil N_i / 2 \rceil, \ldots, \lfloor N_i / 2 \rfloor - 1$.
         """
         spatial_coords = [
             jnp.arange(0, self.N[idx], 1) * self.dx[idx] for idx in range(self.ndim)
@@ -374,25 +373,40 @@ class Domain(eqx.Module):
         return spatial_meshgrid, fourier_meshgrid
 
     def compute_max_freq(self) -> Float[Array, ""]:
-        """
+        r"""
         Max frequency allowed by grid / CFL proxy.
 
         Returns
         -------
         jnp.ndarray
-            Scalar ``≈ max(c) / (2 * min(dx))``.
+            Scalar
+
+            $$
+            f_{\max} \approx
+            \frac{\max_{\mathbf{x}}c(\mathbf{x})}{2\min_i \Delta x_i}.
+            $$
         """
         return self.compute_max_speed() / (2 * min(self.dx))
 
     def generate_time_domain(self) -> Float[Array, " Nt"]:
-        """
+        r"""
         CFL-based uniform time grid covering one diameter-crossing.
 
         Returns
         -------
         jnp.ndarray, shape (Nt,)
-            With ``dt = cfl * min(dx) / max(c)`` and
-            ``tmax = ||grid_size|| / min(c)``, this returns ``arange(0, tmax, dt)``.
+            With
+
+            $$
+            \Delta t = \mathrm{CFL}\,
+            \frac{\min_i \Delta x_i}{\max_{\mathbf{x}}c(\mathbf{x})},
+            \qquad
+            t_{\max} =
+            \frac{\lVert\mathbf{L}\rVert_2}{\min_{\mathbf{x}}c(\mathbf{x})},
+            $$
+
+            where $\mathbf{L}$ is ``grid_size``, this returns
+            ``arange(0, tmax, dt)``.
         """
         dt = self.cfl * min(self.dx) / self.compute_max_speed()
         tmax = self.xmax / self.compute_min_speed()
@@ -405,7 +419,7 @@ class Sensor(eqx.Module):
     Sampling geometry for receivers or sources.
 
     Construct with exactly one of ``positions`` or ``binary_mask``. The other
-    representation is derived deterministically from whatever you provided and
+    representation is derived deterministically from the supplied form and
     is available via the :attr:`positions` / :attr:`binary_mask` properties.
 
     Parameters
@@ -425,12 +439,12 @@ class Sensor(eqx.Module):
     Notes
     -----
     ``positions`` are converted to the nearest integer grid index when the mask
-    is derived; sub-pixel positions are quantised to grid voxels.
+    is derived. Sub-pixel positions are quantised to grid voxels.
     """
 
     domain: Domain
-    _positions: Optional[Float[Array, "Ns d"]]
-    _binary_mask: Optional[Num[Array, "*N"]]
+    _positions: Float[Array, "Ns d"]
+    _binary_mask: Num[Array, "*N"]
 
     def __init__(
         self,
@@ -598,9 +612,7 @@ class Sensor(eqx.Module):
         -------
         jnp.ndarray, shape (Ns, d)
         """
-        out = self._positions
-        assert out is not None  # always derived by __init__
-        return out
+        return self._positions
 
     @property
     def binary_mask(self) -> Num[Array, "*N"]:
@@ -611,6 +623,4 @@ class Sensor(eqx.Module):
         -------
         jnp.ndarray, shape (*N,), dtype=int
         """
-        out = self._binary_mask
-        assert out is not None  # always derived by __init__
-        return out
+        return self._binary_mask

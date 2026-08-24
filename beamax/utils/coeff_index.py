@@ -90,8 +90,8 @@ def batch_data(*args, batch_size, zero_padded_args=()):
 def find_level(
     dyadic_decomp: DyadicDecomposition, box_num: int | Int[Array, "..."]
 ) -> Int[Array, ""]:
-    """
-    Map global box index → dyadic level.
+    r"""
+    Map a global box index to its dyadic level.
 
     Parameters
     ----------
@@ -101,9 +101,9 @@ def find_level(
     Returns
     -------
     jnp.ndarray
-        Scalar (0-D) array with the level ``ℓ`` such that cumulative boxes up
-        to ``ℓ`` exceed ``box_num``. JAX traces it as an integer scalar inside
-        JIT.
+        Scalar (0-D) array containing the level $\ell$ such that the cumulative
+        box count through level $\ell$ exceeds ``box_num``. JAX traces it as an
+        integer scalar inside JIT.
     """
     return jnp.searchsorted(dyadic_decomp.num_boxes_ndim_cumsum, box_num, side="right")
 
@@ -151,8 +151,7 @@ def find_tensor_and_multiindex(
 def compute_coeff_shapes(
     dyadic_decomp: DyadicDecomposition,
     redundancy: int,
-    # `level` is the *inner* signature before vmap; callers pass an Int[Array,
-    # " L"] of level indices and the decorator strips the leading axis.
+    # vmap strips the leading level axis before this inner call.
     level,
 ) -> jnp.ndarray:
     """

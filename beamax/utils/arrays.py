@@ -12,7 +12,6 @@ from typing import Tuple
 
 import jax.numpy as jnp
 import numpy as np
-from scipy.ndimage import zoom
 
 
 __all__ = [
@@ -54,6 +53,8 @@ def interpolate_nearest(array: jnp.ndarray, new_shape: Tuple) -> jnp.ndarray:
     jnp.ndarray
         Resampled array.
     """
+    from scipy.ndimage import zoom
+
     new_shape = _normalise_target_shape(new_shape, array.ndim, name="new_shape")
     zoom_factors = tuple(
         [new_dim / old_dim for new_dim, old_dim in zip(new_shape, array.shape)]
@@ -235,7 +236,7 @@ def interpolate_fourier(
 
 
 def extract_centered_box(arr, box_shape_tuple, center):
-    """
+    r"""
     Wrap-around extraction of a centered N-D box (JIT/static-friendly).
 
     Parameters
@@ -244,7 +245,8 @@ def extract_centered_box(arr, box_shape_tuple, center):
     box_shape_tuple : Tuple[int, ...]
         Static Python tuple of ints (box sizes per axis).
     center : jnp.ndarray, shape (d,)
-        Center index in the same index space as `arr` (0..Ni-1).
+        Center index in the same index space as `arr`, with entries
+        $0, \ldots, N_i - 1$.
 
     Returns
     -------
@@ -269,8 +271,8 @@ def extract_centered_box(arr, box_shape_tuple, center):
 
 
 def rel_l2(a, b):
-    """
-    Compute relative L2 error between two arrays.
+    r"""
+    Compute the relative $\ell^2$ error between two arrays.
 
     Parameters
     ----------
@@ -282,7 +284,7 @@ def rel_l2(a, b):
     Returns
     -------
     float
-        ``||a - b||_2 / (||a||_2 + 1e-30)``.
+        $\lVert a - b\rVert_2 / (\lVert a\rVert_2 + 10^{-30})$.
     """
     num = jnp.linalg.norm(a - b)
     den = jnp.linalg.norm(a) + 1e-30
