@@ -347,7 +347,10 @@ class Domain(eqx.Module):
 
     def generate_meshgrid(
         self,
-    ) -> Tuple[list[Float[Array, "*N"]], list[Int[Array, "*N"]]]:
+    ) -> Tuple[
+        tuple[Float[Array, "*N"], ...],
+        tuple[Int[Array, "*N"], ...],
+    ]:
         r"""
         Spatial and Fourier meshgrids.
 
@@ -368,8 +371,8 @@ class Domain(eqx.Module):
             jnp.arange(-self.N[idx] // 2, self.N[idx] // 2, 1)
             for idx in range(self.ndim)
         ]
-        spatial_meshgrid = jnp.meshgrid(*spatial_coords, indexing="ij")
-        fourier_meshgrid = jnp.meshgrid(*fourier_coords, indexing="ij")
+        spatial_meshgrid = tuple(jnp.meshgrid(*spatial_coords, indexing="ij"))
+        fourier_meshgrid = tuple(jnp.meshgrid(*fourier_coords, indexing="ij"))
         return spatial_meshgrid, fourier_meshgrid
 
     def compute_max_freq(self) -> Float[Array, ""]:

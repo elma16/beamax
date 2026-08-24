@@ -71,7 +71,6 @@ nav:
   - index.md
   - Guides:
       - Custom low-frequency solvers: guides/custom-low-frequency-solvers.md
-      - MSGB execution and Pallas kernels: guides/pallas-kernels.md
   - Examples:
       - examples/index.md
       - Forward propagation: examples/forward.md
