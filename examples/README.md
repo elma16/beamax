@@ -1,6 +1,7 @@
 # Examples
 
-Run scripts from the repository root. Selected examples include Colab notebooks, optional requirements are listed below.
+Run scripts from the repository root. Selected examples include Colab notebooks;
+optional requirements are listed below.
 
 ## Gallery
 

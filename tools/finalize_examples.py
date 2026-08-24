@@ -108,7 +108,7 @@ def generate_nb_from_py(py_path: Path, *, check: bool = False) -> bool:
         "nbformat": 4,
         "nbformat_minor": 5,
     }
-    new_text = json.dumps(nb, indent=1) + "\n"
+    new_text = json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
     if not check:
         nb_path.write_text(new_text)
     return True
@@ -160,7 +160,7 @@ def sync_generated_nb_from_py(py_path: Path, *, check: bool = False) -> bool:
         "outputs": [],
         "source": notebook_code_source(src),
     }
-    new_text = json.dumps(nb, indent=1) + "\n"
+    new_text = json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
     if nb_path.read_text() == new_text:
         return False
     if not check:
