@@ -36,7 +36,7 @@ Additional CI checks worth reproducing locally when relevant:
 - Examples: `python tools/finalize_examples.py --check`, `python tools/gen_examples_readme.py --check`, and `python tools/run_examples.py --directory examples --include-optional --fail-fast --silent-figures`.
 - Packaging: `uv lock --check` (keep `uv.lock` in sync with `pyproject.toml`). The version string lives in both `pyproject.toml` and `beamax/__init__.py` and CI asserts `beamax.__version__` in `.github/workflows/run-tests.yml` — update all three on release.
 
-Tests missing optional deps (k-Wave, matplotlib, optax) are skipped. The k-Wave C++ binary tests are skipped on CI unless `BEAMAX_RUN_KWAVE_CPP_TESTS=1`; `BEAMAX_KWAVE_BINARY_PATH` overrides the binary location. Most test modules enable `jax_enable_x64` at import time; there is no `conftest.py`.
+Tests missing optional deps (k-Wave, matplotlib, optax) are skipped. The k-Wave C++ binary tests are skipped on CI unless `BEAMAX_RUN_KWAVE_CPP_TESTS=1`; `BEAMAX_KWAVE_BINARY_PATH` overrides the binary location. On macOS the bundled binary (`kspaceFirstOrder-OMP`) links against Homebrew libraries and aborts with a `dyld: Library not loaded` error (surfacing as a `CalledProcessError` / SIGABRT) unless `brew install fftw hdf5 zlib` has been run; the pre-commit fast subset includes k-Wave tests, so commits fail without them. Most test modules enable `jax_enable_x64` at import time; there is no `conftest.py`.
 
 Ruff ignores `E501` and `F722` (jaxtyping shape strings like `Float[Array, "b d"]`).
 

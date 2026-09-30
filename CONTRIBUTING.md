@@ -30,6 +30,14 @@ Missing optional dependencies skip their tests. Validated runners can enable
 the otherwise-disabled k-Wave C++ tests with
 `BEAMAX_RUN_KWAVE_CPP_TESTS=1`.
 
+On macOS, the k-Wave C++ binary bundled with `k-wave-python` links against
+Homebrew libraries. Install them before running the tests (the pre-commit fast
+subset includes k-Wave tests):
+
+```bash
+brew install fftw hdf5 zlib
+```
+
 Use [Ruff](https://docs.astral.sh/ruff/) for linting and formatting. Pre-commit
 runs Ruff, strips notebooks, and runs fast tests; pre-push runs the full suite.
 `E501` is disabled, but keep lines readable.
