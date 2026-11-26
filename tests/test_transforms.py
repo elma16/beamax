@@ -227,3 +227,26 @@ def test_inv_transform_linear(setup_transform):
 
     assert jnp.allclose(f_sum, f1 + f2, atol=1e-16)
     assert jnp.allclose(f_scaled, a * f1, atol=1e-16)
+
+
+@pytest.mark.parametrize(
+    "shape,boxes,redundancy", [((64, 96), 4, 2), ((24,), 6, 2), ((12,), 4, 1)]
+)
+def test_round_trip_with_shifted_centres_and_odd_support(shape, boxes, redundancy):
+    decomp = DyadicDecomposition(1, shape, (boxes,), (1,) * len(shape))
+    wpt = transforms.MSWPT(decomp, redundancy, "rectangular")
+    field = jax.random.normal(jax.random.PRNGKey(5), shape)
+
+    reconstructed = wpt.inverse(wpt.forward(field, "spatial"), "spatial")
+
+    assert jnp.allclose(field, reconstructed, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("operation", ["forward", "inverse"])
+def test_mswpt_rejects_incorrect_input_length(operation):
+    decomp = DyadicDecomposition(1, (16,), (4,), (1,))
+    wpt = transforms.MSWPT(decomp, 2, "rectangular")
+    size = decomp.N[0] if operation == "forward" else wpt.total_coeffs
+
+    with pytest.raises(ValueError, match="must have shape"):
+        getattr(wpt, operation)(jnp.zeros(size + 1), "spatial")

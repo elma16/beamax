@@ -106,7 +106,6 @@ def _streamed_top_n_coefficients_jit(
                 packed_filter,
                 support_shape,
                 centre,
-                grid_shape,
                 half_support,
             )
 

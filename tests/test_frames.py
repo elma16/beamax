@@ -398,6 +398,7 @@ def test_single_coeff_eq_frame(num_levels, N, num_boxes_outer_level, box_aspect_
 @pytest.mark.parametrize(
     "N, aspect, frame_redundancy",
     [
+        ((24, 12), (2, 1), 1),
         ((64, 32), (2, 1), 1),
         ((64, 32), (2, 1), 2),
         ((32, 64), (1, 2), 1),

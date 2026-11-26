@@ -18,6 +18,7 @@ def _make_wpt(
     windowing: str,
     *,
     levels: int = 1,
+    redundancy: int = 2,
 ) -> MSWPT:
     boxes = (4,) if levels == 1 else (4, 8)
     decomp = DyadicDecomposition(
@@ -26,7 +27,7 @@ def _make_wpt(
         boxes,
         (1,) * len(shape),
     )
-    return MSWPT(decomp, redundancy=2, windowing=windowing)
+    return MSWPT(decomp, redundancy=redundancy, windowing=windowing)
 
 
 def _eligible_indices(wpt: MSWPT, positive_half: bool) -> np.ndarray:
@@ -105,18 +106,19 @@ def test_streamed_top_n_matches_materialized_mswpt(
 
 
 @pytest.mark.parametrize(
-    ("shape", "half_support"),
+    ("shape", "half_support", "redundancy"),
     [
-        ((12,), (3,)),
-        ((16,), (4,)),
-        ((12, 12), (3, 3)),
-        ((16, 16), (4, 4)),
+        ((12,), (1,), 1),
+        ((12,), (3,), 2),
+        ((16,), (4,), 2),
+        ((12, 12), (3, 3), 2),
+        ((16, 16), (4, 4), 2),
     ],
 )
 def test_streamed_and_materialized_per_box_analysis_is_exact_for_support_parities(
-    shape, half_support
+    shape, half_support, redundancy
 ):
-    wpt = _make_wpt(shape, "rectangular")
+    wpt = _make_wpt(shape, "rectangular", redundancy=redundancy)
     assert wpt._box_shapes == [half_support]
 
     real_key, imag_key = jax.random.split(jax.random.PRNGKey(sum(shape)))

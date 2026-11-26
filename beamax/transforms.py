@@ -12,21 +12,24 @@ from beamax.utils.coeff_index import compute_coeff_shapes, find_level
 from beamax.utils.fft import convert_space, unitary_fft, unitary_ifft
 
 
+def _box_rolls(array_centre: jax.Array, half_support: jax.Array) -> jax.Array:
+    """Parity recentering using the box centre in shifted-array indices."""
+    parity = (array_centre // half_support) & 1
+    return (1 - 2 * parity) * (half_support // 2)
+
+
 def _analyse_box(
     spectrum: jax.Array,
     packed_filter: jax.Array,
     support_shape: Tuple[int, ...],
-    centre: jax.Array,
-    grid_shape: jax.Array,
+    array_centre: jax.Array,
     half_support: jax.Array,
 ) -> jax.Array:
     """Return the MSWPT coefficients for one local Fourier box."""
-    filtered = packed_filter * extract_centered_box(spectrum, support_shape, centre)
-    parity_index = (centre + grid_shape // 2) // half_support
-    parity_sign = 1 - 2 * (parity_index & 1)
-    # Apply the sign after integer division so odd half-supports keep the
-    # transform's established recentering convention.
-    rolls = parity_sign * (half_support // 2)
+    filtered = packed_filter * extract_centered_box(
+        spectrum, support_shape, array_centre
+    )
+    rolls = _box_rolls(array_centre, half_support)
     filtered = jnp.roll(filtered, rolls, axis=tuple(range(spectrum.ndim)))
     return unitary_ifft(filtered)
 
@@ -222,9 +225,7 @@ def compute_frame_phase(
     half_support = support_lengths // 2
     centre = dyadic_decomp.centres_ndim[boxidx]
     grid_shape = jnp.asarray(dyadic_decomp.N)
-    parity_index = (centre + grid_shape // 2) // half_support
-    parity_sign = 1 - 2 * (parity_index & 1)
-    rolls = parity_sign * (half_support // 2)
+    rolls = _box_rolls(centre + grid_shape // 2, half_support)
     phase_cycles = jnp.sum((centre - rolls) * k / support_lengths, axis=-1)
     # Reduction makes integral offsets exact and improves large-index accuracy.
     phase_cycles = jnp.remainder(phase_cycles, 1.0)
@@ -454,17 +455,10 @@ class MSWPT(eqx.Module):
             * (redundancy / 2)
         )
         self.max_box_length = int(max_box_length)
-        self._support_shapes = []
-        self._box_shapes = []
-        for lvl in range(dyadic_decomp.num_levels):
-            bl = (
-                dyadic_decomp.box_lengths[lvl]
-                * jnp.array(dyadic_decomp.box_aspect_ratio)
-                * redundancy
-                / 2
-            ).astype(int)
-            self._box_shapes.append(tuple(bl.tolist()))
-            self._support_shapes.append(tuple((2 * bl).tolist()))
+        self._support_shapes = [shape[1:] for shape in self.coeff_shapes]
+        self._box_shapes = [
+            tuple(width // 2 for width in shape) for shape in self._support_shapes
+        ]
         seg = [
             self.coeffs_cumsum[i + 1] - self.coeffs_cumsum[i]
             for i in range(dyadic_decomp.num_levels)
@@ -600,7 +594,6 @@ class MSWPT(eqx.Module):
                     gfilt_level_packed,
                     support_shape_level,
                     centre,
-                    N,
                     half_support_level,
                 )
                 return coeffs_for_level.at[i].set(coeff)
@@ -653,6 +646,10 @@ class MSWPT(eqx.Module):
                 "Gaussian, so it cannot provide an exact analysis/synthesis "
                 "pair. Use 'rectangular' or 'rectangular_mirror'."
             )
+        if data.shape != self.dyadic_decomp.N:
+            raise ValueError(
+                f"data must have shape {self.dyadic_decomp.N}; got {data.shape}."
+            )
         ft_data = convert_space(data, input_type, "fourier")
         ft_sum_gsq = ft_data / self.sum_gsquare
         coeffs = self._compute_coeffs(ft_sum_gsq)
@@ -702,6 +699,10 @@ class MSWPT(eqx.Module):
 
         The final update is a periodic scatter-add at the true box centre $x_b$.
         """
+        if coeffs.shape != (self.total_coeffs,):
+            raise ValueError(
+                f"coeffs must have shape ({self.total_coeffs},); got {coeffs.shape}."
+            )
         N = jnp.array(self.dyadic_decomp.N, dtype=jnp.int32)
         L = self.dyadic_decomp.num_levels
         ft_out = jnp.zeros(self.dyadic_decomp.N, dtype=self.complex_dtype)
@@ -736,9 +737,7 @@ class MSWPT(eqx.Module):
                 """Scatter-add one inverse-transform box."""
                 centre = centres_lvl[i]
 
-                ri = (centre + (N // 2)) // box_len
-                sign = 1 - 2 * (ri & 1)
-                rolls = sign * (box_len // 2)
+                rolls = _box_rolls(centre + N // 2, box_len)
 
                 cpatch = coeffs_lvl[i]
                 fh = unitary_fft(cpatch)
