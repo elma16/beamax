@@ -563,6 +563,10 @@ def compute_forward_result(
     ):
         raise ValueError("pallas_fused_hom_diag_3d requires ode_solver=solve_hom_diag.")
     init_shape = ts.shape + sensors.shape[:-1]
+    if params[0].size == 0:
+        return jnp.zeros(
+            init_shape, dtype=params[2].dtype if use_real else params[4].dtype
+        )
 
     return _aggregate_beams(
         params=params,
@@ -579,6 +583,47 @@ def compute_forward_result(
         solver_config=solver_config,
         pallas_config=pallas_config,
     )
+
+
+def _uses_fourier_velocity(domain: Domain) -> bool:
+    """The periodic scalar medium has an exact Fourier half-wave polarisation."""
+    c = domain.c
+    return (
+        all(domain.periodic) and c is not None and not callable(c) and jnp.ndim(c) == 0
+    )
+
+
+def _velocity_half_wave_coefficients(dpdt, input_type, domain, wpt):
+    if _uses_fourier_velocity(domain):
+        # For nonzero modes, apply (c |D|)^-1 before packet analysis. The DC
+        # velocity has no propagating half-wave and is integrated separately.
+        spectrum = utils.convert_space(dpdt, input_type, "fourier")
+        cycles = wpt.dyadic_decomp.fourier_meshgrid / domain.grid_size
+        omega = 2 * jnp.pi * domain.c * jnp.linalg.norm(cycles, axis=-1)
+        inverse = 1 / jnp.where(omega == 0, jnp.inf, omega)
+        return wpt.forward(spectrum * inverse, "fourier")
+
+    # Outside the periodic homogeneous case, freeze the principal symbol
+    # at each packet's position and central physical frequency.
+    b_coeff = wpt.forward(dpdt, input_type)
+
+    shapes = utils.compute_coeff_shapes(
+        wpt.dyadic_decomp, wpt.redundancy, jnp.arange(wpt.dyadic_decomp.num_levels)
+    )
+    cumsum = jnp.r_[0, jnp.cumsum(wpt.dyadic_decomp.num_boxes_ndim)]
+    nn_level, nn_idx = utils.find_tensor_and_multiindex(
+        jnp.arange(wpt.total_coeffs), shapes
+    )
+    b = nn_idx.shape[1]
+    x_b = _coefficient_positions(nn_level, nn_idx, wpt, domain)
+    box_idx = nn_idx[0, :] + cumsum[nn_level]
+    centres = wpt.dyadic_decomp.centres_ndim[box_idx] / domain.grid_size
+    p_b = 2 * jnp.pi * centres
+    mode_b = jnp.ones(b)
+
+    vg = gb_utils.vmap_g(x_b, p_b, mode_b, domain.c_fn)
+
+    return b_coeff / vg
 
 
 @overload
@@ -642,30 +687,13 @@ def compute_coefficients(
         If ``mode`` is invalid.
     """
     a_coeff = wpt.forward(p0, input_type)
-    b_coeff = wpt.forward(dpdt, input_type)
-
-    shapes = utils.compute_coeff_shapes(
-        wpt.dyadic_decomp, wpt.redundancy, jnp.arange(wpt.dyadic_decomp.num_levels)
-    )
-    cumsum = jnp.r_[0, jnp.cumsum(wpt.dyadic_decomp.num_boxes_ndim)]
-    nn_level, nn_idx = utils.find_tensor_and_multiindex(
-        jnp.arange(wpt.total_coeffs), shapes
-    )
-    b = nn_idx.shape[1]
-    x_b = _coefficient_positions(nn_level, nn_idx, wpt, domain)
-    box_idx = nn_idx[0, :] + cumsum[nn_level]
-    centres = wpt.dyadic_decomp.centres_ndim[box_idx] / domain.grid_size
-    p_b = 2 * jnp.pi * centres
-    mode_b = jnp.ones(b)
-
-    vg = gb_utils.vmap_g(x_b, p_b, mode_b, domain.c_fn)
-
-    cpos = 0.5 * (a_coeff + 1j * b_coeff / vg)
+    velocity = _velocity_half_wave_coefficients(dpdt, input_type, domain, wpt)
+    cpos = 0.5 * (a_coeff + 1j * velocity)
 
     if mode == "pos_only":
         return cpos * wpt.half_mask
     elif mode == "both":
-        cneg = 0.5 * (a_coeff - 1j * b_coeff / vg)
+        cneg = 0.5 * (a_coeff - 1j * velocity)
         return cpos, cneg
     else:
         raise ValueError(f"Invalid mode: {mode}")

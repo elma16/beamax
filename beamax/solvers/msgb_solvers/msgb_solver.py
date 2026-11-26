@@ -9,6 +9,7 @@ import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec, Mesh
 
 from beamax.solvers.msgb_solvers.forward_solver_utils import (
+    _uses_fourier_velocity,
     compute_coefficients,
     threshold_coefficients,
     compute_forward_parameters,
@@ -139,6 +140,15 @@ def _validate_time_grid(
             "ts must be finite, strictly increasing, and uniformly spaced."
         )
     return float((float(ts_np[-1]) - float(ts_np[0])) / (ts_np.size - 1))
+
+
+def _batch_beam_params(*arrays, batch_size, zero_padded_args):
+    """Keep an empty threshold selection as zero batches of the requested shape."""
+    if arrays[0].shape[0] == 0:
+        return tuple(a.reshape((0, batch_size) + a.shape[1:]) for a in arrays)
+    return utils.batch_data(
+        *arrays, batch_size=batch_size, zero_padded_args=zero_padded_args
+    )
 
 
 def form_adjoint_source(
@@ -781,7 +791,7 @@ class MSGBSolver(eqx.Module):
         wpt: MSWPT,
     ) -> Tuple[jnp.ndarray, ...]:
         """
-        Prepare beam parameters for a real-valued forward solve.
+        Prepare forward beams using the coefficient frame required by the renderer.
 
         Parameters
         ----------
@@ -799,37 +809,26 @@ class MSGBSolver(eqx.Module):
         Tuple[jnp.ndarray, ...]
             Beam parameters ``(p0s, M0s, x0s, omegas, a0s, modes)``.
         """
-        threshold = self.thr
-        if self.thr_strat == "top_n":
-            # Positive-half analysis cannot exceed half of each level.
-            threshold = self._effective_top_n(wpt, half_frame=True)
+        if dpdt is not None:
+            # The two propagation directions have different velocity polarisations.
+            return self._prepare_forward_params_both_modes(p0, dpdt, domain, wpt)
 
-        if dpdt is None:
-            # Zero initial velocity gives c+ = 0.5 WPT(p0).
-            if self._streams_top_n(wpt, p0.dtype):
-                coeff_pos_idx, max_pos_coeffs = streamed_top_n_coefficients(
-                    p0,
-                    wpt,
-                    top_n=int(threshold),
-                    input_type=self.input_type,
-                    positive_half=True,
-                    scale=0.5,
-                    boxes_per_chunk=self._boxes_per_chunk(),
-                )
-            else:
-                c_pos = 0.5 * wpt.forward(p0, self.input_type) * wpt.half_mask
-                coeff_pos_idx, max_pos_coeffs = threshold_coefficients(
-                    c_pos, threshold, self.thr_strat
-                )
-        else:
-            c_pos = compute_coefficients(
+        half_frame = self.use_real and wpt.has_conjugate_frame
+        threshold = self._effective_top_n(wpt, half_frame=half_frame)
+        if self._streams_top_n(wpt, p0.dtype):
+            coeff_pos_idx, max_pos_coeffs = streamed_top_n_coefficients(
                 p0,
-                dpdt,
-                self.input_type,
-                domain,
                 wpt,
-                mode="pos_only",
+                top_n=int(threshold),
+                input_type=self.input_type,
+                positive_half=half_frame,
+                scale=0.5,
+                boxes_per_chunk=self._boxes_per_chunk(),
             )
+        else:
+            c_pos = 0.5 * wpt.forward(p0, self.input_type)
+            if half_frame:
+                c_pos = c_pos * wpt.half_mask
             coeff_pos_idx, max_pos_coeffs = threshold_coefficients(
                 c_pos, threshold, self.thr_strat
             )
@@ -838,6 +837,9 @@ class MSGBSolver(eqx.Module):
             coeff_pos_idx, wpt, domain
         )
         a0s = a0s * max_pos_coeffs
+        if self.use_real and not half_frame:
+            # Full-frame real synthesis needs Re(u), while the real renderer sums 2 Re(u).
+            a0s = 0.5 * a0s
 
         params_to_concat = (p0s, M0s, x0s, ωs, a0s)
         p0s, M0s, x0s, ωs, a0s = tuple(
@@ -851,7 +853,7 @@ class MSGBSolver(eqx.Module):
             "pallas",
             "pallas_fused_hom_diag_3d",
         }:
-            p0s, M0s, x0s, ωs, a0s, modes = utils.batch_data(
+            p0s, M0s, x0s, ωs, a0s, modes = _batch_beam_params(
                 p0s,
                 M0s,
                 x0s,
@@ -863,11 +865,11 @@ class MSGBSolver(eqx.Module):
             )
         return (p0s, M0s, x0s, ωs, a0s, modes)
 
-    def _prepare_forward_params_complex(
+    def _prepare_forward_params_both_modes(
         self, p0: jnp.ndarray, dpdt: jnp.ndarray, domain: Domain, wpt: MSWPT
     ) -> Tuple[jnp.ndarray, ...]:
         """
-        Prepare beam parameters for a complex-valued forward solve.
+        Prepare independent signed half-waves for general initial data.
 
         Parameters
         ----------
@@ -889,9 +891,15 @@ class MSGBSolver(eqx.Module):
             p0, dpdt, self.input_type, domain, wpt, mode="both"
         )
 
-        (coeff_pos_idx, max_pos_coeffs), (coeff_neg_idx, max_neg_coeffs) = (
-            threshold_coefficients(c_pos, self._effective_top_n(wpt), self.thr_strat),
-            threshold_coefficients(c_neg, self._effective_top_n(wpt), self.thr_strat),
+        half_frame = self.use_real and wpt.has_conjugate_frame
+        if half_frame:
+            c_pos, c_neg = c_pos * wpt.half_mask, c_neg * wpt.half_mask
+        threshold = self._effective_top_n(wpt, half_frame=half_frame)
+        coeff_pos_idx, max_pos_coeffs = threshold_coefficients(
+            c_pos, threshold, self.thr_strat
+        )
+        coeff_neg_idx, max_neg_coeffs = threshold_coefficients(
+            c_neg, threshold, self.thr_strat
         )
 
         p0s, M0s, x0s, ωs, a0s, modes = compute_forward_parameters(
@@ -899,9 +907,15 @@ class MSGBSolver(eqx.Module):
         )
         max_coeffs = jnp.concatenate([max_pos_coeffs, max_neg_coeffs])
         a0s = a0s * max_coeffs
+        if self.use_real and not half_frame:
+            a0s = 0.5 * a0s
 
-        if self.aggregate_method in ["scan", "pallas"]:
-            p0s, M0s, x0s, ωs, a0s, modes = utils.batch_data(
+        if self._effective_forward_aggregate_method() in {
+            "scan",
+            "pallas",
+            "pallas_fused_hom_diag_3d",
+        }:
+            p0s, M0s, x0s, ωs, a0s, modes = _batch_beam_params(
                 p0s,
                 M0s,
                 x0s,
@@ -1108,13 +1122,15 @@ class MSGBSolver(eqx.Module):
         $$
 
         The ``dpdt`` argument supplies $\dot p_0$ and is zero for standard
-        photoacoustic tomography.
+        photoacoustic tomography. On a fully periodic grid with scalar sound
+        speed, the initial velocity is polarised at its individual Fourier
+        frequencies and its spatial mean is integrated separately. Other media
+        use the principal symbol at each packet's central frequency and position.
 
         Parameters
         ----------
         p0 : jnp.ndarray, shape (*N,)
-            Initial pressure field. Real or complex; dtype selects the
-            underlying beam formulation.
+            Initial pressure field. Complex data require a complex sum method.
         domain : Domain
             Computational domain and medium. A constant ``domain.lam``
             damps each beam amplitude by ``exp(-domain.lam * t / 2)``.
@@ -1249,18 +1265,14 @@ class MSGBSolver(eqx.Module):
                     "hom_diag_3d_pallas expects sensor positions of shape (Ns, 3)."
                 )
 
-        if input_is_complex:
-            effective_dpdt = jnp.zeros_like(p0) if dpdt is None else dpdt
-            params = self._prepare_forward_params_complex(
-                p0, effective_dpdt, domain, wpt
-            )
-        else:
-            params = self._prepare_forward_params_real(
-                p0,
-                None if dpdt_was_omitted else dpdt,
-                domain,
-                wpt,
-            )
+        mean_velocity = None
+        if dpdt is not None and _uses_fourier_velocity(domain):
+            if self.input_type == "fourier":
+                dc_index = tuple(n // 2 for n in domain.N)
+                mean_velocity = dpdt[dc_index] / math.sqrt(math.prod(domain.N))
+            else:
+                mean_velocity = jnp.mean(dpdt)
+        params = self._prepare_forward_params_real(p0, dpdt, domain, wpt)
 
         if use_sharding:
             assert self.sharding is not None  # implied by `use_sharding`
@@ -1283,6 +1295,15 @@ class MSGBSolver(eqx.Module):
             ),
         )
 
+        if mean_velocity is not None:
+            # The zero Fourier mode satisfies u'' + lam*u' = 0. It has
+            # no ray and contributes equally at all receivers.
+            integral = (
+                ts if domain.lam == 0 else -jnp.expm1(-domain.lam * ts) / domain.lam
+            )
+            sensor_data = sensor_data + (mean_velocity * integral).reshape(
+                (ts.size,) + (1,) * (sensor_data.ndim - 1)
+            )
         if use_sharding:
             sensor_data = self._replicate_array(sensor_data)
 

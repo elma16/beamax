@@ -348,7 +348,7 @@ class TestDiagnosticParamVariants:
             num_boxes_levels=(4,),
             box_aspect_ratio=(1,),
         )
-        wpt = MSWPT(decomp, redundancy=2, windowing="rectangular")
+        wpt = MSWPT(decomp, redundancy=2, windowing="rectangular_mirror")
         half_capacity = sum(
             (end - start) // 2
             for start, end in zip(wpt.coeffs_cumsum[:-1], wpt.coeffs_cumsum[1:])

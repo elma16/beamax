@@ -385,10 +385,10 @@ class MSWPT(eqx.Module):
     coeffs_cumsum: Tuple[int, ...] = eqx.field(static=True)
     max_box_length: int = eqx.field(static=True)
     total_coeffs: int = eqx.field(static=True)
+    has_conjugate_centres: bool = eqx.field(static=True)
     gfilts_packed: List
     _support_shapes: List[Tuple[int, ...]] = eqx.field(static=True)
     _box_shapes: List[Tuple[int, ...]] = eqx.field(static=True)
-    _half_mask: jnp.ndarray
 
     def __init__(self, dyadic_decomp, redundancy, windowing):
         """
@@ -456,22 +456,29 @@ class MSWPT(eqx.Module):
         )
         self.max_box_length = int(max_box_length)
         self._support_shapes = [shape[1:] for shape in self.coeff_shapes]
+        self.has_conjugate_centres = all(
+            (width // redundancy) % 2 == 0
+            for shape in self._support_shapes
+            for width in shape
+        )
         self._box_shapes = [
             tuple(width // 2 for width in shape) for shape in self._support_shapes
         ]
-        seg = [
-            self.coeffs_cumsum[i + 1] - self.coeffs_cumsum[i]
-            for i in range(dyadic_decomp.num_levels)
-        ]
-        self._half_mask = jnp.concatenate(
-            [jnp.concatenate([jnp.ones(L // 2), jnp.zeros(L - L // 2)]) for L in seg]
-        )
         self.gfilts_packed = self._compute_all_g_packed()
+
+    @property
+    def has_conjugate_frame(self) -> bool:
+        """Whether a half frame and its conjugate reproduce the full analysis."""
+        return self.has_conjugate_centres and self.windowing == "rectangular_mirror"
 
     @property
     def half_mask(self) -> jnp.ndarray:
         """Mask selecting one representative from each conjugate frame pair."""
-        return self._half_mask
+        lengths = [
+            end - start
+            for start, end in zip(self.coeffs_cumsum, self.coeffs_cumsum[1:])
+        ]
+        return jnp.concatenate([jnp.arange(length) < length // 2 for length in lengths])
 
     @eqx.filter_jit
     def _compute_sum_gsquare(self):
