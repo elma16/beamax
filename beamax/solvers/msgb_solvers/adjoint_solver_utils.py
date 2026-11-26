@@ -13,6 +13,17 @@ Array = jnp.ndarray
 __all__ = ["compute_adj_parameters", "principal_b_inverse"]
 
 
+def _advanced_b_inverse(omega_ang, gamma_ang, c, relative_guard):
+    """Terminal boundary multiplier for an angular normal frequency gamma."""
+    valid = (
+        (omega_ang != 0)
+        & (gamma_ang > 0)
+        & (gamma_ang > relative_guard * jnp.abs(omega_ang))
+    )
+    safe_gamma = jnp.where(valid, gamma_ang, 1.0)
+    return jnp.where(valid, 1j * jnp.sign(omega_ang) / (2 * c * safe_gamma), 0.0)
+
+
 def principal_b_inverse(
     tau: Array,
     k_tan: Array,
@@ -61,17 +72,7 @@ def principal_b_inverse(
 
     rad = omega_ang**2 - (c**2) * q_tan_sq
     gamma_ang = jnp.sqrt(jnp.maximum(rad, 0.0))
-    valid = (
-        (rad > 0.0)
-        & (jnp.abs(omega_ang) > 0.0)
-        & (gamma_ang > relative_guard * jnp.abs(omega_ang))
-    )
-    safe_gamma_ang = jnp.where(valid, gamma_ang, 1.0)
-    return jnp.where(
-        valid,
-        -1j * jnp.sign(omega_ang) / (2.0 * c * safe_gamma_ang),
-        0.0,
-    )
+    return -_advanced_b_inverse(omega_ang, gamma_ang, c, relative_guard)
 
 
 def compute_adj_parameters(

@@ -10,6 +10,8 @@ from beamax.surfaces import (
     DetectorSurface,
     match_packets,
     reduced_hessian,
+    ring_adjoint,
+    ring_dirichlet_from_source,
     surface_time_reversal,
 )
 
@@ -226,3 +228,64 @@ def test_surface_time_reversal_roi_matches_full_grid():
             **kw,
         )
         np.testing.assert_allclose(alternate, roi, atol=1e-5, rtol=1e-4)
+
+
+def test_ring_adjoint_pairing_uses_the_expected_measure():
+    centre, radius = (0.0016, 0.0016), 0.001
+    surf = DetectorSurface.circle(centre, radius, 32)
+    dom = Domain((32, 32), (1e-4, 1e-4), (False, False))
+    dd = Domain((32, 32), (5e-8, *surf.spacing), (False, True))
+    wpt = MSWPT(DyadicDecomposition(1, dd.N, (4,), (1, 1)), 2, "rectangular_mirror")
+    data = np.random.default_rng(10).normal(size=dd.N)
+    kw = dict(batch_size=16)
+    points = dom.grid[11:14, 18:22]
+    kw.update(centre=centre, radius=radius, eval_points=points)
+    by_sum, _ = ring_adjoint(data, dd, wpt, dom, 64, pairing="element_sum", **kw)
+    by_arc, _ = ring_adjoint(data, dd, wpt, dom, 64, pairing="arc_length", **kw)
+    assert np.linalg.norm(by_arc) > 0
+    np.testing.assert_allclose(
+        by_sum * (2 * np.pi * radius / 32), by_arc, rtol=5e-4, atol=2e-8
+    )
+
+
+def test_ring_symbol_discards_evanescent_mode_and_rejects_unknown_symbol():
+    # An angular Nyquist mode lies outside the propagating cone at every time frequency.
+    F = np.tile((-1.0) ** np.arange(16), (8, 1))
+    for symbol in ("exact", "principal"):
+        np.testing.assert_allclose(
+            ring_dirichlet_from_source(F, 1.0, 1.0, 1500.0, symbol), 0
+        )
+    with pytest.raises(ValueError, match="symbol"):
+        ring_dirichlet_from_source(F, 1.0, 1.0, 1500.0, "typo")
+    with pytest.raises(ValueError, match="must be real"):
+        ring_dirichlet_from_source(F * 1j, 1.0, 1.0, 1500.0)
+    with pytest.raises(ValueError, match="finite and positive"):
+        ring_dirichlet_from_source(F, 1.0, 1.0, 0.0)
+    with pytest.raises(ValueError, match="guard"):
+        ring_dirichlet_from_source(F, 1.0, 1.0, 1500.0, guard=1.0)
+
+
+def test_ring_acquisition_contract():
+    centre = (1.0, 1.0)
+    surface = DetectorSurface.circle(centre, 0.5, 8)
+    domain = Domain((8, 8), (0.25,) * 2, (False,) * 2)
+    acquisition = Domain((8, 8), (0.1, *surface.spacing), (False, True))
+    wpt = MSWPT(
+        DyadicDecomposition(1, acquisition.N, (4,), (1, 1)), 2, "rectangular_mirror"
+    )
+    kw = dict(centre=centre, radius=0.5, pairing="element_sum")
+    data = np.zeros(acquisition.N)
+    with pytest.raises(ValueError, match="acquisition grid"):
+        ring_adjoint(data[0], acquisition, wpt, domain, 8, **kw)
+    with pytest.raises(ValueError, match="real and finite"):
+        ring_adjoint(data + np.nan, acquisition, wpt, domain, 8, **kw)
+    short = Domain((1, 8), acquisition.dx, acquisition.periodic)
+    with pytest.raises(ValueError, match="at least two times"):
+        ring_adjoint(data[:1], short, wpt, domain, 8, **kw)
+    with pytest.raises(ValueError, match="common sound speed"):
+        ring_adjoint(data, acquisition, wpt, domain, 8, boundary_speed=10.0, **kw)
+    with pytest.raises(ValueError, match="pairing"):
+        ring_adjoint(data, acquisition, wpt, domain, 8, **(kw | {"pairing": "linear"}))
+    damped = Domain(domain.N, domain.dx, domain.periodic, c=domain.c, lam=0.4)
+    with pytest.raises(NotImplementedError, match="requires a lossless domain"):
+        ring_adjoint(data, acquisition, wpt, damped, 8, **kw)

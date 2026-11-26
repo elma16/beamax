@@ -246,6 +246,44 @@ def surface_time_reversal(
     ``eval_points`` has shape ``(..., ndim)``. Its leading dimensions and
     point order are preserved in the reconstruction.
     """
+    return _backpropagate_surface(
+        data,
+        data_domain,
+        data_wpt,
+        surface,
+        domain,
+        top_n,
+        surface_tr_parameters,
+        include_Q=include_Q,
+        batch_size=batch_size,
+        ode_solver=ode_solver,
+        solver_config=solver_config,
+        eval_points=eval_points,
+        keep_fn=keep_fn,
+        aggregate_method=aggregate_method,
+        pallas_config=pallas_config,
+    )
+
+
+def _backpropagate_surface(
+    data,
+    data_domain,
+    data_wpt,
+    surface,
+    domain,
+    top_n,
+    parameter_fn,
+    *,
+    include_Q=True,
+    batch_size=256,
+    ode_solver=None,
+    solver_config=None,
+    eval_points=None,
+    keep_fn=None,
+    aggregate_method="scan",
+    pallas_config=None,
+):
+    """Select and render real boundary packets using the supplied launch parameters."""
     if aggregate_method not in ("scan", "terminal_xla", "pallas", "all"):
         raise ValueError("aggregate_method must be scan, terminal_xla, pallas or all.")
     if domain.ndim != surface.ndim or any(domain.periodic):
@@ -275,7 +313,7 @@ def surface_time_reversal(
             gb_solvers.solve_hom_TR if homogeneous else gb_solvers.solve_ODE_batch_t
         )
     coeff_idx, values = boundary_coefficients(data, data_wpt, top_n)
-    params, diag = surface_tr_parameters(
+    params, diag = parameter_fn(
         coeff_idx, data_domain, data_wpt, surface, domain.c_fn, include_Q
     )
     pts, Mts, xts, oms, ats, signum, ts = params
