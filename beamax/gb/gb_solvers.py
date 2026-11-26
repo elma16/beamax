@@ -357,7 +357,7 @@ def compute_m_hom_diag(
     ts: jnp.ndarray,
 ) -> jnp.ndarray:
     r"""
-    $M(t)$ with diagonal M0 via Sherman–Morrison.
+    $M(t)$ with diagonal M0 via Sherman-Morrison.
 
     Parameters
     ----------

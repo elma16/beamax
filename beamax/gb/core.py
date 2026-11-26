@@ -103,7 +103,7 @@ def compute_diff(
     periodic: Bool[Array, " d"],
 ) -> Float[Array, "b t *S d"]:
     r"""
-    Sensor–ray displacement with periodic wrap.
+    Sensor-ray displacement with periodic wrap.
 
     Parameters
     ----------
