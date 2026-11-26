@@ -602,7 +602,7 @@ class KWaveSolver:
         Parameters
         ----------
         data : np.ndarray or jnp.ndarray, shape (Ns, Nt) or (Nt, Ns)
-            Sensor measurements.
+            Sensor measurements with one sample per time point in ``ts``.
         domain : Domain
             Reconstruction domain.
         sensors : array-like
@@ -634,6 +634,11 @@ class KWaveSolver:
             data_layout=data_layout,
             op_name="time_reversal",
         )
+        nt = np.size(ts)
+        if sensor_data.shape[1] != nt:
+            raise ValueError(
+                f"Expected {nt} time samples to match ts, got {sensor_data.shape[1]}."
+            )
 
         sensor_data_rev = np.flip(sensor_data, axis=1)
 
@@ -665,7 +670,7 @@ class KWaveSolver:
         Parameters
         ----------
         data : array, shape (Ns, Nt) or (Nt, Ns)
-            Sensor measurements.
+            Sensor measurements with one sample per time point in ``ts``.
         domain : Domain
         sensors : array
             Sensor mask.
@@ -675,6 +680,8 @@ class KWaveSolver:
         record : {"p_final"}
             Terminal pressure field. Other records cannot be converted to the
             initial-pressure transpose and are therefore rejected.
+        data_layout : {"auto", "ns_nt", "nt_ns"}, default="auto"
+            Sensor-data layout interpretation.
 
         Returns
         -------
@@ -684,9 +691,10 @@ class KWaveSolver:
 
         Notes
         -----
-        The returned field is the algebraic transpose under unweighted
-        discrete sums. To represent a one-cell planar detector under the
-        continuous surface and volume rectangle rules of Arridge et al. (2016), multiply this
+        This implementation requires a lossless medium. The returned field
+        is the algebraic transpose under unweighted discrete sums.
+        To represent a one-cell planar detector under the continuous surface
+        and volume rectangle rules of Arridge et al. (2016), multiply the
         result by $\Delta t/\Delta x_{\mathrm{normal}}$.
 
         The source is Eq. (B.2) of Arridge et al. (2016). k-Wave's additive
@@ -730,6 +738,12 @@ class KWaveSolver:
                 "The scaled k-Wave adjoint currently requires isotropic grid "
                 f"spacing; got domain.dx={domain.dx}."
             )
+        if domain.alpha_coeff is not None and np.any(
+            np.asarray(domain.alpha_coeff_array) != 0
+        ):
+            raise NotImplementedError(
+                "The discrete k-Wave adjoint requires a lossless medium (alpha_coeff=0)."
+            )
 
         dt = _uniform_time_step(ts)
 
@@ -741,6 +755,11 @@ class KWaveSolver:
             data_layout=data_layout,
             op_name="adjoint",
         )
+        nt = np.size(ts)
+        if sensor_data.shape[1] != nt:
+            raise ValueError(
+                f"Expected {nt} time samples to match ts, got {sensor_data.shape[1]}."
+            )
         beta = self._build_adjoint_source(sensor_data)
 
         sound_speed = np.asarray(domain.sound_speed_array, dtype=float)

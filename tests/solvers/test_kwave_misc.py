@@ -230,7 +230,12 @@ def test_run_simulation_rejects_spatially_varying_alpha_power(monkeypatch):
         )
 
 
-def test_adjoint_applies_appendix_b_source_and_terminal_scalings(monkeypatch):
+@pytest.mark.parametrize(
+    "alpha_coeff", [None, np.zeros((3, 2))], ids=["default", "zero"]
+)
+def test_adjoint_applies_appendix_b_source_and_terminal_scalings(
+    monkeypatch, alpha_coeff
+):
     """The wrapper should expose the Euclidean transpose, not raw p_final."""
     solver = KWaveSolver(backend="python", smooth_p0=False)
     domain = Domain(
@@ -239,6 +244,7 @@ def test_adjoint_applies_appendix_b_source_and_terminal_scalings(monkeypatch):
         c=2.0,
         density=3.0,
         periodic=(False, False),
+        alpha_coeff=alpha_coeff,
     )
     source_mask = np.zeros(domain.N)
     source_mask[0, :] = 1
@@ -342,3 +348,48 @@ def test_cpp_forward_preserves_requested_time_and_sensor_axes(
     np.testing.assert_array_equal(
         result, np.arange(len(times))[:, None] + pressure[mask]
     )
+
+
+@pytest.mark.parametrize("operation", ["time_reversal", "adjoint"])
+@pytest.mark.parametrize(("sample_count", "data_layout"), [(5, "nt_ns"), (9, "ns_nt")])
+def test_inverse_rejects_mismatched_time_samples(
+    operation, sample_count, data_layout, monkeypatch
+):
+    solver = KWaveSolver()
+    domain = Domain(N=(8, 8), dx=(1.0, 1.0), c=1.0, periodic=(False, False))
+    mask = np.zeros(domain.N)
+    mask[0, :2] = 1
+    data = np.zeros((sample_count, 2))
+    if data_layout == "ns_nt":
+        data = data.T
+
+    def unexpected_simulation(*args, **kwargs):
+        pytest.fail("Mismatched time samples reached k-Wave.")
+
+    monkeypatch.setattr(solver, "_run_simulation", unexpected_simulation)
+    with pytest.raises(ValueError, match="time samples"):
+        getattr(solver, operation)(
+            data, domain, mask, mask, np.arange(7.0), data_layout=data_layout
+        )
+
+
+@pytest.mark.parametrize("alpha_coeff", [0.5, np.eye(8)], ids=["scalar", "spatial"])
+def test_adjoint_rejects_nonzero_absorption(alpha_coeff, monkeypatch):
+    solver = KWaveSolver()
+    domain = Domain(
+        N=(8, 8),
+        dx=(1.0, 1.0),
+        c=1.0,
+        periodic=(False, False),
+        alpha_coeff=alpha_coeff,
+        alpha_power=1.5,
+    )
+    mask = np.zeros(domain.N)
+    mask[0, :2] = 1
+
+    def unexpected_simulation(*args, **kwargs):
+        pytest.fail("A lossy adjoint input reached k-Wave.")
+
+    monkeypatch.setattr(solver, "_run_simulation", unexpected_simulation)
+    with pytest.raises(NotImplementedError, match="lossless"):
+        solver.adjoint(np.zeros((2, 7)), domain, mask, mask, np.arange(7.0))
