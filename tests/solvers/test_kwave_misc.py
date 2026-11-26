@@ -307,3 +307,38 @@ def test_adjoint_rejects_nonlinear_restore_max_smoothing():
             np.array([0.0, 0.01, 0.02]),
             data_layout="ns_nt",
         )
+
+
+@pytest.mark.parametrize(
+    "sensor_count", [1, 2, 3], ids=["single", "rectangular", "square"]
+)
+def test_cpp_forward_preserves_requested_time_and_sensor_axes(
+    sensor_count, monkeypatch
+):
+    domain = Domain(N=(8, 8), dx=(0.01, 0.01), c=1.0, periodic=(False, False))
+    pressure = np.arange(64.0).reshape(domain.N)
+    mask = np.zeros(domain.N, dtype=bool)
+    for point in [(0, 2), (1, 1), (2, 0)][:sensor_count]:
+        mask[point] = True
+    times = np.arange(3, dtype=np.float32) * np.float32(2e-8)
+    solver = KWaveSolver(backend="cpp")
+    requested_grid = solver._create_kgrid(domain, times)
+
+    def cpp_trace(grid, medium, source, sensor, **kwargs):
+        expected_steps = len(times) + int(sensor_count == len(times))
+        assert grid.Nt == expected_steps
+        assert grid.dt == requested_grid.dt
+        values = source.p0.ravel(order="F")[sensor.mask.ravel(order="F")]
+        return {"p": (np.arange(grid.Nt)[:, None] + values).squeeze()}
+
+    monkeypatch.setattr(
+        kwave_solver_module, "_configure_cpp_binary_kwargs", lambda kwargs: None
+    )
+    monkeypatch.setattr(kwave_solver_module, "kspaceFirstOrder", cpp_trace)
+
+    result = solver.forward(pressure, domain, mask, times)
+
+    assert result.shape == (len(times), sensor_count)
+    np.testing.assert_array_equal(
+        result, np.arange(len(times))[:, None] + pressure[mask]
+    )

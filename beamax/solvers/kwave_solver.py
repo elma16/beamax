@@ -317,6 +317,7 @@ class KWaveSolver:
         sensor: kSensor,
         *,
         force_python: bool = False,
+        extra_time_step: bool = False,
     ) -> dict[str, Any]:
         """
         Run K-Wave simulation with current configuration.
@@ -335,6 +336,8 @@ class KWaveSolver:
             Force the Python backend even when C++ is configured. Used for
             time-varying source simulations where the C++ backend lacks
             source-term preprocessing.
+        extra_time_step : bool, default=False
+            Extend the validated grid by one time step at the same spacing.
 
         Returns
         -------
@@ -343,6 +346,8 @@ class KWaveSolver:
             :func:`kwave.kspaceFirstOrder`.
         """
         kgrid = self._create_kgrid(domain, ts)
+        if extra_time_step:
+            kgrid.setTime(len(ts) + 1, kgrid.dt)
 
         kwargs = self._kwargs_for_domain(domain)
         if force_python:
@@ -424,17 +429,28 @@ class KWaveSolver:
             else kSensor(mask=sensor_mask, record=[record])
         )
 
-        result = self._run_simulation(domain, ts, source, sensor)
+        nt = np.size(ts)
+        ns = int(np.count_nonzero(sensor_mask))
+        simulation_nt = nt
+        if backend == "cpp" and nt == ns and not self._solver_kwargs.get("save_only"):
+            # k-Wave can mistake the time axis of a square C++ trace for the
+            # sensor axis. One more step makes the output shape unambiguous.
+            result = self._run_simulation(
+                domain, ts, source, sensor, extra_time_step=True
+            )
+            simulation_nt += 1
+        else:
+            result = self._run_simulation(domain, ts, source, sensor)
 
         out = np.array(result[record])
-        nt = len(ts)
-        ns = int(np.count_nonzero(sensor_mask))
-        if out.ndim == 2 and out.shape == (ns, nt):
+        if record == "p" and out.ndim == 1 and ns == 1:
+            out = out[:, None]
+        if out.ndim == 2 and out.shape == (ns, simulation_nt):
             out = out.T
 
-        # C++ enumerates masks in Fortran order; the public API uses C order.
-        if backend == "cpp" and out.ndim == 2 and out.shape == (nt, ns):
-            out = out[:, self._cpp_sensor_channels_to_c_order(sensor_mask)]
+        # Return the requested time samples with sensor channels in C order.
+        if backend == "cpp" and out.ndim == 2 and out.shape == (simulation_nt, ns):
+            out = out[:nt, self._cpp_sensor_channels_to_c_order(sensor_mask)]
 
         return out
 
