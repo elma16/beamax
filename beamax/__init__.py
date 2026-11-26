@@ -21,12 +21,13 @@ __all__ = [
     "utils",
     "plotter",
     "solvers",
+    "surfaces",
 ]
 
 
 def __getattr__(name: str) -> Any:
     """Load a public submodule on first access."""
-    if name in {"coefficients", "gb", "utils", "plotter", "solvers"}:
+    if name in {"coefficients", "gb", "utils", "plotter", "solvers", "surfaces"}:
         mod: ModuleType = import_module(f"{__name__}.{name}")
         globals()[name] = mod
         return mod

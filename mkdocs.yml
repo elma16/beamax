@@ -82,6 +82,7 @@ nav:
       - decomposition: api/decomposition.md
       - coefficients: api/coefficients.md
       - geometry: api/geometry.md
+      - Detector surfaces: api/surfaces.md
       - transforms: api/transforms.md
       - plotter: api/plotter.md
       - utils: api/utils.md
