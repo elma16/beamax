@@ -291,16 +291,13 @@ def _sum_gaussian_beam_real_components_xla(
         ) * jnp.exp(-frequency * decay_quadratic)
         return accumulator + contribution, None
 
+    beams = (xt, pt, matrix_real, matrix_imag, amplitude_real, amplitude_imag, omega0)
     initial = (
-        jnp.zeros((num_times, num_sensors), dtype=xt.dtype)
+        jnp.zeros((num_times, num_sensors), dtype=jnp.result_type(*beams, sensors))
         if initial_field is None
         else initial_field
     )
-    result, _ = jax.lax.scan(
-        add_beam,
-        initial,
-        (xt, pt, matrix_real, matrix_imag, amplitude_real, amplitude_imag, omega0),
-    )
+    result, _ = jax.lax.scan(add_beam, initial, beams)
     return result
 
 

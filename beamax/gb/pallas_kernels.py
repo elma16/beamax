@@ -969,8 +969,13 @@ def _complex_divide(ar, ai, br, bi):
 def _complex_square_root(real, imag):
     """Principal complex square root using Pallas-supported real primitives."""
     magnitude = jnp.sqrt(real * real + imag * imag)
-    root_real = jnp.sqrt(jnp.maximum(0.5 * (magnitude + real), 0.0))
-    root_imag_abs = jnp.sqrt(jnp.maximum(0.5 * (magnitude - real), 0.0))
+    large_component = jnp.sqrt(0.5 * (magnitude + jnp.abs(real)))
+    # Twice the product of the root components equals the input imaginary part.
+    small_component = jnp.abs(imag) / jnp.where(
+        large_component == 0, 1.0, 2.0 * large_component
+    )
+    root_real = jnp.where(real >= 0, large_component, small_component)
+    root_imag_abs = jnp.where(real >= 0, small_component, large_component)
     root_imag = jnp.where(imag < 0.0, -root_imag_abs, root_imag_abs)
     return root_real, root_imag
 
@@ -1401,11 +1406,12 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
             root_real, root_imag = _complex_square_root(
                 denominator_real, denominator_imag
             )
+            root_sign = jnp.where(root_imag * (signed_c * times) < 0, -1.0, 1.0)
             amplitude_real, amplitude_imag = _complex_divide(
                 a0_real_ref[beam_idx],
                 a0_imag_ref[beam_idx],
-                root_real,
-                root_imag,
+                root_sign * root_real,
+                root_sign * root_imag,
             )
             phase_linear = sum(
                 delta[axis] * momentum for axis, momentum in enumerate((px, py, pz))

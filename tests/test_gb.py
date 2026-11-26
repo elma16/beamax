@@ -953,3 +953,108 @@ def test_beam_intervals_integrate_constant_absorption(solver, saved_times):
     expected = a[:, None, None] * jnp.exp(-0.5 * lam * elapsed)[..., None]
     assert amplitudes.shape == expected[:, saved_times].shape
     assert jnp.allclose(amplitudes, expected[:, saved_times], rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+@pytest.mark.parametrize(
+    "solver",
+    [gb_solvers.solve_hom_diag, gb_solvers.solve_hom_general, gb_solvers.solve_hom_TR],
+)
+def test_focusing_homogeneous_amplitude_and_derivative(dtype, solver):
+    x = jnp.zeros((2, 3), dtype=dtype)
+    p = jnp.array([[1, 0, 0], [1, 0, 0]], dtype=dtype)
+    mode = jnp.array([1, -1], dtype=dtype)
+    amplitude = jnp.ones(2, dtype=dtype) + 0j
+    times = jnp.linspace(4, 5, 5, dtype=dtype)
+    elapsed = times - times[0]
+    lam = 0.4
+
+    def exact(focus):
+        transverse = -focus * mode + 1j
+        factor = 1 + mode[:, None] * elapsed * transverse[:, None]
+        # For two identical transverse factors, the continued root is the factor itself.
+        return jnp.exp(-0.5 * lam * elapsed) / factor
+
+    def solve(focus):
+        transverse = -focus * mode + 1j
+        diagonal = jnp.stack(
+            [1j * jnp.ones_like(mode), transverse, transverse], axis=-1
+        )
+        hessian = jax.vmap(jnp.diag)(diagonal)
+        return solver(x, p, hessian, amplitude, mode, times, c, lam)[-1][..., 0]
+
+    focus = jnp.asarray(2, dtype=dtype)
+    tangent = jnp.ones_like(focus)
+    expected, expected_slope = jax.jvp(exact, (focus,), (tangent,))
+    actual, slope = jax.jvp(solve, (focus,), (tangent,))
+
+    assert actual.dtype == expected.dtype
+    assert jnp.allclose(actual, expected, rtol=2e-6, atol=2e-6)
+    assert jnp.allclose(slope, expected_slope, rtol=2e-6, atol=2e-6)
+
+
+def test_general_spreading_phase_with_three_transverse_factors():
+    x = jnp.zeros((1, 4))
+    p = jnp.array([[1.0, 0.0, 0.0, 0.0]])
+    amplitude = jnp.ones(1) + 0j
+    mode = jnp.ones(1)
+    times = jnp.array([4.0, 5.0])
+
+    def terminal(focus):
+        curvature = -focus + 1j
+        hessian = jnp.diag(jnp.stack([1j, curvature, curvature, curvature]))[None]
+        return gb_solvers.solve_hom_general(x, p, hessian, amplitude, mode, times, c)[
+            -1
+        ][0, -1, 0]
+
+    def exact(focus):
+        return jnp.sqrt(1 - focus + 1j) ** -3
+
+    focus = jnp.asarray(2.0)
+    tangent = jnp.ones_like(focus)
+    expected, expected_slope = jax.jvp(exact, (focus,), (tangent,))
+    actual, slope = jax.jvp(terminal, (focus,), (tangent,))
+    assert jnp.allclose(actual, expected, rtol=1e-12, atol=1e-12)
+    assert jnp.allclose(slope, expected_slope, rtol=1e-12, atol=1e-12)
+
+
+def test_focused_numerical_beam_preserves_float32_state():
+    x = jnp.zeros((1, 3), dtype=jnp.float32)
+    p = jnp.array([[1, 0, 0]], dtype=jnp.float32)
+    m = jnp.diag(jnp.array([1j, -2 + 1j, -2 + 1j], dtype=jnp.complex64))[None]
+    a = jnp.ones(1, dtype=jnp.complex64)
+    mode = jnp.ones(1, dtype=jnp.float32)
+    times = jnp.linspace(4, 5, 5, dtype=jnp.float32)
+    elapsed = times - times[0]
+    lam = 0.4
+    config = gb_solvers.SolverConfig(dt0=0.01, rtol=2e-7, atol=2e-8)
+
+    _, _, hessian, amplitude = gb_solvers.solve_ODE_base(
+        x, p, m, a, mode, times, c, lam, config
+    )
+    expected = jnp.exp(-0.5 * lam * elapsed) / (1 + elapsed * (-2 + 1j))
+
+    assert hessian.dtype == amplitude.dtype == jnp.complex64
+    assert jnp.allclose(amplitude[0, :, 0], expected, rtol=1e-5, atol=2e-6)
+
+
+def test_real_beam_accepts_float64_sensors_with_float32_state():
+    dtype = jnp.float32
+    x = jnp.zeros((1, 3), dtype=dtype)
+    p = jnp.array([[1, 0, 0]], dtype=dtype)
+    m = 1j * jnp.eye(3, dtype=dtype)[None]
+    a = jnp.ones(1, dtype=jnp.complex64)
+    mode = jnp.ones(1, dtype=dtype)
+    omega = jnp.ones(1, dtype=jnp.float64)
+    times = jnp.linspace(0, 1, 3, dtype=dtype)
+    sensors = jnp.array([[0.01, 0, 0.5]], dtype=jnp.float64)
+    domain_size = jnp.ones(3, dtype=dtype)
+    periodic = jnp.zeros(3, dtype=bool)
+    args = (x, p, m, a, omega, mode, c, 0.0, times, sensors, domain_size, periodic)
+
+    actual = core.compute_gaussian_beam_real(*args, gb_solvers.solve_hom_diag)
+    complex_field = core.compute_gaussian_beam(*args, gb_solvers.solve_hom_diag)
+    expected = 2 * jnp.sum(complex_field.real, axis=-1)
+
+    assert actual.dtype == expected.dtype == jnp.float64
+    assert jnp.allclose(actual, expected, rtol=2e-6, atol=2e-6)

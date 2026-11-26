@@ -10,6 +10,7 @@ import pytest
 from beamax.gb import core, gb_solvers
 from beamax.gb.pallas_config import PallasConfig
 from beamax.gb.pallas_kernels import (
+    _complex_square_root,
     sum_gaussian_beam_real_hom_diag_3d_pallas,
 )
 from beamax.solvers.msgb_solvers.forward_solver_utils import compute_forward_result
@@ -243,6 +244,55 @@ def test_fused_forward_aggregation_applies_absorption_across_batches():
 
     expected = _trajectory_oracle(*args) * jnp.exp(-0.5 * lam * times)[:, None]
     np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
+
+
+def test_spreading_root_preserves_small_components_near_real_axis():
+    real = jnp.array([1, -1], dtype=jnp.float32)
+    imag = jnp.array([1e-5, -1e-5], dtype=jnp.float32)
+
+    root_real, root_imag = jax.jit(_complex_square_root)(real, imag)
+    expected = np.sqrt(np.asarray(real + 1j * imag))
+
+    np.testing.assert_allclose(root_real, expected.real, rtol=1e-6, atol=1e-12)
+    np.testing.assert_allclose(root_imag, expected.imag, rtol=1e-6, atol=1e-12)
+
+
+@pytest.mark.parametrize("mode_sign", [1.0, -1.0])
+def test_fused_double_focus_preserves_amplitude_and_derivative(mode_sign):
+    unit = jnp.ones(1, dtype=jnp.float32)
+    p = jnp.array([[1, 0, 0]], dtype=jnp.float32)
+    transverse = -2 * mode_sign + 1j
+    m = jnp.diag(jnp.array([1j, transverse, transverse], dtype=jnp.complex64))[None]
+    times = jnp.array([4, 4.5, 5], dtype=jnp.float32)
+    carry = jnp.ones((3, 1), dtype=jnp.float32)
+    config = PallasConfig(sensor_block_size=4, gpu_time_block_size=2)
+
+    def terminal(coeff):
+        a = (coeff[0] + 1j * coeff[1])[None]
+        return sum_gaussian_beam_real_hom_diag_3d_pallas(
+            jnp.zeros_like(p),
+            p,
+            m,
+            a,
+            unit,
+            mode_sign * unit,
+            unit[0],
+            times,
+            mode_sign * p,
+            jnp.ones(3, dtype=jnp.float32),
+            jnp.zeros(3, dtype=bool),
+            lam=0.4,
+            config=config,
+            initial_field=carry,
+            interpret=True,
+        )[-1, 0]
+
+    expected_slope = jnp.array([-1, mode_sign], dtype=jnp.float32) * jnp.exp(-0.2)
+    coeff = jnp.array([1, 0.5], dtype=jnp.float32)
+    np.testing.assert_allclose(terminal(coeff), 1 + expected_slope @ coeff, atol=2e-6)
+    np.testing.assert_allclose(
+        jax.grad(terminal)(jnp.zeros_like(coeff)), expected_slope, atol=2e-6
+    )
 
 
 def test_fused_kernel_static_periodic_specialization_matches_runtime_flags():

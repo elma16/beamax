@@ -100,6 +100,25 @@ class SolverFn(Protocol):
         ...
 
 
+def _continuous_determinant_root(interior, signed_time):
+    """Follow the spreading determinant's square root from one at launch."""
+    root = jnp.sqrt(jnp.linalg.det(interior))
+    dimension = interior.shape[-1]
+    if dimension <= 2:
+        return root
+    if dimension == 3:
+        # The two transverse factors are in the half-plane set by signed_time.
+        # Their continued root has the same sign of its imaginary part.
+        return jnp.where(root.imag * signed_time < 0, -root, root)
+
+    # With more transverse factors the phase can wind further. Use their
+    # individual roots for the sign and differentiate the determinant so
+    # repeated eigenvalues keep a smooth derivative.
+    eigenvalues = jnp.linalg.eigvals(jax.lax.stop_gradient(interior))
+    continued = jnp.prod(jnp.sqrt(eigenvalues), axis=-1)
+    return jnp.where((root * jnp.conj(continued)).real < 0, -root, root)
+
+
 def compute_amp_hom_gen(
     p0: jnp.ndarray,
     m0: jnp.ndarray,
@@ -127,9 +146,11 @@ def compute_amp_hom_gen(
         I+\frac{c_0t}{\lVert p_0\rVert}P_\perp M_0
         \right)}}.
         $$
+
+    The determinant root is continued from one at launch.
     """
     d = p0.shape[-1]
-    id = rearrange(jnp.eye(d), "i j -> 1 1 i j")
+    id = rearrange(jnp.eye(d, dtype=p0.dtype), "i j -> 1 1 i j")
     p0 = rearrange(p0, "b d -> b 1 d 1")
     normp = jnp.linalg.norm(p0, axis=-2, keepdims=True)
     c0 = rearrange(c0, "b 1 -> b 1 1 1")
@@ -159,10 +180,10 @@ def compute_amp_hom_gen(
         )
         / normp
     )
-    det = jnp.sqrt(jnp.linalg.det(interior))
-    det = rearrange(det, "b t -> b t 1 1")
+    root = _continuous_determinant_root(interior, (c0 * ts)[..., 0, 0])
+    root = rearrange(root, "b t -> b t 1 1")
     a0 = rearrange(a0, "b -> b 1 1 1")
-    at = a0 / det
+    at = a0 / root
     at = rearrange(at, "b t 1 1 -> b t 1")
 
     return at
@@ -194,7 +215,7 @@ def compute_m_hom_gen(
         $$
     """
     d = p0.shape[-1]
-    id = rearrange(jnp.eye(d), "i j -> 1 1 i j")
+    id = rearrange(jnp.eye(d, dtype=p0.dtype), "i j -> 1 1 i j")
     p0 = rearrange(p0, "b d -> b 1 d 1")
     normp = jnp.linalg.norm(p0, axis=-2, keepdims=True)
     c0 = rearrange(c0, "b 1 -> b 1 1 1")
@@ -291,7 +312,7 @@ def compute_amp_hom_diag_3d(
     Returns
     -------
     jnp.ndarray, shape (b, Nt)
-        Closed-form 3D expression combining axis terms (see source).
+        Closed-form 3D amplitude with the spreading root continued from launch.
     """
     p1, p2, p3 = p0[:, 0] ** 2, p0[:, 1] ** 2, p0[:, 2] ** 2
     a1 = alpha0[:, 0][:, jnp.newaxis]
@@ -308,7 +329,9 @@ def compute_amp_hom_diag_3d(
         + p2[:, jnp.newaxis] * term2
         + p3[:, jnp.newaxis] * term3
     )
-    return a0[:, jnp.newaxis] / jnp.sqrt(denominator)
+    root = jnp.sqrt(denominator)
+    root = jnp.where(root.imag * (c0 * ts) < 0, -root, root)
+    return a0[:, jnp.newaxis] / root
 
 
 def compute_amp_hom_diag(
@@ -381,7 +404,7 @@ def compute_m_hom_diag(
     alpha0 = rearrange(alpha0, "b d -> b 1 d 1")
     normp = rearrange(normp, "b 1 -> b 1 1 1")
     ts = rearrange(ts, "nt -> 1 nt 1 1")
-    eye = rearrange(jnp.eye(d), "i j -> 1 1 i j")
+    eye = rearrange(jnp.eye(d, dtype=p0.dtype), "i j -> 1 1 i j")
 
     N0 = alpha0 * eye
     A_diag = 1 + c0 * ts * alpha0 / normp
@@ -469,7 +492,7 @@ def solve_hom_diag(
     nt = ts.shape[0]
     ts = ts - ts[0]
 
-    c0 = c(jnp.zeros((d,))) * mode[..., None]
+    c0 = c(jnp.zeros((d,), dtype=x0.dtype)) * mode[..., None]
     normp = jnp.linalg.norm(p0, axis=-1, keepdims=True)
 
     xt = x0[:, None, :] + c0[:, None, :] * (p0 / normp)[:, None, :] * ts[None, :, None]
@@ -534,7 +557,7 @@ def solve_hom_general(
     """
     d = p0.shape[-1]
     ts = ts - ts[0]
-    c0 = c(jnp.zeros((d,))) * mode[..., None]
+    c0 = c(jnp.zeros((d,), dtype=x0.dtype)) * mode[..., None]
     normp = jnp.linalg.norm(p0, axis=-1, keepdims=True)
 
     xt = x0[:, None, :] + c0[:, None, :] * (p0 / normp)[:, None, :] * ts[None, :, None]
@@ -626,8 +649,8 @@ def solve_hom_TR(
     else:
         raise ValueError(f"Expected shared or per-beam time grids, got {ts_arr.shape}.")
 
-    id = rearrange(jnp.eye(d), "i j -> 1 1 i j")
-    c0 = c(jnp.zeros((d,))) * mode[:, None]
+    id = rearrange(jnp.eye(d, dtype=pT.dtype), "i j -> 1 1 i j")
+    c0 = c(jnp.zeros((d,), dtype=xT.dtype)) * mode[:, None]
     p0 = pT
 
     normp = jnp.linalg.norm(p0, axis=-1, keepdims=True)
@@ -668,7 +691,8 @@ def solve_hom_TR(
         precision=jax.lax.Precision.HIGHEST,
     )
 
-    a0 = aT[:, None, :] / jnp.sqrt(jnp.linalg.det(interior))[..., None]
+    root = _continuous_determinant_root(interior, c0 * dt)
+    a0 = aT[:, None, :] / root[..., None]
     if lam is not None:
         a0 = a0 * jnp.exp(-0.5 * lam * dt)[..., None]
 
@@ -884,7 +908,9 @@ def riccati_rhs(M, x, p, mode, c):
     grad_c = grad(c)(x)
     hess_c = hessian(c)(x)
 
-    Gpp = mode * c_val * (jnp.eye(d) / normp - jnp.outer(p, p) / normp**3)
+    Gpp = (
+        mode * c_val * (jnp.eye(d, dtype=p.dtype) / normp - jnp.outer(p, p) / normp**3)
+    )
     Gxp = mode * jnp.outer(grad_c, p) / normp
     Gxx = mode * hess_c * normp
 
