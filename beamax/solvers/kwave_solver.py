@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Union
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -172,6 +173,8 @@ class KWaveSolver:
       source and terminal-field scalings needed for the discrete transpose.
     - ``binary_path`` can be supplied directly or via
       ``BEAMAX_KWAVE_BINARY_PATH``. Direct kwargs take precedence.
+    - Regular C++ solves with the legacy default ``data_path`` use k-Wave's
+      per-run scratch directory. Supply a custom path to retain the HDF5 files.
 
     Examples
     --------
@@ -223,6 +226,14 @@ class KWaveSolver:
             if uses_legacy_options
             else dict(kwargs)
         )
+        # Legacy options supply a shared temp root. Let k-Wave allocate per-run
+        # scratch for regular solves and keep the output path for save-only runs.
+        if (
+            uses_legacy_options
+            and not supplied.get("save_only")
+            and supplied.get("data_path") == tempfile.gettempdir()
+        ):
+            supplied.pop("data_path")
         self._solver_kwargs = {**defaults, **supplied}
         self._explicit_solver_options = set(supplied)
 

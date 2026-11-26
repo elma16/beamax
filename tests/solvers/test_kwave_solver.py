@@ -4,12 +4,14 @@ import pytest
 from pathlib import Path
 import numpy as np
 import os
+import tempfile
 
 from beamax import geometry, utils
 
 try:
     import beamax.solvers.kwave_solver as kwave_solver_module
     from beamax.solvers.kwave_solver import KWaveSolver
+    from kwave.options.simulation_options import SimulationOptions
 except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency.
     missing = exc.name or ""
     if missing != "kwave" and not missing.startswith("kwave."):
@@ -395,6 +397,35 @@ def test_partial_kwargs_extend_beamax_defaults():
 def test_legacy_options_cannot_be_mixed_with_unified_kwargs():
     with pytest.raises(TypeError, match="cannot be mixed"):
         KWaveSolver(simulation_options=object(), backend="python")
+
+
+def test_legacy_default_scratch_directory_is_delegated_to_kwave():
+    solver = KWaveSolver(simulation_options=SimulationOptions())
+
+    assert "data_path" not in solver._solver_kwargs
+
+
+def test_legacy_custom_scratch_directory_is_retained(tmp_path):
+    path = str(tmp_path)
+    solver = KWaveSolver(simulation_options=SimulationOptions(data_path=path))
+
+    assert solver._solver_kwargs["data_path"] == path
+
+
+def test_unified_explicit_system_temp_directory_is_retained():
+    path = tempfile.gettempdir()
+    solver = KWaveSolver(data_path=path)
+
+    assert solver._solver_kwargs["data_path"] == path
+
+
+def test_legacy_save_only_preserves_translated_output_path():
+    options = SimulationOptions(save_to_disk=True, save_to_disk_exit=True)
+    translated = kwave_solver_module.options_to_kwargs(options)
+    solver = KWaveSolver(simulation_options=options)
+
+    assert solver._solver_kwargs["save_only"] is True
+    assert solver._solver_kwargs.get("data_path") == translated.get("data_path")
 
 
 def test_execution_options_work_without_simulation_options(monkeypatch):
