@@ -240,3 +240,15 @@ def test_sensor_rejects_nonbinary_masks_and_quantised_duplicates():
         Sensor(domain, binary_mask=jnp.array([0.0, 0.5, 0.0, 1.0]))
     with pytest.raises(ValueError, match="distinct grid points"):
         Sensor(domain, positions=jnp.array([[0.01], [0.02]]))
+
+
+@pytest.mark.parametrize("speed", [1500, jnp.array(1500, dtype=jnp.int32)])
+def test_integer_sound_speed_has_a_real_gradient(speed):
+    domain = Domain((16,), (0.1,), (False,), c=speed)
+    point = jnp.array([0.25])
+
+    value, gradient = jax.value_and_grad(domain.c_fn)(point)
+
+    assert jnp.issubdtype(value.dtype, jnp.floating)
+    assert value == 1500
+    assert jnp.array_equal(gradient, jnp.zeros_like(point))

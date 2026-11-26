@@ -62,14 +62,17 @@ def Gx(
     p : jnp.ndarray, shape (..., d)
     mode : jnp.ndarray, shape (...,)
     c : Callable
+        Sound-speed function differentiated independently at each position.
 
     Returns
     -------
     jnp.ndarray, shape (..., d)
         $\sigma\nabla c(x)\lVert p\rVert$.
     """
-    grad_c = grad(c)(x)
-    return mode * grad_c * jnp.linalg.norm(p, axis=-1)
+    points = x.reshape((-1, x.shape[-1]))
+    grad_c = vmap(grad(c))(points).reshape(x.shape)
+    scale = mode * jnp.linalg.norm(p, axis=-1)
+    return scale[..., None] * grad_c
 
 
 vmap_gx = vmap(Gx, in_axes=(0, 0, 0, None))
@@ -99,7 +102,9 @@ def Gp(
         $\sigma c(x)p/\lVert p\rVert$.
     """
 
-    return mode * c(x) * p / jnp.linalg.norm(p, axis=-1)
+    scale = jnp.asarray(mode * c(x))
+    norm_p = jnp.linalg.norm(p, axis=-1, keepdims=True)
+    return scale[..., None] * p / norm_p
 
 
 vmap_gp = vmap(Gp, in_axes=(0, 0, 0, None))

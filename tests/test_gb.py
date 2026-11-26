@@ -764,3 +764,30 @@ def test_solver_config_dt0_override(monkeypatch):
     assert observed_dt0 == [pytest.approx(1e-4)]
     assert xt.shape == (b, len(ts), d)
     assert jnp.all(jnp.isfinite(xt))
+
+
+@pytest.mark.parametrize("shape", [(6, 2), (2, 3, 2)])
+@pytest.mark.parametrize(
+    ("derivative", "argnum"),
+    [(gb_utils.Gx, 0), (gb_utils.Gp, 1)],
+    ids=["position", "momentum"],
+)
+def test_hamiltonian_derivatives_with_batch_axes(shape, derivative, argnum):
+    x = jnp.arange(12.0).reshape(shape)
+    p = x + 1
+    mode = jnp.array([1, -1, 1, -1, 1, -1]).reshape(shape[:-1])
+
+    def speed(position):
+        return 1 + jnp.sum(position**2, axis=-1)
+
+    def hamiltonian(position, momentum, branch):
+        return gb_utils.G(position, momentum, branch, speed)
+
+    single_derivative = jax.grad(hamiltonian, argnums=argnum)
+    expected = jax.vmap(single_derivative)(
+        x.reshape((-1, 2)), p.reshape((-1, 2)), mode.reshape(-1)
+    ).reshape(shape)
+
+    actual = derivative(x, p, mode, speed)
+    assert actual.shape == shape
+    assert jnp.allclose(actual, expected)

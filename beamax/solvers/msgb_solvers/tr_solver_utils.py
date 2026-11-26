@@ -36,7 +36,7 @@ def compute_mT_linear_system(
         Spatial Hessian representation.
     mT_spc_time : jnp.ndarray or None
         Spacetime Hessian representation.
-    mode : jnp.ndarray
+    mode : jnp.ndarray, shape (b,) or (b, 1)
         Beam branch signs.
     c : Callable
         Sound-speed function.
@@ -79,7 +79,7 @@ def mT_forward(
         Beam momenta at the final time.
     mT_spc : jnp.ndarray, shape (b, d, d)
         Spatial Hessian matrices.
-    mode : jnp.ndarray
+    mode : jnp.ndarray, shape (b,) or (b, 1)
         Beam branch signs.
     c : Callable
         Sound-speed function.
@@ -90,6 +90,7 @@ def mT_forward(
         Spacetime Hessian matrices.
     """
     b, d = xT.shape
+    mode = mode.reshape(b)
     xdot = gb_utils.vmap_gp(xT, pT, mode, c)
     pdot = -gb_utils.vmap_gx(xT, pT, mode, c)
 
@@ -139,6 +140,8 @@ def mT_inverse(xT, pT, mT_spc_time, mode, c):
         Beam momenta at the final time.
     mT_spc_time : jnp.ndarray, shape (b, d, d)
         Spacetime Hessian matrices.
+    mode : jnp.ndarray, shape (b,) or (b, 1)
+        Beam branch signs.
     mode : jnp.ndarray
         Beam branch signs.
     c : Callable
@@ -149,10 +152,10 @@ def mT_inverse(xT, pT, mT_spc_time, mode, c):
     jnp.ndarray, shape (b, d, d)
         Spatial Hessian matrices.
     """
+    b, d = xT.shape
+    mode = mode.reshape(b)
     xdot = gb_utils.vmap_gp(xT, pT, mode, c)
     pdot = -gb_utils.vmap_gx(xT, pT, mode, c)
-
-    b, d = xT.shape
 
     xdot_1 = xdot[:, 0:1]
     pdot_1 = pdot[:, 0:1]

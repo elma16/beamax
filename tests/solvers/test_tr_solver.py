@@ -257,7 +257,8 @@ def test_tr_packet_positions_follow_redundant_anisotropic_support(redundancy):
 
 
 @pytest.mark.parametrize("d", [1, 2, 3])
-def test_linear_system(d):
+@pytest.mark.parametrize("column_mode", [False, True])
+def test_linear_system(d, column_mode):
     """
     Test the linear system used in the TR solver.
 
@@ -270,7 +271,7 @@ def test_linear_system(d):
     b = 4
     xt = jnp.ones((b, d))
     pt = jnp.ones((b, d))
-    mode = jnp.ones((b,))
+    mode = jnp.ones((b, 1) if column_mode else (b,))
 
     key = jax.random.PRNGKey(42)
     mt_data = create_batched_symmetric_matrices_with_positive_definite_imag(b, d, key)

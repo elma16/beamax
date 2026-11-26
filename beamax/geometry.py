@@ -173,6 +173,7 @@ class Domain(eqx.Module):
     def c_fn(self) -> FieldFn:
         """
         Callable sound speed, wrapping scalars into a JAX-friendly function.
+        Integer values are promoted to floating point for differentiation.
 
         Returns
         -------
@@ -182,7 +183,7 @@ class Domain(eqx.Module):
         """
         if callable(self.c):
             return self.c
-        val = jnp.asarray(self.c)
+        val = jnp.asarray(self.c, dtype=jnp.result_type(self.c, 1.0))
 
         if val.ndim > 0:
             if tuple(val.shape) != self.N:
