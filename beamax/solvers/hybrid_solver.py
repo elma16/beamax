@@ -6,6 +6,7 @@ low-frequency component is supplied through a small adapter callable API.
 """
 
 import warnings
+from copy import copy
 import math
 import numpy as np
 import jax.numpy as jnp
@@ -374,6 +375,11 @@ class HybridSolver(eqx.Module):
             Alternative: pass config parameters as kwargs.
         """
         self.lf_backend = lf_backend
+        if isinstance(hf_solver, MSGBSolver) and hf_solver.input_type == "fourier":
+            # The splitter returns spatial fields. Keep the original solver
+            # available for callers that supply its Fourier-domain input.
+            hf_solver = copy(hf_solver)
+            object.__setattr__(hf_solver, "input_type", "spatial")
         self.hf_solver = hf_solver
 
         if config is not None and config_kwargs:

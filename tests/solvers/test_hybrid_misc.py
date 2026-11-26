@@ -661,3 +661,35 @@ def test_split_frequency_components_empty_lf_warns_and_returns_zero_lf():
     assert jnp.allclose(p0_lf, 0.0)
     assert mask_out is sensors_mask
     assert dom_out is domain
+
+
+def test_hybrid_fourier_input_with_fourier_configured_msgb():
+    import numpy as np
+    from beamax import Domain, DyadicDecomposition, MSWPT, Sensor
+    from beamax.gb.gb_solvers import solve_hom_diag
+    from beamax.solvers import MSGBSolver
+
+    dom = Domain((32,), (0.1,), (True,), c=1.0)
+    wpt = MSWPT(DyadicDecomposition(1, dom.N, (4,), (1,)), 2, "rectangular_mirror")
+    p = jnp.cos(2 * jnp.pi * 8 * jnp.arange(32) / 32)
+    src = Sensor(dom, binary_mask=jnp.ones(dom.N))
+    ts = jnp.array([0.0, 0.1])
+    lf = HybridBackend(
+        forward=lambda arr, ctx: jnp.broadcast_to(arr, (len(ts), len(arr)))
+    )
+
+    def run(input_type, field):
+        beams = MSGBSolver(32, "top_n", 8, input_type, solve_hom_diag, "all_real")
+        solver = HybridSolver(
+            hf_solver=beams,
+            lf_backend=lf,
+            cutoff_freq=5,
+            downsample=False,
+            input_type=input_type,
+        )
+        assert beams.input_type == input_type
+        return solver.forward(field, dom, src, ts, wpt)
+
+    np.testing.assert_allclose(
+        run("fourier", utils.unitary_fft(p)), run("spatial", p), atol=2e-6
+    )
