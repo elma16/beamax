@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import matplotlib.colors as mcolors
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -87,29 +89,46 @@ def plot_mswpt_coeffs(
     asymptote_slope: float | None = None,
     normalized_frequency_axes: bool = False,
     log_scale: bool = False,
+    display_order: Literal["axis0-horizontal", "array"] = "axis0-horizontal",
 ):
     r"""Plot 2D MSWPT coefficient magnitudes and their dyadic boxes.
 
     ``cutoff_freq`` or ``box_corners`` highlights the coefficient region used
-    by a low-frequency solve. Frequency axes can be Fourier-bin coordinates or
-    cycles per sample in $[-0.5, 0.5]$.
+    by a low-frequency solve.  The image is a packed coefficient mosaic: each
+    axis combines scale, frequency-box, and within-box translation indices.
+    ``normalized_frequency_axes`` only rescales this display coordinate.
+    By default, decomposition axis 0 is horizontal for compatibility with
+    historical Beamax figures.  ``display_order="array"`` instead follows
+    :func:`matplotlib.axes.Axes.imshow`: array axis 1 is horizontal and array
+    axis 0 is vertical.  The latter is useful when comparing the mosaic with
+    an image displayed directly from the corresponding spatial array.
 
     Returns
     -------
     matplotlib.image.AxesImage
         The image returned by :meth:`matplotlib.axes.Axes.imshow`.
     """
-    # Decomposition axis 0 is horizontal and axis 1 is vertical.
-    coeffs_mag = np.asarray(np.abs(coeffs_array)).T
-
     N0, N1 = dyadic_decomp.N
-    x_scale = 1.0 / N0 if normalized_frequency_axes else 1.0
-    y_scale = 1.0 / N1 if normalized_frequency_axes else 1.0
+    if display_order == "axis0-horizontal":
+        coeffs_mag = np.asarray(np.abs(coeffs_array)).T
+        x_axis, y_axis = 0, 1
+    elif display_order == "array":
+        coeffs_mag = np.asarray(np.abs(coeffs_array))
+        x_axis, y_axis = 1, 0
+    else:
+        raise ValueError(
+            "display_order must be 'axis0-horizontal' or 'array'; "
+            f"got {display_order!r}."
+        )
+
+    N_axes = (N0, N1)
+    x_scale = 1.0 / N_axes[x_axis] if normalized_frequency_axes else 1.0
+    y_scale = 1.0 / N_axes[y_axis] if normalized_frequency_axes else 1.0
     extent_coeffs = (
-        -N0 / 2 * x_scale,
-        N0 / 2 * x_scale,
-        -N1 / 2 * y_scale,
-        N1 / 2 * y_scale,
+        -N_axes[x_axis] / 2 * x_scale,
+        N_axes[x_axis] / 2 * x_scale,
+        -N_axes[y_axis] / 2 * y_scale,
+        N_axes[y_axis] / 2 * y_scale,
     )
 
     if log_scale:
@@ -142,12 +161,12 @@ def plot_mswpt_coeffs(
         end_idx = int(cumulative_boxes[level + 1])
         centres = dyadic_decomp.centres_ndim[start_idx:end_idx]
         box_length = float(box_lengths[level])
-        box_width_x = float(box_length * box_aspect[0] * x_scale)
-        box_width_y = float(box_length * box_aspect[1] * y_scale)
+        box_width_x = float(box_length * box_aspect[x_axis] * x_scale)
+        box_width_y = float(box_length * box_aspect[y_axis] * y_scale)
 
         for centre in centres:
-            cx = float(centre[0]) * x_scale
-            cy = float(centre[1]) * y_scale
+            cx = float(centre[x_axis]) * x_scale
+            cy = float(centre[y_axis]) * y_scale
             ax.add_patch(
                 patches.Rectangle(
                     (cx - box_width_x / 2, cy - box_width_y / 2),
@@ -169,10 +188,10 @@ def plot_mswpt_coeffs(
             level = _find_level(dyadic_decomp, int(global_idx))
             centre = dyadic_decomp.centres_ndim[int(global_idx)]
             box_length = float(box_lengths[level])
-            box_width_x = float(box_length * box_aspect[0]) * x_scale
-            box_width_y = float(box_length * box_aspect[1]) * y_scale
-            cx = float(centre[0]) * x_scale
-            cy = float(centre[1]) * y_scale
+            box_width_x = float(box_length * box_aspect[x_axis]) * x_scale
+            box_width_y = float(box_length * box_aspect[y_axis]) * y_scale
+            cx = float(centre[x_axis]) * x_scale
+            cy = float(centre[y_axis]) * y_scale
             bounds_x.extend([cx - box_width_x / 2, cx + box_width_x / 2])
             bounds_y.extend([cy - box_width_y / 2, cy + box_width_y / 2])
 
@@ -222,16 +241,40 @@ def plot_mswpt_coeffs_3d(
     cutoff_freq: float | None = None,
     box_corners: np.ndarray | tuple[int, int] | None = None,
     asymptote: bool = False,
+    display_order: Literal["axis0-horizontal", "array"] = "axis0-horizontal",
 ):
-    """Plot a 2D projection of 3D MSWPT coefficients and dyadic boxes."""
-    coeffs_mag = np.asarray(np.abs(coeffs_array)).T
+    """Plot a 2D projection of 3D MSWPT coefficients and dyadic boxes.
+
+    ``display_order`` has the same meaning as in :func:`plot_mswpt_coeffs`.
+    In ``"array"`` order, a projection over coefficient axis 2 is displayed
+    without exchanging its remaining axes. The image extents and dyadic boxes
+    follow the selected axis order.
+    """
     if len(dyadic_decomp.N) < 2:
         raise ValueError(
             "dyadic_decomp.N must have at least two dimensions for 3D plots."
         )
 
     N0, N1 = dyadic_decomp.N[:2]
-    extent_coeffs = (-N1 // 2, N1 // 2, -N0 // 2, N0 // 2)
+    if display_order == "axis0-horizontal":
+        coeffs_mag = np.asarray(np.abs(coeffs_array)).T
+        x_axis, y_axis = 0, 1
+    elif display_order == "array":
+        coeffs_mag = np.asarray(np.abs(coeffs_array))
+        x_axis, y_axis = 1, 0
+    else:
+        raise ValueError(
+            "display_order must be 'axis0-horizontal' or 'array'; "
+            f"got {display_order!r}."
+        )
+
+    N_axes = (N0, N1)
+    extent_coeffs = (
+        -N_axes[x_axis] / 2,
+        N_axes[x_axis] / 2,
+        -N_axes[y_axis] / 2,
+        N_axes[y_axis] / 2,
+    )
     c_max = float(coeffs_mag.max()) or 1.0
     c_min = c_max * 1e-2
     image = ax.imshow(
@@ -252,12 +295,12 @@ def plot_mswpt_coeffs_3d(
         end_idx = int(cumulative_boxes[level + 1])
         centres = dyadic_decomp.centres_ndim[start_idx:end_idx]
         box_length = float(box_lengths[level])
-        box_width_x = float(box_length * box_aspect[1])
-        box_width_y = float(box_length * box_aspect[0])
+        box_width_x = float(box_length * box_aspect[x_axis])
+        box_width_y = float(box_length * box_aspect[y_axis])
 
         seen_projected: set[tuple[float, float]] = set()
         for centre in centres:
-            cx, cy = float(centre[1]), float(centre[0])
+            cx, cy = float(centre[x_axis]), float(centre[y_axis])
             key = (round(cx, 9), round(cy, 9))
             if key in seen_projected:
                 continue
@@ -283,9 +326,9 @@ def plot_mswpt_coeffs_3d(
             level = _find_level(dyadic_decomp, int(global_idx))
             centre = dyadic_decomp.centres_ndim[int(global_idx)]
             box_length = float(box_lengths[level])
-            box_width_x = float(box_length * box_aspect[1])
-            box_width_y = float(box_length * box_aspect[0])
-            cx, cy = float(centre[1]), float(centre[0])
+            box_width_x = float(box_length * box_aspect[x_axis])
+            box_width_y = float(box_length * box_aspect[y_axis])
+            cx, cy = float(centre[x_axis]), float(centre[y_axis])
             bounds_x.extend([cx - box_width_x / 2, cx + box_width_x / 2])
             bounds_y.extend([cy - box_width_y / 2, cy + box_width_y / 2])
 
