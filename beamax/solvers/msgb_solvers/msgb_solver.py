@@ -1116,7 +1116,8 @@ class MSGBSolver(eqx.Module):
             Initial pressure field. Real or complex; dtype selects the
             underlying beam formulation.
         domain : Domain
-            Computational domain and medium.
+            Computational domain and medium. A constant ``domain.lam``
+            damps each beam amplitude by ``exp(-domain.lam * t / 2)``.
         sensors : Sensor or jnp.ndarray
             Sensor geometry. Either a :class:`Sensor` or an array of
             positions in physical units, shape ``(Ns, ndim)``.
@@ -1332,6 +1333,8 @@ class MSGBSolver(eqx.Module):
         ------
         ValueError
             If any axis of ``domain`` is periodic.
+        NotImplementedError
+            If ``domain.lam`` is nonzero. This reconstruction uses a lossless domain.
 
         Notes
         -----
@@ -1368,6 +1371,10 @@ class MSGBSolver(eqx.Module):
         params : tuple of jnp.ndarray
             Beam parameters used in the solve.
         """
+        if domain.lam != 0.0:
+            raise NotImplementedError(
+                "MSGB inverse propagation requires a lossless domain (lam=0)."
+            )
         if any(domain.periodic):
             raise ValueError(
                 "The MSGB time reversal solver only supports free space boundary conditions."
@@ -1544,6 +1551,11 @@ class MSGBSolver(eqx.Module):
             Principal-symbol approximation to $P^*r$ for unweighted image and
             data $L^2$ pairings. This is not the exact transpose of the
             thresholded discrete MSGB forward solver.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``domain.lam`` is nonzero. This approximation uses a lossless domain.
         """
         q_T, _ = self.adjoint_with_params(
             data,
@@ -1583,6 +1595,10 @@ class MSGBSolver(eqx.Module):
         params : tuple of jnp.ndarray
             Beam parameters used internally.
         """
+        if domain.lam != 0.0:
+            raise NotImplementedError(
+                "MSGB inverse propagation requires a lossless domain (lam=0)."
+            )
         if any(domain.periodic):
             raise ValueError(
                 "MSGBSolver.adjoint currently assumes non-periodic spatial "

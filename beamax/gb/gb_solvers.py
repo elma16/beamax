@@ -439,8 +439,9 @@ def solve_hom_diag(
         Time grid whose first entry is the launch time of the supplied state.
     c : Callable
         Homogeneous sound-speed function.
-    lam : Any, optional
-        Ignored compatibility argument.
+    lam : float, optional
+        Constant damping rate. Beam amplitude is multiplied by
+        ``exp(-lam * (t - ts[0]) / 2)``.
     config : Any, optional
         Ignored compatibility argument.
 
@@ -478,6 +479,8 @@ def solve_hom_diag(
 
     Mt = compute_m_hom_diag(p0, normp, alpha0, c0, ts)
     At = compute_amp_hom_diag(p0, normp, alpha0, c0, ts, a0)[:, :, None]
+    if lam is not None:
+        At = At * jnp.exp(-0.5 * lam * ts)[None, :, None]
 
     return xt, pt, Mt, At
 
@@ -512,8 +515,9 @@ def solve_hom_general(
         Time grid whose first entry is the launch time of the supplied state.
     c : Callable
         Homogeneous sound-speed function.
-    lam : Any, optional
-        Ignored compatibility argument.
+    lam : float, optional
+        Constant damping rate. Beam amplitude is multiplied by
+        ``exp(-lam * (t - ts[0]) / 2)``.
     config : Any, optional
         Ignored compatibility argument.
 
@@ -538,6 +542,8 @@ def solve_hom_general(
 
     Mt = compute_m_hom_gen(p0, m0, c0, ts)
     At = compute_amp_hom_gen(p0, m0, c0, ts, a0)
+    if lam is not None:
+        At = At * jnp.exp(-0.5 * lam * ts)[None, :, None]
 
     return xt, pt, Mt, At
 
@@ -576,8 +582,10 @@ def solve_hom_TR(
         accepted when only the second axis matches the beam count.
     c : Callable
         Homogeneous sound-speed function.
-    lam : Any, optional
-        Ignored compatibility argument.
+    lam : float, optional
+        Constant damping rate for the signed integration interval.
+        Backward integration increases the amplitude by the inverse
+        of the forward damping factor.
     config : Any, optional
         Ignored compatibility argument.
 
@@ -661,6 +669,8 @@ def solve_hom_TR(
     )
 
     a0 = aT[:, None, :] / jnp.sqrt(jnp.linalg.det(interior))[..., None]
+    if lam is not None:
+        a0 = a0 * jnp.exp(-0.5 * lam * dt)[..., None]
 
     return x0, p0_time, m0, a0
 
@@ -1100,7 +1110,7 @@ def _solve_ODE_batch_t(
     terminal_only: bool,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Shared per-beam integration for full-grid and terminal saves."""
-    del lam
+    lam = 0.0 if lam is None else lam
     d = x0.shape[-1]
     saveat = diffrax.SaveAt(t1=True) if terminal_only else None
 
@@ -1115,13 +1125,13 @@ def _solve_ODE_batch_t(
         )
         y0 = jnp.concatenate([x0_i.ravel(), p0_i.ravel(), M0_i.ravel(), A0_i.ravel()])
         solution = ode_solver_setup(
-            coupled_rhs,
+            coupled_rhs_absorption,
             y0,
             t0,
             t1,
             dt0,
             ts_i,
-            (pol_i, c, d),
+            (pol_i, c, d, lam),
             solver_config,
             saveat=saveat,
         )
@@ -1161,7 +1171,7 @@ def solve_ODE_batch_t(
     c : Callable
         Sound-speed function.
     lam : float, optional
-        Absorption coefficient. Currently unused by this no-absorption RHS.
+        Constant damping rate. Backward integration reverses the forward damping.
     solver_config : SolverConfig, optional
         Numerical solver configuration.
 
@@ -1203,7 +1213,8 @@ def solve_ODE_batch_t_terminal(
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve per-beam intervals and save each terminal state.
 
-    The return values retain a singleton time axis.
+    Each interval uses the supplied constant damping rate ``lam``. The
+    return values retain a singleton time axis.
 
     Returns
     -------

@@ -445,6 +445,32 @@ def test_real_inverse_methods_reject_complex_boundary_data(simple_solver):
         simple_solver.adjoint(data, domain, sensors, sensors, ts, domain, wpt)
 
 
+@pytest.mark.parametrize("method", ["time_reversal", "adjoint"])
+def test_public_inverse_requires_lossless_domain(method):
+    domain, wpt = _build_small_1d_setup()
+    absorbing = geometry.Domain(
+        N=domain.N, dx=domain.dx, periodic=domain.periodic, c=domain.c, lam=0.4
+    )
+    sources = geometry.Sensor(
+        domain=absorbing, binary_mask=jnp.zeros(domain.N).at[0].set(1)
+    )
+    sensors = geometry.Sensor(domain=absorbing, binary_mask=jnp.ones(domain.N))
+    ts = jnp.arange(domain.N[0]) * domain.dx[0]
+    data = jnp.sin(jnp.pi * ts / ts[-1])
+    solver = MSGBSolver(
+        thr=4,
+        thr_strat="top_n",
+        batch_size=4,
+        input_type="spatial",
+        ode_solver=gb_solvers.solve_hom_diag,
+        tr_ode_solver=gb_solvers.solve_hom_TR,
+        sum_method="scan_real",
+    )
+
+    with pytest.raises(NotImplementedError, match="requires a lossless domain"):
+        getattr(solver, method)(data, absorbing, sensors, sources, ts, domain, wpt)
+
+
 @pytest.mark.parametrize(
     "threshold,strategy,match",
     [

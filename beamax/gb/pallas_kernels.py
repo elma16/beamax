@@ -1062,7 +1062,7 @@ def _sum_gaussian_beam_real_hom_diag_3d_reference(
     a0_imag,
     omega0,
     mode,
-    c0,
+    medium,
     ts,
     sensors,
     domain_size,
@@ -1087,7 +1087,8 @@ def _sum_gaussian_beam_real_hom_diag_3d_reference(
         a0,
         mode,
         ts,
-        lambda unused_position: c0,
+        lambda unused_position: medium[0],
+        lam=medium[1],
     )
     wrapped_axes = []
     for axis in range(3):
@@ -1140,6 +1141,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
     domain_size: jax.Array,
     periodic: jax.Array,
     *,
+    lam: float | jax.Array | None = None,
     config: PallasConfig | None = None,
     initial_field: jax.Array | None = None,
     return_padded: bool = False,
@@ -1149,7 +1151,8 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
 
     The primal evaluates ``solve_hom_diag`` within each output tile instead of
     materializing trajectories. The initial state is defined at ``ts[0]``.
-    Differentiation uses portable XLA.
+    A scalar ``lam`` supplies constant amplitude damping. Differentiation
+    uses portable XLA.
     """
     pl = _load_pallas()
 
@@ -1217,6 +1220,10 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
     padded_times = math.ceil(num_times / time_block_size) * time_block_size
     padded_sensors = math.ceil(num_sensors / sensor_block_size) * sensor_block_size
     ts = jnp.pad(ts - ts[0], ((0, padded_times - num_times),))
+    damping_rate = jnp.asarray(0.0 if lam is None else lam, dtype=c0.dtype)
+    if damping_rate.ndim != 0:
+        raise ValueError(f"lam must be a scalar; got shape {damping_rate.shape}.")
+    medium = jnp.stack([c0, damping_rate])
     sensors = jnp.pad(sensors, ((0, padded_sensors - num_sensors), (0, 0)))
 
     initial_field_was_none = initial_field is None
@@ -1261,7 +1268,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
         a0_imag_ref,
         omega_ref,
         mode_ref,
-        c_ref,
+        medium_ref,
         ts_ref,
         sensors_ref,
         domain_ref,
@@ -1274,7 +1281,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
             py = p0_ref[beam_idx, 1]
             pz = p0_ref[beam_idx, 2]
             normp = jnp.sqrt(px * px + py * py + pz * pz)
-            signed_c = c_ref[...] * signed_mode
+            signed_c = medium_ref[0] * signed_mode
 
             delta = []
             for axis, momentum in enumerate((px, py, pz)):
@@ -1418,12 +1425,13 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
         def add_beam(beam_idx, accumulator):
             return add_mode(beam_idx, mode_ref[beam_idx], accumulator)
 
-        return lax.fori_loop(
+        summed = lax.fori_loop(
             0,
             num_beams,
             add_beam,
             jnp.zeros((time_block_size, sensor_block_size), dtype=jnp.float32),
         )
+        return summed * jnp.exp(-0.5 * medium_ref[1] * times)[:, None]
 
     def kernel(
         x0_ref,
@@ -1434,7 +1442,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
         a0_imag_ref,
         omega_ref,
         mode_ref,
-        c_ref,
+        medium_ref,
         ts_ref,
         sensors_ref,
         domain_ref,
@@ -1450,7 +1458,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
             a0_imag_ref,
             omega_ref,
             mode_ref,
-            c_ref,
+            medium_ref,
             ts_ref,
             sensors_ref,
             domain_ref,
@@ -1466,7 +1474,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
         a0_imag_ref,
         omega_ref,
         mode_ref,
-        c_ref,
+        medium_ref,
         ts_ref,
         sensors_ref,
         domain_ref,
@@ -1483,7 +1491,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
             a0_imag_ref,
             omega_ref,
             mode_ref,
-            c_ref,
+            medium_ref,
             ts_ref,
             sensors_ref,
             domain_ref,
@@ -1495,9 +1503,6 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
 
     def beam_index(unused_time_idx, unused_sensor_idx):
         return (0,)
-
-    def scalar_index(unused_time_idx, unused_sensor_idx):
-        return ()
 
     def time_index(time_idx, unused_sensor_idx):
         return (time_idx,)
@@ -1513,7 +1518,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
 
     beam_matrix_spec = pl.BlockSpec((num_beams, 3), beam_matrix_index)
     beam_spec = pl.BlockSpec((num_beams,), beam_index)
-    scalar_spec = pl.BlockSpec((), scalar_index)
+    medium_spec = pl.BlockSpec((2,), spatial_index)
     time_spec = pl.BlockSpec((time_block_size,), time_index)
     sensor_spec = pl.BlockSpec((sensor_block_size, 3), sensor_index)
     spatial_spec = pl.BlockSpec((3,), spatial_index)
@@ -1527,7 +1532,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
         beam_spec,
         beam_spec,
         beam_spec,
-        scalar_spec,
+        medium_spec,
         time_spec,
         sensor_spec,
         spatial_spec,
@@ -1586,7 +1591,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
         a0_imag,
         omega0,
         mode,
-        c0,
+        medium,
         ts,
         sensors,
         domain_size,

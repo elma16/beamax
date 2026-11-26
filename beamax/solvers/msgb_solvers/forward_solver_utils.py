@@ -452,6 +452,7 @@ def _aggregate_beams(
                     sensors=sensors,
                     domain_size=domain_size,
                     periodic=periodic,
+                    lam=lam,
                     config=effective_pallas_config,
                     initial_field=carry if fused_pallas_carry else None,
                     return_padded=fused_pallas_carry,

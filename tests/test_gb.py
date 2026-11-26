@@ -903,3 +903,53 @@ def test_numerical_mixed_intervals_use_signed_steps(solver, saved_times):
     for state, reference in zip(actual, expected):
         assert state.shape == reference[:, saved_times].shape
         assert jnp.allclose(state, reference[:, saved_times], atol=1e-7)
+
+
+@pytest.mark.parametrize(
+    "solver", [gb_solvers.solve_hom_diag, gb_solvers.solve_hom_general]
+)
+def test_homogeneous_absorption_matches_numerical_transport(solver):
+    x = jnp.array([[0.0, 0.1], [0.2, 0.3]])
+    p = jnp.eye(2)
+    m = jnp.broadcast_to(1j * jnp.eye(2), (2, 2, 2))
+    a = jnp.array([1.0 + 0.5j, 0.3 - 0.7j])
+    mode = jnp.array([1, -1])
+    times = jnp.array([4.0, 4.08, 4.16])
+    lam = 0.8
+    args = (x, p, m, a, mode, times, c)
+
+    lossless = solver(*args)
+    damped = solver(*args, lam=lam)
+    factor = jnp.exp(-0.5 * lam * (times - times[0]))[None, :, None]
+
+    for actual, reference in zip(damped[:3], lossless[:3]):
+        assert jnp.array_equal(actual, reference)
+    assert jnp.allclose(damped[-1], lossless[-1] * factor, rtol=1e-12, atol=1e-12)
+
+    numerical = gb_solvers.solve_ODE_base(*args, lam, gb_solvers.SolverConfig())
+    assert jnp.allclose(damped[-1], numerical[-1], rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.parametrize(
+    ("solver", "saved_times"),
+    [
+        (gb_solvers.solve_hom_TR, slice(None)),
+        (gb_solvers.solve_ODE_batch_t, slice(None)),
+        (gb_solvers.solve_ODE_batch_t_terminal, slice(-1, None)),
+    ],
+)
+def test_beam_intervals_integrate_constant_absorption(solver, saved_times):
+    x = jnp.zeros((3, 1))
+    p = jnp.ones_like(x)
+    m = 1j * jnp.ones((3, 1, 1))
+    a = jnp.array([1.0 + 0.5j, 0.3 - 0.7j, 0.6 + 0.4j])
+    mode = jnp.array([1, -1, 1])
+    times = jnp.array([[4, 4.5, 5], [5, 4.5, 4], [4, 4, 4]], dtype=jnp.float64)
+    lam = 0.7
+
+    amplitudes = solver(x, p, m, a, mode, times, c, lam)[-1]
+
+    elapsed = times - times[:, :1]
+    expected = a[:, None, None] * jnp.exp(-0.5 * lam * elapsed)[..., None]
+    assert amplitudes.shape == expected[:, saved_times].shape
+    assert jnp.allclose(amplitudes, expected[:, saved_times], rtol=1e-6, atol=1e-8)

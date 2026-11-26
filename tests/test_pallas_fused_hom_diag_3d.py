@@ -12,6 +12,7 @@ from beamax.gb.pallas_config import PallasConfig
 from beamax.gb.pallas_kernels import (
     sum_gaussian_beam_real_hom_diag_3d_pallas,
 )
+from beamax.solvers.msgb_solvers.forward_solver_utils import compute_forward_result
 
 
 jax.config.update("jax_enable_x64", True)
@@ -193,6 +194,55 @@ def test_fused_kernel_jvp_and_vjp_use_the_portable_physical_oracle():
         rtol=2e-5,
         atol=2e-6,
     )
+
+
+def test_fused_absorption_damps_only_new_field_and_differentiates():
+    args = list(_initial_parameter_case())
+    args[7] = args[7] + 4.0
+    times = args[7] - args[7][0]
+    lossless = _trajectory_oracle(*args)
+    carry = jnp.full(lossless.shape, 0.4, dtype=jnp.float32)
+    config = PallasConfig(sensor_block_size=4, gpu_time_block_size=2)
+    lam = jnp.float32(0.75)
+
+    def evaluate(rate):
+        return sum_gaussian_beam_real_hom_diag_3d_pallas(
+            *args, lam=rate, config=config, initial_field=carry, interpret=True
+        )
+
+    damped = lossless * jnp.exp(-0.5 * lam * times)[:, None]
+    expected_slope = -0.5 * times[:, None] * damped
+    value, slope = jax.jvp(evaluate, (lam,), (jnp.ones_like(lam),))
+    gradient = jax.grad(lambda rate: jnp.sum(evaluate(rate)))(lam)
+
+    np.testing.assert_allclose(value, carry + damped, rtol=2e-5, atol=2e-6)
+    np.testing.assert_allclose(slope, expected_slope, rtol=2e-5, atol=2e-6)
+    np.testing.assert_allclose(gradient, jnp.sum(expected_slope), rtol=2e-5, atol=2e-6)
+
+
+def test_fused_forward_aggregation_applies_absorption_across_batches():
+    args = _initial_parameter_case(num_beams=4)
+    x, p, m, a, omega, mode, c0, times, sensors, domain_size, periodic = args
+    params = tuple(
+        value.reshape((2, 2) + value.shape[1:]) for value in (p, m, x, omega, a, mode)
+    )
+    lam = 0.75
+
+    actual = compute_forward_result(
+        params=params,
+        c=lambda unused_position: c0,
+        lam=lam,
+        ts=times,
+        ode_solver=gb_solvers.solve_hom_diag,
+        sensors=sensors,
+        domain_size=domain_size,
+        periodic=periodic,
+        aggregate_method="pallas_fused_hom_diag_3d",
+        pallas_config=PallasConfig(sensor_block_size=4, gpu_time_block_size=2),
+    )
+
+    expected = _trajectory_oracle(*args) * jnp.exp(-0.5 * lam * times)[:, None]
+    np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
 
 
 def test_fused_kernel_static_periodic_specialization_matches_runtime_flags():
