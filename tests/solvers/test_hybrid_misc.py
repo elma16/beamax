@@ -16,9 +16,11 @@ from beamax.solvers.hybrid_solver import (
 )
 from beamax.solvers.hybrid_solver_utils import (
     downsample_domain,
+    downsample_p0,
     find_bounding_corner_indices,
     get_indices_between_two_opposing_corners,
     get_indices_with_norm_less_than,
+    resize_sensor_mask,
     split_frequency_components,
 )
 
@@ -503,11 +505,37 @@ def test_downsample_domain_preserves_and_resamples_medium_fields():
 
     assert coarse.N == (2, 2)
     assert coarse.dx == pytest.approx((0.2, 0.4))
-    assert coarse.sound_speed_array.shape == (2, 2)
-    assert coarse.alpha_coeff_array.shape == (2, 2)
+    assert jnp.allclose(coarse.sound_speed_array, c[::2, ::2])
+    assert jnp.allclose(coarse.alpha_coeff_array, alpha[::2, ::2])
     assert jnp.allclose(coarse.density_array, 1000.0)
     assert jnp.allclose(coarse.alpha_power_array, 1.5)
     assert coarse.lam == pytest.approx(0.25)
+
+
+def test_downsample_domain_interpolates_integer_medium_values():
+    domain = geometry.Domain(
+        N=(5,), dx=(1.0,), c=jnp.arange(1400, 1405), periodic=(False,)
+    )
+    coarse = downsample_domain(domain, jnp.zeros((3,)))
+    expected = 1400 + jnp.arange(3) * (5 / 3)
+    assert jnp.issubdtype(coarse.sound_speed_array.dtype, jnp.floating)
+    assert jnp.allclose(coarse.sound_speed_array, expected)
+
+
+def test_crop_preserves_rectangular_fourier_support_and_dc():
+    spectrum = jnp.zeros((8, 12)).at[3, 4].set(2).at[4, 6].set(5)
+    bounds = jnp.array([[3, 5], [4, 9]])
+    cropped = downsample_p0(spectrum, bounds, use_power_of_two=False)
+    assert cropped.shape == (2, 5)
+    assert cropped[0, 0] == 2
+    assert cropped[1, 2] == 5
+
+
+def test_resize_sensor_mask_rounds_active_voxels_to_target_coordinates():
+    mask = jnp.zeros((8, 12), dtype=bool).at[2, 4].set(True).at[7, 11].set(True)
+    resized = resize_sensor_mask(mask, (4, 3))
+    expected = jnp.zeros((4, 3), dtype=bool).at[1, 1].set(True).at[3, 2].set(True)
+    assert jnp.array_equal(resized, expected)
 
 
 def test_find_bounding_corner_indices_empty_raises():

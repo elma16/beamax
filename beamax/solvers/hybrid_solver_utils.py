@@ -1,9 +1,9 @@
 import jax
+import numpy as np
 from jax import vmap
 import jax.numpy as jnp
 from jax.lax import fori_loop
 from typing import Tuple, Optional
-from einops import rearrange
 import warnings
 
 from beamax import utils
@@ -249,63 +249,40 @@ def find_bounding_corner_indices(
     return int(corner1_idx), int(corner2_idx)
 
 
+def _box_support_bounds(decomp, domain, indices, redundancy):
+    levels = vmap(lambda i: utils.find_level(decomp, i))(indices)
+    widths = (
+        decomp.box_lengths[levels, None]
+        * jnp.asarray(decomp.box_aspect_ratio)
+        * redundancy
+    )
+    centres = decomp.centres_ndim[indices] + jnp.asarray(domain.N) // 2
+    # Integer half-open support [ceil(c-w/2), ceil(c+w/2)).
+    return jnp.stack(
+        (
+            (centres - widths // 2).min(axis=0),
+            (centres + (widths + 1) // 2).max(axis=0),
+        ),
+        axis=-1,
+    )
+
+
 def get_bounds(
-    dyadic_decomp: DyadicDecomposition, domain: Domain, corner1: int, corner2: int
+    dyadic_decomp: DyadicDecomposition,
+    domain: Domain,
+    corner1: int,
+    corner2: int,
+    *,
+    redundancy: int = 2,
 ) -> jnp.ndarray:
-    """
-    Get the bounds of the filter banks required, using the opposite corners of the box.
-
-    Parameters
-    ----------
-    dyadic_decomp : DyadicDecomposition
-        Dyadic decomposition.
-    domain : Domain
-        Physical domain.
-    corner1 : int
-        First corner index.
-    corner2 : int
-        Opposing corner index.
-
-    Returns
-    -------
-    jnp.ndarray, shape (ndim, 2)
-        Inclusive/exclusive bounds in grid coordinates.
-    """
-    box_corners = jnp.array([corner1, corner2])
-
-    def box_bounds(box_idx):
-        """
-        Compute grid bounds for one dyadic box.
-
-        Parameters
-        ----------
-        box_idx : int
-            Global box index.
-
-        Returns
-        -------
-        bounds_min : jnp.ndarray, shape (ndim,)
-            Minimum Fourier-index bound.
-        bounds_max : jnp.ndarray, shape (ndim,)
-            Maximum Fourier-index bound.
-        """
-        level = utils.find_level(dyadic_decomp, box_idx)
-        box_length = dyadic_decomp.box_lengths[level]
-        center = dyadic_decomp.centres_ndim[box_idx]
-        bounds_min = center - box_length
-        bounds_max = center + box_length - 1
-        return bounds_min, bounds_max
-
-    bounds_min, bounds_max = vmap(box_bounds)(box_corners)
-
-    global_bounds_min = jnp.min(bounds_min, axis=0)
-    global_bounds_max = jnp.max(bounds_max, axis=0)
-    bounds_per_dim = jnp.stack((global_bounds_min, global_bounds_max + 1), axis=-1)
-
-    nn = jnp.array(domain.N)
-    nn = rearrange(nn, "d -> d 1")
-    bounds_coords = bounds_per_dim + nn // 2
-    return bounds_coords
+    """Inclusive/exclusive bounds of the selected rectangular windows on each Fourier axis."""
+    if corner1 == corner2:
+        indices = jnp.asarray([corner1])
+    else:
+        indices = get_indices_between_two_opposing_corners(
+            dyadic_decomp.centres_ndim, corner1, corner2
+        )
+    return _box_support_bounds(dyadic_decomp, domain, indices, redundancy)
 
 
 def closest_power_of_two(size: int, max_size: int) -> int:
@@ -352,22 +329,30 @@ def downsample_p0(
     jnp.ndarray
         Centred crop of ``p0_LF``.
     """
-    nonzero_size = int(jnp.min(jnp.array([int(stop - start) for start, stop in bd])))
-
-    if use_power_of_two:
-        slice_size = closest_power_of_two(nonzero_size, min(p0_LF.shape))
-    else:
-        slice_size = nonzero_size
-
-    starts = jnp.maximum(0, (jnp.array(p0_LF.shape) - slice_size) // 2)
-    stops = starts + slice_size
-
-    slices = tuple(slice(int(start), int(stop)) for start, stop in zip(starts, stops))
-
-    return p0_LF[slices]
+    sizes = []
+    for n, (start, stop) in zip(p0_LF.shape, np.asarray(bd)):
+        dc = n // 2
+        # An fftshifted array of size m covers [-(m//2), (m-1)//2].
+        size = min(n, max(1, 2 * (dc - int(start)), 2 * (int(stop) - dc) - 1))
+        sizes.append(closest_power_of_two(size, n) if use_power_of_two else size)
+    return utils.interpolate_fourier(p0_LF, tuple(sizes), "fourier", "fourier")
 
 
-def downsample_domain(domain: Domain, p0_LF_downsampled: jnp.ndarray) -> Domain:
+def resize_sensor_mask(mask, target_shape):
+    """Place each active voxel on the nearest target voxel in physical coordinates."""
+    indices = np.argwhere(np.asarray(mask) != 0)
+    coarse = np.rint(
+        indices * np.asarray(target_shape) / np.asarray(mask.shape)
+    ).astype(int)
+    coarse = np.clip(coarse, 0, np.asarray(target_shape) - 1)
+    out = np.zeros(target_shape, dtype=mask.dtype)
+    out[tuple(coarse.T)] = 1
+    return jnp.asarray(out)
+
+
+def downsample_domain(
+    domain: Domain, p0_LF_downsampled: jnp.ndarray | jax.ShapeDtypeStruct
+) -> Domain:
     """
     Downsample the domain after downsampling the p0.
 
@@ -397,7 +382,14 @@ def downsample_domain(domain: Domain, p0_LF_downsampled: jnp.ndarray) -> Domain:
         values = jnp.asarray(field)
         if values.ndim == 0:
             return field
-        return jax.image.resize(values, N_resized, method="linear")
+        values = jnp.asarray(values, dtype=jnp.result_type(values, 1.0))
+        coords = jnp.meshgrid(
+            *(jnp.arange(m) * (n / m) for n, m in zip(domain.N, N_resized)),
+            indexing="ij",
+        )
+        return jax.scipy.ndimage.map_coordinates(
+            values, coords, order=1, mode="nearest"
+        )
 
     domain_downsampled = Domain(
         N=N_resized,
@@ -485,10 +477,6 @@ def split_frequency_components(
     if cutoff_freq is not None and box_corners is None:
         idx_box = get_indices_with_norm_less_than(centers, cutoff_freq, inclusive=True)
 
-        if idx_box.size > 0:
-            corner1_idx, corner2_idx = find_bounding_corner_indices(centers, idx_box)
-            box_corners = jnp.array([corner1_idx, corner2_idx])
-
     elif box_corners is not None and cutoff_freq is None:
         idx_box = get_indices_between_two_opposing_corners(
             centers, int(box_corners[0]), int(box_corners[1])
@@ -514,20 +502,10 @@ def split_frequency_components(
     sensors_mask_ds = sensors_mask
     dom_downsample = domain
 
-    if downsample:
-        assert box_corners is not None
-        bounds = get_bounds(
-            wpt.dyadic_decomp,
-            domain,
-            int(box_corners[0]),
-            int(box_corners[1]),
-        )
-
+    if downsample and windowing != "none":
+        bounds = _box_support_bounds(wpt.dyadic_decomp, domain, idx_box, wpt.redundancy)
         p0_LF_ft = downsample_p0(p0_LF_ft, bounds, use_pow2)
-
-        sensors_mask_ds = utils.interpolate_nearest(sensors_mask_ds, p0_LF_ft.shape)
-        sensors_mask_ds = sensors_mask_ds.astype(jnp.float32)
-
+        sensors_mask_ds = resize_sensor_mask(sensors_mask, p0_LF_ft.shape)
         dom_downsample = downsample_domain(domain, p0_LF_ft)
 
     p0_HF = utils.convert_space(p0_HF_ft, "fourier", output_type)
