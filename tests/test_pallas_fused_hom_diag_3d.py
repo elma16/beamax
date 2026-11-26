@@ -104,14 +104,16 @@ def test_fused_zero_amplitude_has_linear_jvp_and_vjp():
     np.testing.assert_allclose(jax.jacrev(field)(zero), expected, rtol=2e-5, atol=2e-6)
 
 
-def test_fused_explicit_kernel_matches_solve_hom_diag_oracle_with_padding():
-    args = _initial_parameter_case(num_beams=3, num_times=3, num_sensors=5)
+@pytest.mark.parametrize("launch_time", [0.0, 4.0])
+def test_fused_explicit_kernel_matches_solve_hom_diag_oracle_with_padding(launch_time):
+    args = list(_initial_parameter_case(num_beams=3, num_times=3, num_sensors=5))
+    args[7] = args[7] + launch_time
     config = PallasConfig(sensor_block_size=4, gpu_time_block_size=2)
 
     actual = sum_gaussian_beam_real_hom_diag_3d_pallas(
         *args, config=config, interpret=True
     )
-    expected = _trajectory_oracle(*args)
+    expected = _trajectory_oracle(*args[:7], args[7] - args[7][0], *args[8:])
 
     assert actual.shape == (3, 5)
     np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
@@ -157,6 +159,7 @@ def test_fused_kernel_accumulates_batches_into_one_padded_carry():
 
 def test_fused_kernel_jvp_and_vjp_use_the_portable_physical_oracle():
     args = list(_initial_parameter_case(num_beams=2, num_times=3, num_sensors=4))
+    args[7] = args[7] + 4.0
     args[-1] = jnp.zeros((3,), dtype=bool)
     x0 = args[0]
     rest = args[1:]

@@ -101,8 +101,7 @@ def _validate_time_grid(
 ) -> Optional[float]:
     """Validate a finite, increasing, uniform time grid and return ``dt``.
 
-    A singleton grid is useful for evaluating a forward solution only at
-    $t=0$. In that case there is no time step to return.
+    A singleton grid requests one forward sample and has no time step to return.
     """
     ts_np = np.asarray(ts)
     if ts_np.ndim != 1 or ts_np.size == 0:
@@ -1122,7 +1121,9 @@ class MSGBSolver(eqx.Module):
             Sensor geometry. Either a :class:`Sensor` or an array of
             positions in physical units, shape ``(Ns, ndim)``.
         ts : jnp.ndarray, shape (Nt,)
-            Time grid.
+            Nonnegative sample times, increasing and uniformly spaced when
+            more than one sample is requested. The initial data are at time
+            zero, including when the first requested sample is later.
         wpt : MSWPT
             Wave-packet transform used to build the beam decomposition.
         dpdt : jnp.ndarray, optional
@@ -1173,6 +1174,12 @@ class MSGBSolver(eqx.Module):
         if wpt.dyadic_decomp.N != domain.N:
             raise ValueError("wpt grid shape must match domain.N.")
         _validate_time_grid(ts, allow_singleton=True)
+        first_time = float(ts[0])
+        if first_time < 0.0:
+            raise ValueError("Forward sample times must be nonnegative.")
+        if first_time > 0.0:
+            ts = jnp.asarray(ts)
+            ts = jnp.concatenate([jnp.zeros((1,), dtype=ts.dtype), ts])
 
         forward_aggregate = self._effective_forward_aggregate_method()
         use_sharding = self.sharding is not None and forward_aggregate == "all"
@@ -1278,6 +1285,8 @@ class MSGBSolver(eqx.Module):
         if use_sharding:
             sensor_data = self._replicate_array(sensor_data)
 
+        if first_time > 0.0:
+            sensor_data = sensor_data[1:]
         return sensor_data, params
 
     def time_reversal(

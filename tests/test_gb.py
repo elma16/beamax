@@ -832,3 +832,74 @@ def test_hamiltonian_derivatives_with_batch_axes(shape, derivative, argnum):
     actual = derivative(x, p, mode, speed)
     assert actual.shape == shape
     assert jnp.allclose(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "solver", [gb_solvers.solve_hom_diag, gb_solvers.solve_hom_general]
+)
+def test_homogeneous_forward_uses_first_time_as_launch(solver):
+    x = jnp.array([[0.2, 0.1]])
+    p = jnp.array([[1.0, 0.0]])
+    m = 1j * jnp.eye(2)[None]
+    a = jnp.array([1.0 + 0.5j])
+    mode = jnp.ones(1)
+    times = jnp.array([4.0, 4.25, 4.5])
+
+    actual = solver(x, p, m, a, mode, times, c)
+    expected = solver(x, p, m, a, mode, times - times[0], c)
+
+    for state, shifted, relative in zip((x, p, m, a[:, None]), actual, expected):
+        assert jnp.allclose(shifted[:, 0], state, atol=1e-12)
+        assert jnp.allclose(shifted, relative, atol=1e-12)
+
+
+def test_homogeneous_inverse_shared_grid_can_match_beam_count():
+    x = jnp.zeros((3, 1))
+    p = jnp.ones_like(x)
+    m = 1j * jnp.ones((3, 1, 1))
+    a = jnp.ones(3) + 0j
+    mode = jnp.array([1, -1, 1])
+    times = jnp.array([4.0, 4.5, 5.0])
+
+    paths, *_ = gb_solvers.solve_hom_TR(x, p, m, a, mode, times, c)
+
+    assert paths.shape == (3, 3, 1)
+    assert jnp.allclose(paths[..., 0], mode[:, None] * (times - times[0]))
+
+
+def test_numerical_backward_shared_grid_uses_signed_step():
+    x = jnp.zeros((2, 1))
+    p = jnp.ones_like(x)
+    m = 1j * jnp.ones((2, 1, 1))
+    a = jnp.ones(2) + 0j
+    mode = jnp.array([1, -1])
+    times = jnp.array([5.0, 4.5, 4.0])
+    config = gb_solvers.SolverConfig(dt0=0.1)
+
+    paths, *_ = gb_solvers.solve_ODE_base(x, p, m, a, mode, times, c, 0.0, config)
+
+    assert jnp.allclose(paths[..., 0], mode[:, None] * (times - times[0]))
+
+
+@pytest.mark.parametrize(
+    ("solver", "saved_times"),
+    [
+        (gb_solvers.solve_ODE_batch_t, slice(None)),
+        (gb_solvers.solve_ODE_batch_t_terminal, slice(-1, None)),
+    ],
+)
+def test_numerical_mixed_intervals_use_signed_steps(solver, saved_times):
+    x = jnp.zeros((3, 1))
+    p = jnp.ones_like(x)
+    m = 1j * jnp.ones((3, 1, 1))
+    a = jnp.ones(3) + 0j
+    mode = jnp.ones(3)
+    times = jnp.array([[4, 4.5, 5], [5, 4.5, 4], [4, 4, 4]], dtype=jnp.float64)
+    config = gb_solvers.SolverConfig(dt0=0.1)
+
+    expected = gb_solvers.solve_hom_TR(x, p, m, a, mode, times, c)
+    actual = solver(x, p, m, a, mode, times, c, 0.0, config)
+
+    for state, reference in zip(actual, expected):
+        assert state.shape == reference[:, saved_times].shape
+        assert jnp.allclose(state, reference[:, saved_times], atol=1e-7)

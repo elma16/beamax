@@ -1148,7 +1148,8 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
     """Fuse homogeneous 3D propagation and real sensor accumulation.
 
     The primal evaluates ``solve_hom_diag`` within each output tile instead of
-    materializing trajectories. Differentiation uses portable XLA.
+    materializing trajectories. The initial state is defined at ``ts[0]``.
+    Differentiation uses portable XLA.
     """
     pl = _load_pallas()
 
@@ -1215,7 +1216,7 @@ def sum_gaussian_beam_real_hom_diag_3d_pallas(
     sensor_block_size = config.sensor_block_size
     padded_times = math.ceil(num_times / time_block_size) * time_block_size
     padded_sensors = math.ceil(num_sensors / sensor_block_size) * sensor_block_size
-    ts = jnp.pad(ts, ((0, padded_times - num_times),))
+    ts = jnp.pad(ts - ts[0], ((0, padded_times - num_times),))
     sensors = jnp.pad(sensors, ((0, padded_sensors - num_sensors), (0, 0)))
 
     initial_field_was_none = initial_field is None

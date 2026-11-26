@@ -32,7 +32,8 @@ class SolverFn(Protocol):
     Protocol for Gaussian beam ODE integrators.
 
     Implementations integrate beam initial data and return beam positions,
-    momenta, Hessians, and amplitudes over time.
+    momenta, Hessians, and amplitudes over time. The input state is defined at
+    the first time in the integration grid.
 
     Notes
     -----
@@ -435,7 +436,7 @@ def solve_hom_diag(
     mode : jnp.ndarray, shape (b,)
         Hamiltonian branch signs.
     ts : jnp.ndarray, shape (Nt,)
-        Time grid.
+        Time grid whose first entry is the launch time of the supplied state.
     c : Callable
         Homogeneous sound-speed function.
     lam : Any, optional
@@ -459,9 +460,13 @@ def solve_hom_diag(
     Assumes $c(x)$ is homogeneous, ``M0`` is diagonal, and
     $d\in\{1,2,3\}$. The diagonal and dimensionality assumptions are relaxed by
     :func:`solve_hom_general`.
+
+    For a single target time, pass the launch time followed by the target
+    time and take the last sample.
     """
     d = p0.shape[-1]
     nt = ts.shape[0]
+    ts = ts - ts[0]
 
     c0 = c(jnp.zeros((d,))) * mode[..., None]
     normp = jnp.linalg.norm(p0, axis=-1, keepdims=True)
@@ -504,7 +509,7 @@ def solve_hom_general(
     mode : jnp.ndarray, shape (b,)
         Hamiltonian branch signs.
     ts : jnp.ndarray, shape (Nt,)
-        Time grid.
+        Time grid whose first entry is the launch time of the supplied state.
     c : Callable
         Homogeneous sound-speed function.
     lam : Any, optional
@@ -524,6 +529,7 @@ def solve_hom_general(
         Beam amplitudes over time.
     """
     d = p0.shape[-1]
+    ts = ts - ts[0]
     c0 = c(jnp.zeros((d,))) * mode[..., None]
     normp = jnp.linalg.norm(p0, axis=-1, keepdims=True)
 
@@ -553,17 +559,21 @@ def solve_hom_TR(
     Parameters
     ----------
     xT : jnp.ndarray, shape (b, d)
-        Beam positions at the reference final time.
+        Beam positions at each grid's first time.
     pT : jnp.ndarray, shape (b, d)
-        Beam momenta at the reference final time.
+        Beam momenta at each grid's first time.
     mT : jnp.ndarray, shape (b, d, d)
-        Beam Hessians at the reference final time.
+        Beam Hessians at each grid's first time.
     aT : jnp.ndarray, shape (b,) or (b, 1)
-        Beam amplitudes at the reference final time.
+        Beam amplitudes at each grid's first time.
     mode : jnp.ndarray, shape (b,) or (b, 1)
         Hamiltonian branch signs.
     ts : jnp.ndarray
-        Per-beam or shared time grid.
+        A shared ``(Nt,)`` grid or per-beam ``(b, Nt)`` grids. For a
+        separate launch and target time per beam, pass a ``(b, 2)`` array
+        with the launch times in the first column and take the last sample.
+        A scalar supplies a single shared time. Transposed grids are
+        accepted when only the second axis matches the beam count.
     c : Callable
         Homogeneous sound-speed function.
     lam : Any, optional
@@ -600,19 +610,13 @@ def solve_hom_TR(
     if ts_arr.ndim == 0:
         ts_beams = jnp.broadcast_to(ts_arr[None], (b, 1))
     elif ts_arr.ndim == 1:
-        # A length-b vector denotes one time per beam.
-        if ts_arr.shape[0] == b and ts_arr.size == b:
-            ts_beams = ts_arr[:, None]
-        else:
-            ts_beams = jnp.broadcast_to(ts_arr[None, :], (b, ts_arr.shape[0]))
+        ts_beams = jnp.broadcast_to(ts_arr, (b, ts_arr.shape[0]))
+    elif ts_arr.ndim == 2 and ts_arr.shape[0] == b:
+        ts_beams = ts_arr
+    elif ts_arr.ndim == 2 and ts_arr.shape[1] == b:
+        ts_beams = ts_arr.T
     else:
-        if ts_arr.shape[0] == b:
-            ts_beams = ts_arr
-        elif ts_arr.ndim == 2 and ts_arr.shape[1] == b:
-            ts_beams = jnp.swapaxes(ts_arr, 0, 1)
-        else:
-            flat = ts_arr.reshape(-1)
-            ts_beams = jnp.broadcast_to(flat[None, :], (b, flat.shape[0]))
+        raise ValueError(f"Expected shared or per-beam time grids, got {ts_arr.shape}.")
 
     id = rearrange(jnp.eye(d), "i j -> 1 1 i j")
     c0 = c(jnp.zeros((d,))) * mode[:, None]
@@ -665,6 +669,9 @@ def solve_hom_TR(
 class SolverConfig:
     """
     Configuration for ODE solver settings.
+
+    When supplied, ``dt0`` is a positive initial step magnitude. Each
+    integrator gives it the sign of the time interval.
     """
 
     solver: diffrax.AbstractSolver = diffrax.Tsit5()
@@ -1031,7 +1038,7 @@ def solve_ODE_base(
     mode : jnp.ndarray
         Hamiltonian branch sign.
     ts : jnp.ndarray, shape (Nt,)
-        Time grid.
+        Time grid whose first entry is the launch time of the supplied state.
     c : Callable
         Sound-speed function.
     lam : float, default=0.0
@@ -1054,7 +1061,7 @@ def solve_ODE_base(
     t1 = ts[-1]
 
     if solver_config is not None and solver_config.dt0 is not None:
-        dt0 = solver_config.dt0
+        dt0 = jnp.copysign(solver_config.dt0, t1 - t0)
     else:
         dt0 = ts[1] - ts[0]
 
@@ -1102,7 +1109,7 @@ def _solve_ODE_batch_t(
         t0 = ts_i[0]
         t1 = ts_i[-1]
         dt0 = (
-            solver_config.dt0
+            jnp.copysign(solver_config.dt0, t1 - t0)
             if solver_config is not None and solver_config.dt0 is not None
             else ts_i[1] - ts_i[0]
         )

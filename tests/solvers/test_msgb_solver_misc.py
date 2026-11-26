@@ -398,6 +398,41 @@ def test_hard_threshold_runs_through_public_forward():
     assert bool(jnp.all(jnp.isfinite(result)))
 
 
+@pytest.mark.parametrize(
+    "ode_solver", [gb_solvers.solve_hom_diag, gb_solvers.solve_ODE_base]
+)
+def test_public_forward_keeps_zero_launch_for_delayed_samples(ode_solver):
+    domain, wpt = _build_small_1d_setup(periodic=True)
+    sensors = jnp.array([[0.13], [0.41]])
+    p0 = jnp.cos(6.0 * jnp.pi * domain.grid[:, 0])
+    times = jnp.linspace(0.0, 0.1, 5)
+    solver = MSGBSolver(
+        thr=2,
+        thr_strat="top_n",
+        batch_size=4,
+        input_type="spatial",
+        ode_solver=ode_solver,
+        sum_method="scan_real",
+    )
+
+    full = solver.forward(p0, domain, sensors, times, wpt)
+    delayed = solver.forward(p0, domain, sensors, times[2:], wpt)
+    single = solver.forward(p0, domain, sensors, times[3:4], wpt)
+
+    assert delayed.shape == (3, 2)
+    assert single.shape == (1, 2)
+    assert jnp.allclose(delayed, full[2:], rtol=1e-7, atol=1e-8)
+    assert jnp.allclose(single, full[3:4], rtol=1e-7, atol=1e-8)
+
+
+def test_public_forward_rejects_negative_sample_times(simple_solver):
+    domain, wpt = _build_small_1d_setup()
+    with pytest.raises(ValueError, match="sample times must be nonnegative"):
+        simple_solver.forward(
+            jnp.ones(domain.N), domain, domain.grid, jnp.array([-0.01, 0.0]), wpt
+        )
+
+
 def test_real_inverse_methods_reject_complex_boundary_data(simple_solver):
     domain, wpt = _build_small_1d_setup(periodic=False)
     sensors = geometry.Sensor(domain=domain, binary_mask=jnp.ones(domain.N))
