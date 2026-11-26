@@ -14,4 +14,14 @@ a uniform field. Real renderers can select one packet from each conjugate
 pair when the MSWPT frame supports it. With other frames, the renderer
 selects from the full frame and accounts for that in its amplitude.
 
+Planar inverse solves use one launch time per boundary packet and
+integrate backward from the acquisition time to zero. Supply an
+acquisition time grid starting at zero and spanning the boundary-data
+time axis. Cartesian detector channels follow increasing tangential
+grid order with spacing from `data_domain.dx[1:]`.
+
+For real data on a conjugate frame, inverse `top_n` counts one
+representative per conjugate pair. Complex renderers select signed
+packets from the full frame and retain complex phase.
+
 ::: beamax.solvers.msgb_solvers.msgb_solver

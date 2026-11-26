@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import jax as jax
+import numpy as np
 import pytest
 from beamax.solvers.msgb_solvers import tr_solver_utils
 from beamax.decomposition import DyadicDecomposition
@@ -107,27 +108,32 @@ def _make_2d_data_wpt(c_fn, data_dx=(1.0, 1.0)):
     return domain, wpt
 
 
-def _assert_inward_normal(mask_idx: int, expected_sign: float):
+def _assert_raw_time_backprop_enters_domain(mask_idx: int, inward_sign: float):
     domain, wpt = _make_small_domain_and_wpt()
     mask = jnp.zeros(domain.N)
     mask = mask.at[mask_idx].set(1)
     sensors = geometry.Sensor(domain=domain, binary_mask=mask)
 
     coeffs = jnp.arange(min(8, wpt.total_coeffs))
-    pts, *_ = tr_solver_utils.compute_TR_parameters(coeffs, domain, wpt, sensors)
+    pts, _, _, _, _, modes, _ = tr_solver_utils.compute_TR_parameters(
+        coeffs, domain, wpt, sensors
+    )
     normal_comp = pts[:, 0]
+    normal_velocity = modes[:, 0] * normal_comp / jnp.linalg.norm(pts, axis=1)
 
     finite = jnp.abs(normal_comp) > 1e-8  # ignore grazing packets
     assert jnp.any(finite), "expected at least one non-grazing packet"
-    assert jnp.all(expected_sign * normal_comp[finite] >= 0)
+    # Forward acquisition-time velocity points out of the image; integrating
+    # from t_gamma down to zero therefore moves the ray into the image.
+    assert jnp.all(inward_sign * normal_velocity[finite] <= 0)
 
 
-def test_tr_beam_angles_point_inward_left_boundary():
-    _assert_inward_normal(mask_idx=0, expected_sign=1.0)
+def test_tr_raw_time_backprop_enters_from_left_boundary():
+    _assert_raw_time_backprop_enters_domain(mask_idx=0, inward_sign=1.0)
 
 
-def test_tr_beam_angles_point_inward_right_boundary():
-    _assert_inward_normal(mask_idx=-1, expected_sign=-1.0)
+def test_tr_raw_time_backprop_enters_from_right_boundary():
+    _assert_raw_time_backprop_enters_domain(mask_idx=-1, inward_sign=-1.0)
 
 
 def test_tr_beam_angles_use_spatial_domain_for_detector_side():
@@ -159,7 +165,54 @@ def test_tr_beam_angles_use_spatial_domain_for_detector_side():
     hyperbolic = tau**2 - (0.01**2) * k_tan_sq > 1e-10
 
     assert jnp.any(hyperbolic), "expected at least one non-grazing packet"
-    assert jnp.all(normal_comp[hyperbolic] <= 0)
+    modes = -jnp.sign(tau)
+    normal_velocity = modes * normal_comp / jnp.linalg.norm(pts, axis=1)
+    # At the right detector, raw-time forward propagation exits towards +x.
+    assert jnp.all(normal_velocity[hyperbolic] >= 0)
+
+
+def test_tr_opposite_frequency_packets_map_to_conjugate_beams():
+    """A real boundary packet pair must follow one raw-time ray."""
+
+    def c_fn(x):
+        return 0.3 + 0.01 * x[..., 1]
+
+    data_domain, wpt = _make_2d_data_wpt(c_fn)
+    spatial_domain = geometry.Domain(
+        N=(16, 16), dx=(1.0, 1.0), c=c_fn, periodic=(False, False)
+    )
+    mask = jnp.zeros(spatial_domain.N).at[0, :].set(1)
+    sensors = geometry.Sensor(domain=spatial_domain, binary_mask=mask)
+
+    centres = np.asarray(wpt.dyadic_decomp.centres_ndim)
+    box = next(
+        index
+        for index, centre in enumerate(centres)
+        if np.any(centre != 0) and np.any(np.all(centres == -centre, axis=1))
+    )
+    conjugate_box = int(np.flatnonzero(np.all(centres == -centres[box], axis=1))[0])
+    coeff_shape = tuple(wpt.coeff_shapes[0])
+    translation = tuple(size // 2 for size in coeff_shape[1:])
+    indices = jnp.asarray(
+        [
+            np.ravel_multi_index((box, *translation), coeff_shape),
+            np.ravel_multi_index((conjugate_box, *translation), coeff_shape),
+        ]
+    )
+
+    pts, Mts, xts, omegas, amplitudes, modes, times = (
+        tr_solver_utils.compute_TR_parameters(indices, data_domain, wpt, sensors)
+    )
+    velocities = modes * pts / jnp.linalg.norm(pts, axis=1, keepdims=True)
+
+    assert jnp.allclose(pts[1], -pts[0])
+    assert jnp.allclose(Mts[1], -jnp.conjugate(Mts[0]))
+    assert jnp.allclose(xts[1], xts[0])
+    assert jnp.allclose(omegas[1], omegas[0])
+    assert jnp.allclose(amplitudes[1], jnp.conjugate(amplitudes[0]))
+    assert jnp.allclose(modes[1], -modes[0])
+    assert jnp.allclose(times[1], times[0])
+    assert jnp.allclose(velocities[1], velocities[0])
 
 
 def test_tr_temporal_carrier_sets_tangential_phase():

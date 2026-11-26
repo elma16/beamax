@@ -128,7 +128,7 @@ def mT_forward(
     return M
 
 
-def mT_inverse(xT, pT, mT_spc_time, mode, c):
+def mT_inverse(xT, pT, mT_spc_time, mode, c, normal_axis: int | jnp.ndarray = 0):
     """
     Convert final-time spacetime Hessians to spatial Hessians.
 
@@ -142,10 +142,10 @@ def mT_inverse(xT, pT, mT_spc_time, mode, c):
         Spacetime Hessian matrices.
     mode : jnp.ndarray, shape (b,) or (b, 1)
         Beam branch signs.
-    mode : jnp.ndarray
-        Beam branch signs.
     c : Callable
         Sound-speed function.
+    normal_axis : int, optional
+        Spatial detector normal axis.
 
     Returns
     -------
@@ -156,6 +156,12 @@ def mT_inverse(xT, pT, mT_spc_time, mode, c):
     mode = mode.reshape(b)
     xdot = gb_utils.vmap_gp(xT, pT, mode, c)
     pdot = -gb_utils.vmap_gx(xT, pT, mode, c)
+
+    # The spacetime chart stores time first, followed by the ordered tangent axes.
+    axes = jnp.arange(d)
+    chart_axes = jnp.argsort(jnp.where(axes == normal_axis, -1, axes))
+    world_axes = jnp.argsort(chart_axes)
+    xdot, pdot = xdot[:, chart_axes], pdot[:, chart_axes]
 
     xdot_1 = xdot[:, 0:1]
     pdot_1 = pdot[:, 0:1]
@@ -210,7 +216,7 @@ def mT_inverse(xT, pT, mT_spc_time, mode, c):
     M_lower_left = jnp.transpose(M_upper_right, (0, 2, 1))
 
     M = jnp.block([[M_upper_left, M_upper_right], [M_lower_left, M_lower_right]])
-    return M
+    return M[:, world_axes, :][:, :, world_axes]
 
 
 def find_constant_columns(arr, max_constant_axes=None):
@@ -282,12 +288,10 @@ def compute_TR_parameters(
     ts : jnp.ndarray, shape (B, 2)
         Per-beam time interval.
     """
-    _, const_vals, const_axes = find_constant_columns(
-        sources.positions, max_constant_axes=1
-    )
-    valid = const_axes >= 0
-    normal_axis = jnp.where(valid, const_axes, 0)[0]
-    normal_value = jnp.where(valid, const_vals, 0.0)[0]
+    positions = sources.positions
+    normal_axis = jnp.argmin(jnp.ptp(positions, axis=0))
+    origin = jnp.min(positions, axis=0)
+    normal_value = origin[normal_axis]
 
     d_spatial = sources.domain.ndim
 
@@ -349,7 +353,7 @@ def compute_TR_parameters(
     if d_spatial == 1:
         xts = xts.at[:, 0].set(normal_value)
     else:
-        xts = jnp.where(mask_tan, xstar[:, tan_index], normal_value)
+        xts = jnp.where(mask_tan, origin + xstar[:, tan_index], normal_value)
 
     # Source geometry, not boundary-data coordinates, owns the sound speed.
     physical_c = sources.domain.c_fn
@@ -371,7 +375,13 @@ def compute_TR_parameters(
 
     p_n_unit = jnp.sqrt(radicand)
 
-    # Orient the normal component inward using the spatial sensor domain.
+    # ``data`` is analysed in raw acquisition time and these beams are
+    # integrated from their boundary-centre time back to t=0.  With
+    # signum=-sign(tau), the forward raw-time ray must leave the image through
+    # the detector so that backward integration enters the reconstruction
+    # half-space.  Consequently the momentum normal carries sign(tau) relative
+    # to the geometric inward normal.  This also makes opposite-frequency
+    # packets genuine conjugate beams: both momentum and mode change sign.
     spatial_dx = jnp.array(sources.domain.dx)
     spatial_size = jnp.array(sources.domain.grid_size)
     grid_max = spatial_size[normal_axis] - spatial_dx[normal_axis]
@@ -385,7 +395,7 @@ def compute_TR_parameters(
         ),
     )
     inward_sign = jnp.where(inward_sign == 0.0, 1.0, inward_sign)
-    p_n_unit = inward_sign * p_n_unit
+    p_n_unit = inward_sign * rearrange(sign_tau, "b -> b 1") * p_n_unit
 
     if d_spatial == 1:
         p_unit_spatial = p_unit_spatial.at[:, 0].set(p_n_unit[:, 0])
@@ -406,7 +416,7 @@ def compute_TR_parameters(
         precision=jax.lax.Precision.HIGHEST,
     )
 
-    Mts = compute_mT_linear_system(xts, pts, None, M_init, signum, physical_c)
+    Mts = mT_inverse(xts, pts, M_init, signum, physical_c, normal_axis=normal_axis)
 
     ats = jnp.prod(
         jnp.sqrt(
@@ -449,12 +459,13 @@ def _compute_tr_beams(
     ode_solver: SolverFn,
     sum_beams: bool = False,
     solver_config: Optional[SolverConfig] = None,
+    use_real: bool = True,
 ):
     """
     Unified TR beam computation function.
 
     Similar to _compute_beams in forward_solver_utils.py but for time reversal.
-    TR always uses real-valued computation.
+    Real synthesis supplies the conjugate packet; complex synthesis evaluates each signed packet.
 
     Parameters
     ----------
@@ -467,7 +478,7 @@ def _compute_tr_beams(
     a0 : jnp.ndarray
         Initial amplitudes.
     ω : jnp.ndarray
-        Angular frequencies.
+        Cyclic temporal frequency magnitudes $|\tau|$ in the stored gauge.
     mode : jnp.ndarray
         Beam modes.
     c : Callable
@@ -494,7 +505,10 @@ def _compute_tr_beams(
     jnp.ndarray
         Computed TR beams, summed if ``sum_beams=True``.
     """
-    beams = core.compute_gaussian_beam_real_TR(
+    evaluate = (
+        core.compute_gaussian_beam_real_TR if use_real else core.compute_gaussian_beam
+    )
+    beams = evaluate(
         x0=x0,
         p0=p0,
         M0=M0,
@@ -526,6 +540,7 @@ def _aggregate_tr_beams(
     ode_solver: SolverFn,
     solver_config: Optional[SolverConfig] = None,
     pallas_config: PallasConfig | None = None,
+    use_real: bool = True,
 ):
     """
     Generic TR beam aggregation supporting scan, vmap, Pallas, or direct computation.
@@ -583,7 +598,7 @@ def _aggregate_tr_beams(
         )
         init = jnp.zeros(
             (padded_sensors,) if fused_pallas_carry else init_shape,
-            dtype=x0_batches.dtype,
+            dtype=x0_batches.dtype if use_real else a0_batches.dtype,
         )
 
         def scan_fn(carry, inp):
@@ -658,6 +673,7 @@ def _aggregate_tr_beams(
                     periodic,
                     ode_solver,
                     sum_beams=True,
+                    use_real=use_real,
                     solver_config=solver_config,
                 )
                 terminal_result = batch_result[-1, ...]
@@ -686,6 +702,7 @@ def _aggregate_tr_beams(
             periodic,
             ode_solver,
             sum_beams=True,
+            use_real=use_real,
             solver_config=solver_config,
         )
         return beams[-1, ...]
@@ -702,6 +719,7 @@ def compute_TR_result(
     aggregate_method: str = "scan",
     solver_config: Optional[SolverConfig] = None,
     pallas_config: PallasConfig | None = None,
+    use_real: bool = True,
 ) -> jnp.ndarray:
     """
     Compute time-reversal solution using Gaussian beams.
@@ -728,6 +746,9 @@ def compute_TR_result(
         Beam aggregation method.
     solver_config : SolverConfig, optional
         Numerical ODE configuration.
+    use_real : bool, default=True
+        Sum each beam with its conjugate for real reconstruction. Complex
+        reconstruction uses the ``scan`` or ``all`` aggregation method.
 
     Returns
     -------
@@ -743,7 +764,14 @@ def compute_TR_result(
     if ode_solver is None:
         ode_solver = gb_solvers.solve_ODE_batch_t
 
+    if not use_real and aggregate_method in {"pallas", "terminal_xla"}:
+        raise ValueError("Terminal time-reversal kernels require real aggregation.")
+
     init_shape = sensors.shape[:-1]
+    if params[0].size == 0:
+        return jnp.zeros(
+            init_shape, dtype=params[2].dtype if use_real else params[4].dtype
+        )
 
     return _aggregate_tr_beams(
         params=params,
@@ -757,4 +785,5 @@ def compute_TR_result(
         ode_solver=ode_solver,
         solver_config=solver_config,
         pallas_config=pallas_config,
+        use_real=use_real,
     )

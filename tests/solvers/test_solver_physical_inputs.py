@@ -6,7 +6,7 @@ import pytest
 
 from beamax.decomposition import DyadicDecomposition
 from beamax.gb.gb_solvers import solve_hom_diag
-from beamax.geometry import Domain
+from beamax.geometry import Domain, Sensor
 from beamax.solvers import MSGBSolver
 from beamax.transforms import MSWPT
 
@@ -71,3 +71,97 @@ def test_empty_forward_selection_preserves_output_shape(method):
     signal = solver(method, hard=True).forward(jnp.zeros(d.N), d, d.grid, t, w)
     assert signal.shape == (16, 16)
     np.testing.assert_array_equal(signal, 0.0)
+
+
+@pytest.mark.parametrize("method", ["all_complex", "scan_complex"])
+@pytest.mark.parametrize("op", ["time_reversal", "adjoint"])
+def test_inverse_preserves_complex_phase(method, op):
+    d = Domain(N=(16,), dx=(0.1,), c=1.0, periodic=(False,))
+    w = transform(d.N, boxes=2)
+    t = jnp.arange(16) * 0.1
+    residual = jnp.sin(2 * jnp.pi * 4 * jnp.arange(16) / 16)
+    source = Sensor(domain=d, positions=jnp.array([[0.0]]))
+    operation = getattr(solver(method), op)
+    # The acquisition grid may have more time samples than its spectrally cropped record.
+    acquisition_times = jnp.linspace(0.0, t[-1], 2 * len(t) - 1)
+    args = (d, d.grid, source, acquisition_times, d, w)
+    real = operation(residual.astype(complex), *args)
+    rotated = operation(1j * residual, *args)
+    assert float(jnp.max(jnp.abs(real))) > 0.1
+    np.testing.assert_allclose(rotated, 1j * real, atol=2e-6)
+
+
+@pytest.mark.parametrize("method", ["scan_real", "scan_complex", "pallas_real"])
+def test_empty_inverse_selection_preserves_output_shape(method):
+    d = Domain(N=(16,), dx=(0.1,), c=1.0, periodic=(False,))
+    w = transform(d.N)
+    t = jnp.arange(16) * 0.1
+    source = Sensor(domain=d, positions=jnp.array([[0.0]]))
+    op = solver(method, hard=True)
+    for value, shape in [
+        (op.time_reversal(jnp.zeros(d.N), d, d.grid, source, t, d, w), d.N),
+        (op.adjoint(jnp.zeros(d.N), d, d.grid, source, t, d, w), d.N),
+    ]:
+        assert value.shape == shape
+        np.testing.assert_array_equal(value, 0.0)
+
+
+def test_planar_launch_uses_acquisition_origin_and_normal_axis():
+    image = Domain(N=(32, 32), dx=(1.0, 1.0), c=1.0, periodic=(False, False))
+    data_domain = Domain(N=(16, 16), dx=(0.1, 1.0), c=1.0, periodic=(False, False))
+    w = transform(data_domain.N, boxes=2)
+    samples = jnp.arange(16.0)
+    time = 0.1 * samples
+    data = jnp.cos(2 * jnp.pi * (3 * samples[:, None] + samples[None, :]) / 16)
+    op = MSGBSolver(1, "top_n", 1, "spatial", solve_hom_diag, "all_real")
+
+    def launch(positions):
+        detector = Sensor(domain=image, positions=positions)
+        _, params = op.time_reversal_with_params(
+            data, image, image.grid[:1, :1], detector, time, data_domain, w
+        )
+        return [np.asarray(x).squeeze() for x in params[:3]]
+
+    positions = jnp.stack((jnp.zeros(16), samples), axis=1)
+    p, hessian, x = launch(positions)
+    _, _, shifted = launch(positions + jnp.array([0.0, 10.0]))
+    rotated_p, rotated_hessian, rotated_x = launch(positions[:, ::-1])
+    np.testing.assert_allclose(shifted - x, [0.0, 10.0], atol=2e-6)
+    np.testing.assert_allclose(rotated_x, x[::-1], atol=2e-6)
+    np.testing.assert_allclose(rotated_p, p[::-1], atol=2e-6)
+    np.testing.assert_allclose(rotated_hessian, hessian[::-1, ::-1], atol=2e-6)
+
+
+@pytest.mark.parametrize(
+    "problem, message",
+    [
+        ("time_origin", "start at zero"),
+        ("spacing", "Detector spacing"),
+        ("channel_order", "Cartesian grid order"),
+        ("missing_detector_axis", "Boundary data detector axes"),
+    ],
+)
+def test_inverse_validates_acquisition_coordinates(problem, message):
+    image = Domain(N=(32, 32), dx=(1.0, 1.0), c=1.0, periodic=(False, False))
+    times = jnp.arange(16) * 0.1
+    positions = jnp.stack((jnp.zeros(16), jnp.arange(16)), axis=1)
+    spacing = 2.0 if problem == "spacing" else 1.0
+    acquisition = Domain(N=(16, 16), dx=(0.1, spacing), c=1.0, periodic=(False, False))
+    if problem == "time_origin":
+        times = times + 0.1
+    if problem == "channel_order":
+        positions = positions[::-1]
+    if problem == "missing_detector_axis":
+        acquisition = Domain(N=(16,), dx=(0.1,), c=1.0, periodic=(False,))
+    source = Sensor(domain=image, positions=positions)
+
+    with pytest.raises(ValueError, match=message):
+        solver("all_real").time_reversal(
+            jnp.zeros(acquisition.N),
+            image,
+            image.grid[:1, :1],
+            source,
+            times,
+            acquisition,
+            transform(acquisition.N, boxes=2),
+        )

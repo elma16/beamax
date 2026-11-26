@@ -22,7 +22,15 @@ from beamax.solvers.msgb_solvers.tr_solver_utils import (
 from beamax.geometry import Domain, Sensor
 from beamax.transforms import MSWPT
 from beamax import utils
-from beamax.gb.gb_solvers import SolverFn, SolverConfig, solve_hom_diag
+from beamax.gb.gb_solvers import (
+    SolverFn,
+    SolverConfig,
+    solve_hom_diag,
+    solve_hom_general,
+    solve_hom_TR,
+    solve_ODE_base,
+    solve_ODE_batch_t,
+)
 from beamax.gb.pallas_config import PallasConfig
 from beamax.solvers.msgb_solvers.adjoint_solver_utils import compute_adj_parameters
 from beamax.coefficients import streamed_top_n_coefficients
@@ -469,8 +477,10 @@ class MSGBSolver(eqx.Module):
         ``"scan_real"``, ``"all_complex"``, ``"scan_complex"``, or the
         experimental accelerator mode ``"pallas_real"``.
     tr_ode_solver : SolverFn, optional
-        ODE integrator for the time-reversal dynamics. Falls back to
-        ``ode_solver`` when ``None``.
+        ODE integrator for per-beam inverse time grids. By default,
+        the built-in homogeneous and numerical forward solvers use
+        their corresponding per-beam integrators. A custom forward
+        integrator is reused when it supports per-beam time grids.
     sharding : ShardingStrategy, optional
         Multi-device sharding strategy. ``None`` runs on a single device.
     ode_config : SolverConfig, optional
@@ -537,7 +547,9 @@ class MSGBSolver(eqx.Module):
             Aggregation mode string. Must be one of the values listed in the
             class-level parameter documentation.
         tr_ode_solver : SolverFn, optional
-            ODE solver for time reversal. Defaults to ``ode_solver``.
+            Per-beam integrator for time reversal and the adjoint.
+            Defaults to the per-beam counterpart for a built-in solver,
+            or reuses the custom ``ode_solver``.
         sharding : ShardingStrategy, optional
             Multi-device sharding strategy.
         ode_config : SolverConfig, optional
@@ -665,6 +677,10 @@ class MSGBSolver(eqx.Module):
         self.batch_size = batch_size
         self.input_type = input_type
         self.ode_solver = ode_solver
+        if tr_ode_solver is None and ode_solver in (solve_hom_diag, solve_hom_general):
+            tr_ode_solver = solve_hom_TR
+        if tr_ode_solver is None and ode_solver is solve_ODE_base:
+            tr_ode_solver = solve_ODE_batch_t
         self.tr_ode_solver = ode_solver if tr_ode_solver is None else tr_ode_solver
         self.sharding = sharding
         self.ode_config = ode_config
@@ -957,20 +973,27 @@ class MSGBSolver(eqx.Module):
             ``(pts, Mts, xts, omegas, ats, signum, ts)``.
         """
         self._validate_boundary_data(data, data_domain, sources, ts=ts)
-        threshold = self._effective_top_n(data_wpt)
+        # Real boundary data only needs one member of each conjugate-frequency
+        # pair: the real renderer supplies its conjugate.  Apart from avoiding
+        # duplicate rays, this makes ``top_n`` count actual packet
+        # representatives, consistently with the real forward solver.
+        half_frame = self.use_real and data_wpt.has_conjugate_frame
+        threshold = self._effective_top_n(data_wpt, half_frame=half_frame)
         if self._streams_top_n(data_wpt, data.dtype):
             coeff_idx, max_coeffs = streamed_top_n_coefficients(
                 data,
                 data_wpt,
                 top_n=int(threshold),
                 input_type=self.input_type,
-                positive_half=False,
+                positive_half=half_frame,
                 scale=0.5,
                 boxes_per_chunk=self._boxes_per_chunk(),
             )
         else:
             # Zero initial derivative gives c+ = 0.5 WPT(data).
             c_pos = 0.5 * data_wpt.forward(data, self.input_type)
+            if half_frame:
+                c_pos = c_pos * data_wpt.half_mask
             coeff_idx, max_coeffs = threshold_coefficients(
                 c_pos, threshold, self.thr_strat
             )
@@ -980,11 +1003,13 @@ class MSGBSolver(eqx.Module):
         )
 
         ats = ats * max_coeffs[:, None]
+        if self.use_real and not half_frame:
+            ats = 0.5 * ats
 
         # Only these aggregators consume an explicit batch axis.
         inverse_aggregate = self._effective_inverse_aggregate_method()
         if inverse_aggregate in {"scan", "pallas", "terminal_xla"}:
-            pts, Mts, xts, ωts, ats, signum, beam_times = utils.batch_data(
+            pts, Mts, xts, ωts, ats, signum, beam_times = _batch_beam_params(
                 pts,
                 Mts,
                 xts,
@@ -1063,6 +1088,10 @@ class MSGBSolver(eqx.Module):
             )
         if ts is not None:
             _validate_time_grid(ts)
+            if float(ts[0]) != 0.0:
+                raise ValueError(
+                    "The inverse acquisition time grid must start at zero."
+                )
             data_span = (data.shape[0] - 1) * data_domain.dx[0]
             acquisition_span = float(np.asarray(ts)[-1] - np.asarray(ts)[0])
             if not np.isclose(acquisition_span, data_span, rtol=1e-6, atol=1e-12):
@@ -1073,24 +1102,16 @@ class MSGBSolver(eqx.Module):
             raise ValueError("sources must be a Sensor on a regular planar grid.")
 
         positions = np.asarray(sources.positions)
-        stds = np.std(positions, axis=0)
-        normal_axis = int(np.argmin(stds))
+        normal_axis = int(np.argmin(np.ptp(positions, axis=0)))
         tolerance = 1e-7 * max(1.0, float(np.max(sources.domain.grid_size)))
-        if stds[normal_axis] > tolerance:
+        if np.std(positions[:, normal_axis]) > tolerance:
             raise ValueError("sources must lie on an axis-aligned planar surface.")
 
         tangential_axes = [ax for ax in range(positions.shape[1]) if ax != normal_axis]
-        counts = []
-        for axis in tangential_axes:
-            values = np.unique(positions[:, axis])
-            if values.size > 2 and not np.allclose(
-                np.diff(values), np.diff(values)[0], rtol=1e-6, atol=tolerance
-            ):
-                raise ValueError(
-                    "sources must be uniformly spaced on the detector plane."
-                )
-            counts.append(int(values.size))
-        expected_detector_shape = tuple(counts) if counts else (1,)
+        detector_values = [np.unique(positions[:, axis]) for axis in tangential_axes]
+        expected_detector_shape = tuple(values.size for values in detector_values) or (
+            1,
+        )
         actual_detector_shape = tuple(data.shape[1:]) or (1,)
         if actual_detector_shape != expected_detector_shape:
             raise ValueError(
@@ -1099,6 +1120,20 @@ class MSGBSolver(eqx.Module):
             )
         if math.prod(expected_detector_shape) != positions.shape[0]:
             raise ValueError("sources must form a complete Cartesian detector grid.")
+
+        for data_axis, values in enumerate(detector_values, start=1):
+            if values.size > 1 and not np.allclose(
+                np.diff(values), data_domain.dx[data_axis], rtol=1e-6, atol=tolerance
+            ):
+                raise ValueError(
+                    "Detector spacing must match the corresponding data_domain.dx."
+                )
+        if tangential_axes:
+            sort_keys = tuple(positions[:, a] for a in reversed(tangential_axes))
+            if not np.array_equal(np.lexsort(sort_keys), np.arange(len(positions))):
+                raise ValueError(
+                    "Order detector positions and boundary channels in Cartesian grid order."
+                )
 
     def forward(
         self,
@@ -1315,7 +1350,7 @@ class MSGBSolver(eqx.Module):
         self,
         data: jnp.ndarray,
         domain: Domain,
-        sensors: Sensor,
+        sensors: Sensor | jnp.ndarray,
         sources: Sensor,
         ts,
         data_domain: Domain,
@@ -1359,9 +1394,7 @@ class MSGBSolver(eqx.Module):
 
         Notes
         -----
-        Time reversal here uses per-beam time intervals (via
-        :func:`beamax.gb.solve_ODE_batch_t`) regardless of the forward
-        integrator, to accommodate the variable emission time of each beam.
+        Time reversal uses a separate launch time for each boundary packet.
         """
         p0_recon, _ = self.time_reversal_with_params(
             data, domain, sensors, sources, ts, data_domain, data_wpt
@@ -1372,7 +1405,7 @@ class MSGBSolver(eqx.Module):
         self,
         data: jnp.ndarray,
         domain: Domain,
-        sensors: Sensor,
+        sensors: Sensor | jnp.ndarray,
         sources: Sensor,
         ts,
         data_domain: Domain,
@@ -1400,6 +1433,8 @@ class MSGBSolver(eqx.Module):
             raise ValueError(
                 "The MSGB time reversal solver only supports free space boundary conditions."
             )
+        if data_wpt.dyadic_decomp.N != data_domain.N:
+            raise ValueError("data_wpt grid shape must match data_domain.N.")
         if data.dtype in complex_dtypes and self.use_real:
             raise ValueError(
                 "Complex time-reversal data requires an *_complex sum_method; "
@@ -1435,6 +1470,7 @@ class MSGBSolver(eqx.Module):
             domain_size=domain.grid_size,
             periodic=jnp.array(domain.periodic),
             ode_solver=self.tr_ode_solver,
+            use_real=self.use_real,
             aggregate_method=inverse_aggregate,
             solver_config=self.ode_config,
             pallas_config=self._effective_pallas_config(
@@ -1476,21 +1512,27 @@ class MSGBSolver(eqx.Module):
         -------
         Tuple of beam parameters suitable for `compute_TR_result`.
         """
-        # Direct source analysis avoids the IVP half-wave factor; B^{-1} needs
-        # the signed temporal boxes.
-        threshold = self._effective_top_n(data_wpt)
+        # Direct source analysis avoids the IVP half-wave polarisation factor.
+        # A real renderer supplies each selected packet's conjugate, so analyse
+        # only one conjugate-frequency half. Complex renderers retain the full
+        # signed frame. In both cases the source coefficients themselves keep
+        # their raw scale.
+        half_frame = self.use_real and data_wpt.has_conjugate_frame
+        threshold = self._effective_top_n(data_wpt, half_frame=half_frame)
         if self._streams_top_n(data_wpt, source.dtype):
             coeff_idx, max_coeffs = streamed_top_n_coefficients(
                 source,
                 data_wpt,
                 top_n=int(threshold),
                 input_type=self.input_type,
-                positive_half=False,
+                positive_half=half_frame,
                 scale=1.0,
                 boxes_per_chunk=self._boxes_per_chunk(),
             )
         else:
             source_coeffs = data_wpt.forward(source, self.input_type)
+            if half_frame:
+                source_coeffs = source_coeffs * data_wpt.half_mask
             coeff_idx, max_coeffs = threshold_coefficients(
                 source_coeffs,
                 threshold,
@@ -1506,10 +1548,12 @@ class MSGBSolver(eqx.Module):
         )
 
         ats = ats * max_coeffs[:, None]
+        if self.use_real and not half_frame:
+            ats = 0.5 * ats
 
         inverse_aggregate = self._effective_inverse_aggregate_method()
         if inverse_aggregate in {"scan", "pallas", "terminal_xla"}:
-            pts, Mts, xts, omegas, ats, signum, ts = utils.batch_data(
+            pts, Mts, xts, omegas, ats, signum, ts = _batch_beam_params(
                 pts,
                 Mts,
                 xts,
@@ -1625,6 +1669,8 @@ class MSGBSolver(eqx.Module):
                 "MSGBSolver.adjoint currently assumes non-periodic spatial "
                 "boundaries in the reconstruction domain."
             )
+        if data_wpt.dyadic_decomp.N != data_domain.N:
+            raise ValueError("data_wpt grid shape must match data_domain.N.")
         if data.dtype in complex_dtypes and self.use_real:
             raise ValueError(
                 "Complex adjoint data requires an *_complex sum_method; "
@@ -1660,6 +1706,7 @@ class MSGBSolver(eqx.Module):
             domain_size=domain.grid_size,
             periodic=jnp.array(domain.periodic),
             ode_solver=self.tr_ode_solver,
+            use_real=self.use_real,
             aggregate_method=inverse_aggregate,
             solver_config=self.ode_config,
             pallas_config=self._effective_pallas_config(

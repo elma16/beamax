@@ -142,6 +142,21 @@ def test_terminal_pallas_selects_pallas_inverse_evaluation():
     assert solver._effective_inverse_aggregate_method() == "pallas"
 
 
+@pytest.mark.parametrize(
+    "forward_integrator, expected",
+    [
+        (gb_solvers.solve_hom_diag, gb_solvers.solve_hom_TR),
+        (gb_solvers.solve_hom_general, gb_solvers.solve_hom_TR),
+        (gb_solvers.solve_ODE_base, gb_solvers.solve_ODE_batch_t),
+    ],
+)
+def test_default_inverse_integrator_accepts_per_beam_times(
+    forward_integrator, expected
+):
+    solver = MSGBSolver(4, "top_n", 4, "spatial", forward_integrator, "all_real")
+    assert solver.tr_ode_solver is expected
+
+
 class TestBeamShardingSpec:
     def test_scalar_input_rejected(self, sharding_strategy):
         """Sharding a scalar (ndim=0) array is undefined and must raise."""
@@ -554,13 +569,25 @@ def test_form_adjoint_source_rejects_mismatched_detector_count():
         form_adjoint_source(data, 0.1, jnp.ones(5), None)
 
 
-def test_prepare_adjoint_uses_raw_spacetime_coefficients(monkeypatch):
-    """Boundary-source analysis must not insert an IVP half-wave factor 1/2."""
+@pytest.mark.parametrize(
+    ("sum_method", "expected_amplitudes"),
+    [
+        ("all_real", jnp.array([1.0, 4.0])),
+        ("all_complex", jnp.array([3.0, 4.0])),
+    ],
+)
+def test_prepare_adjoint_uses_half_frame_for_real_renderer(
+    monkeypatch, sum_method, expected_amplitudes
+):
+    """A real adjoint budget counts representatives, not conjugate pairs."""
 
     class FakeWPT:
+        has_conjugate_frame = True
         # Force the raw, materialized coefficient path under test.
         windowing = "none"
         total_coeffs = 4
+        coeffs_cumsum = jnp.array([0, 4])
+        half_mask = jnp.array([1.0, 1.0, 0.0, 0.0])
 
         def forward(self, source, input_type):
             assert input_type == "spatial"
@@ -591,7 +618,7 @@ def test_prepare_adjoint_uses_raw_spacetime_coefficients(monkeypatch):
         batch_size=2,
         input_type="spatial",
         ode_solver=gb_solvers.solve_ODE_base,
-        sum_method="all_real",
+        sum_method=sum_method,
     )
     params = solver._prepare_adj_params(
         source=jnp.ones(4),
@@ -600,8 +627,78 @@ def test_prepare_adjoint_uses_raw_spacetime_coefficients(monkeypatch):
         sources=object(),
     )
 
-    # top_n returns the selected values in increasing magnitude: 3 then 4.
-    assert jnp.array_equal(params[4].ravel(), jnp.array([3.0, 4.0]))
+    # The real renderer sees only the first conjugate half, whereas a complex
+    # renderer keeps the two largest coefficients from the full signed frame.
+    assert jnp.array_equal(params[4].ravel(), expected_amplitudes)
+
+
+@pytest.mark.parametrize(
+    ("sum_method", "data", "expected_amplitudes"),
+    [
+        ("all_real", jnp.ones(4), jnp.array([0.5, 2.0])),
+        (
+            "all_complex",
+            jnp.ones(4, dtype=jnp.complex128),
+            jnp.array([1.5, 2.0]),
+        ),
+    ],
+)
+def test_prepare_time_reversal_uses_half_frame_for_real_renderer(
+    monkeypatch, sum_method, data, expected_amplitudes
+):
+    """Real TR selects one representative per conjugate-frequency pair."""
+
+    class FakeWPT:
+        has_conjugate_frame = True
+        windowing = "none"
+        total_coeffs = 4
+        coeffs_cumsum = jnp.array([0, 4])
+        half_mask = jnp.array([1.0, 1.0, 0.0, 0.0])
+
+        def forward(self, source, input_type):
+            del source
+            assert input_type == "spatial"
+            return jnp.array([1.0, 4.0, 2.0, 3.0])
+
+    def fake_compute_tr_parameters(indices, data_domain, data_wpt, sources):
+        del data_domain, data_wpt, sources
+        b = indices.shape[0]
+        return (
+            jnp.zeros((b, 1)),
+            1j * jnp.ones((b, 1, 1)),
+            jnp.zeros((b, 1)),
+            jnp.ones((b,)),
+            jnp.ones((b, 1)),
+            jnp.ones((b, 1)),
+            jnp.zeros((b, 2)),
+        )
+
+    monkeypatch.setattr(
+        MSGBSolver,
+        "_validate_boundary_data",
+        lambda self, *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        msgb_solver_module,
+        "compute_TR_parameters",
+        fake_compute_tr_parameters,
+    )
+    solver = MSGBSolver(
+        thr=2,
+        thr_strat="top_n",
+        batch_size=2,
+        input_type="spatial",
+        ode_solver=gb_solvers.solve_ODE_base,
+        sum_method=sum_method,
+    )
+    params = solver._prepare_tr_params(
+        data=data,
+        data_domain=object(),
+        data_wpt=FakeWPT(),
+        sources=object(),
+    )
+
+    assert jnp.array_equal(params[4].ravel(), expected_amplitudes)
 
 
 def test_c_inverse_squared_output_weight_closes_constant_speed_mode_identity():
