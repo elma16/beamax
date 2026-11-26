@@ -221,8 +221,8 @@ def _sum_gaussian_beam_real_components_xla(
     pt,
     matrix_real,
     matrix_imag,
-    amplitude,
-    angle,
+    amplitude_real,
+    amplitude_imag,
     omega0,
     sensors,
     domain_size,
@@ -233,7 +233,10 @@ def _sum_gaussian_beam_real_components_xla(
     periodic_axes: tuple[bool, ...] | None = None,
     initial_field=None,
 ):
-    """Sum preprocessed real beam components with XLA."""
+    """Sum beam contributions with XLA.
+
+    The amplitude components include the factor of two for each conjugate pair.
+    """
     if rounding_mode not in {"nearest_even", "half_open"}:
         raise ValueError(f"Unsupported rounding mode {rounding_mode!r}.")
 
@@ -265,7 +268,7 @@ def _sum_gaussian_beam_real_components_xla(
         )
 
     def add_beam(accumulator, beam):
-        xi, pi, mr, mi, amp, phase_offset, frequency = beam
+        xi, pi, mr, mi, real_amp, imag_amp, frequency = beam
         delta = minimum_image(sensors_flat[None, :, :] - xi[:, None, :])
         phase_linear = jnp.einsum("tsd,td->ts", delta, pi, precision=precision)
         phase_quadratic = 0.5 * jnp.einsum(
@@ -282,13 +285,10 @@ def _sum_gaussian_beam_real_components_xla(
             delta,
             precision=precision,
         )
+        phase = frequency * (phase_linear + phase_quadratic)
         contribution = (
-            amp[:, None]
-            * jnp.cos(
-                frequency * (phase_linear + phase_quadratic) + phase_offset[:, None]
-            )
-            * jnp.exp(-frequency * decay_quadratic)
-        )
+            real_amp[:, None] * jnp.cos(phase) - imag_amp[:, None] * jnp.sin(phase)
+        ) * jnp.exp(-frequency * decay_quadratic)
         return accumulator + contribution, None
 
     initial = (
@@ -299,7 +299,7 @@ def _sum_gaussian_beam_real_components_xla(
     result, _ = jax.lax.scan(
         add_beam,
         initial,
-        (xt, pt, matrix_real, matrix_imag, amplitude, angle, omega0),
+        (xt, pt, matrix_real, matrix_imag, amplitude_real, amplitude_imag, omega0),
     )
     return result
 
@@ -327,8 +327,8 @@ def sum_gaussian_beam_real_trajectories_xla(
         pt,
         jnp.real(Mt),
         jnp.imag(Mt),
-        2.0 * jnp.abs(amplitude),
-        safe_angle_eps(amplitude),
+        2.0 * jnp.real(amplitude),
+        2.0 * jnp.imag(amplitude),
         omega0,
         sensors,
         domain_size,
@@ -480,21 +480,21 @@ def compute_gaussian_beam_real_TR(
     solver_config: Optional[SolverConfig] = None,
 ) -> Float[Array, "Nt *S b"]:
     r"""
-    Compute a collection of Gaussian Beams in n-dimensions, assuming the resulting field is real.
+    Compute the real contribution of each Gaussian beam and its conjugate.
 
     $$
+    \begin{aligned}
     u+\overline{u}
-    =2|A|\cos\!\left(
-      \omega\left[p\mathbin{\cdot}\Delta x
-      +\frac{1}{2}\Delta x^{\mathsf T}M_R\Delta x\right]
-      +\arg A
-    \right)
-    \exp\!\left(
-      -\frac{\omega}{2}\Delta x^{\mathsf T}M_I\Delta x
-    \right).
+    &=2\left(\operatorname{Re}(A)\cos\theta-\operatorname{Im}(A)\sin\theta\right)
+      \exp\!\left(-\frac{\omega}{2}\Delta x^{\mathsf T}M_I\Delta x\right), \\
+    \theta
+    &=\omega\left[p\mathbin{\cdot}\Delta x
+      +\frac{1}{2}\Delta x^{\mathsf T}M_R\Delta x\right].
+    \end{aligned}
     $$
 
-    This should require 2 times less memory than the complex version, and should be faster.
+    This form is linear in the real and imaginary parts of the amplitude,
+    including at zero amplitude.
 
     Parameters
     ----------
@@ -574,18 +574,12 @@ def compute_gaussian_beam_real_TR(
 
     real_phase = xp_term + xMrx_term
 
-    amplitude = jnp.abs(At)
-
     real_ω = jnp.einsum(
         "b,bt...->bt...",
         omega0,
         real_phase,
         precision=jax.lax.Precision.HIGHEST,
     )
-    num_sensor_dims = real_phase.ndim - 3
-    angle = safe_angle_eps(At).reshape(At.shape + (1,) * num_sensor_dims)
-    phase_angle = real_ω + angle
-
     damping = jnp.exp(
         -jnp.einsum(
             "b,bt...->bt...",
@@ -595,11 +589,9 @@ def compute_gaussian_beam_real_TR(
         )
     )
 
-    gb_real = jnp.einsum(
-        "bt1,bt...,bt...->t...b", 2 * amplitude, jnp.cos(phase_angle), damping
-    )
-
-    return gb_real
+    amplitude = At[..., 0].reshape(At.shape[:2] + (1,) * (real_phase.ndim - 2))
+    oscillation = amplitude.real * jnp.cos(real_ω) - amplitude.imag * jnp.sin(real_ω)
+    return jnp.moveaxis(2 * oscillation * damping, 0, -1)
 
 
 def compute_gaussian_beam_real_TR_xla_terminal(

@@ -371,6 +371,47 @@ def test_amplitude_is_linear():
     assert jnp.allclose(gb_num * scale_factor, gb_num_rescale, atol=1e-16)
 
 
+def test_real_time_reversal_has_linear_derivative_at_zero_amplitude():
+    x0 = jnp.zeros((1, 1))
+    p0 = jnp.ones_like(x0)
+    m0 = 1j * jnp.ones((1, 1, 1))
+    times = jnp.zeros((1, 1))
+    sensors = jnp.array([[[0.0], [0.5]]])
+    unit = jnp.ones(1)
+    periodic = jnp.array([False])
+
+    def trajectory(x, p, matrix, amplitude, *unused_args):
+        return x[:, None], p[:, None], matrix[:, None], amplitude[:, None, None]
+
+    def field(coeff):
+        a0 = (coeff[0] + 1j * coeff[1])[None]
+        result = core.compute_gaussian_beam_real_TR(
+            x0,
+            p0,
+            m0,
+            a0,
+            unit,
+            unit,
+            c,
+            0.0,
+            times,
+            sensors,
+            unit,
+            periodic,
+            trajectory,
+        )
+        assert result.shape == (1, 1, 2, 1)
+        return result[0, 0, :, 0]
+
+    delta = sensors[0, :, 0]
+    expected = (
+        2
+        * jnp.exp(-(delta**2) / 2)[:, None]
+        * jnp.stack([jnp.cos(delta), -jnp.sin(delta)], axis=1)
+    )
+    assert jnp.allclose(jax.jacrev(field)(jnp.zeros(2)), expected, atol=1e-12)
+
+
 def test_hom_general_solver():
     """
     Test that for a non-diagonal M0, the general solver agrees with the analyical solution.

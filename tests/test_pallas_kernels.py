@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -148,6 +150,42 @@ def _reference_sum(xt, pt, Mt, At, omega, sensors, domain_size, periodic):
         * jnp.exp(-omega[:, None, None] * imag_quadratic)
     )
     return jnp.sum(contributions, axis=0)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+@pytest.mark.parametrize(
+    "accumulate",
+    [
+        core.sum_gaussian_beam_real_trajectories_xla,
+        partial(
+            sum_gaussian_beam_real_pallas,
+            config=PallasConfig(sensor_block_size=4),
+            interpret=True,
+        ),
+    ],
+    ids=["xla", "pallas"],
+)
+def test_zero_complex_amplitude_has_linear_jvp_and_vjp(dtype, accumulate):
+    xt = jnp.zeros((1, 1, 1), dtype=dtype)
+    pt = jnp.ones_like(xt)
+    mt = 1j * jnp.ones((1, 1, 1, 1), dtype=dtype)
+    sensors = jnp.array([[0], [0.5]], dtype=dtype)
+    unit = jnp.ones((1,), dtype=dtype)
+    periodic = jnp.array([False])
+
+    def field(coeff):
+        amplitude = (coeff[0] + 1j * coeff[1]).reshape(1, 1, 1)
+        return accumulate(xt, pt, mt, amplitude, unit, sensors, unit, periodic)[0]
+
+    delta = sensors[:, 0]
+    expected = (
+        2
+        * jnp.exp(-(delta**2) / 2)[:, None]
+        * jnp.stack([jnp.cos(delta), -jnp.sin(delta)], axis=1)
+    )
+    zero = jnp.zeros((2,), dtype=dtype)
+    np.testing.assert_allclose(jax.jacfwd(field)(zero), expected, atol=1e-6)
+    np.testing.assert_allclose(jax.jacrev(field)(zero), expected, atol=1e-6)
 
 
 @pytest.mark.parametrize("ndim", [1, 2, 3])

@@ -87,6 +87,23 @@ def _trajectory_oracle(*args):
     )
 
 
+def test_fused_zero_amplitude_has_linear_jvp_and_vjp():
+    args = _initial_parameter_case(num_beams=1, num_times=2, num_sensors=2)
+    config = PallasConfig(sensor_block_size=4, gpu_time_block_size=2)
+
+    def field(coeff):
+        amplitude = (coeff[0] + 1j * coeff[1])[None]
+        return sum_gaussian_beam_real_hom_diag_3d_pallas(
+            *args[:3], amplitude, *args[4:], config=config, interpret=True
+        )
+
+    basis = jnp.eye(2, dtype=jnp.float32)
+    expected = jnp.stack([field(direction) for direction in basis], axis=-1)
+    zero = jnp.zeros(2, dtype=jnp.float32)
+    np.testing.assert_allclose(jax.jacfwd(field)(zero), expected, rtol=2e-5, atol=2e-6)
+    np.testing.assert_allclose(jax.jacrev(field)(zero), expected, rtol=2e-5, atol=2e-6)
+
+
 def test_fused_explicit_kernel_matches_solve_hom_diag_oracle_with_padding():
     args = _initial_parameter_case(num_beams=3, num_times=3, num_sensors=5)
     config = PallasConfig(sensor_block_size=4, gpu_time_block_size=2)

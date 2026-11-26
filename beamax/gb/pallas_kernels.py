@@ -235,6 +235,7 @@ def sum_gaussian_beam_real_pallas(
     Notes
     -----
     Reduction order differs from vectorized ``jnp.sum``.
+    The real and imaginary amplitude components enter the kernel separately.
     """
     pl = _load_pallas()
 
@@ -314,15 +315,8 @@ def sum_gaussian_beam_real_pallas(
     Mr = jnp.real(Mt).astype(real_dtype)
     Mi = jnp.imag(Mt).astype(real_dtype)
     At_flat = At[..., 0] if At.ndim == 3 else At
-    amplitude = (2.0 * jnp.abs(At_flat)).astype(real_dtype)
-    at_real = jnp.real(At_flat)
-    at_imag = jnp.imag(At_flat)
-    angle_real = jnp.where(
-        (at_real == 0) & (at_imag == 0),
-        jnp.asarray(1e-12, dtype=at_real.dtype),
-        at_real,
-    )
-    angle = jnp.arctan2(at_imag, angle_real).astype(real_dtype)
+    amplitude_real = (2.0 * jnp.real(At_flat)).astype(real_dtype)
+    amplitude_imag = (2.0 * jnp.imag(At_flat)).astype(real_dtype)
     omega0 = omega0.astype(real_dtype)
     sensors = sensors.astype(real_dtype)
     domain_size = domain_size.astype(real_dtype)
@@ -385,8 +379,8 @@ def sum_gaussian_beam_real_pallas(
             pt = pad_beams(pt)
             Mr = pad_beams(Mr)
             Mi = pad_beams(Mi)
-            amplitude = pad_beams(amplitude)
-            angle = pad_beams(angle)
+            amplitude_real = pad_beams(amplitude_real)
+            amplitude_imag = pad_beams(amplitude_imag)
             omega0 = pad_beams(omega0)
 
             def tpu_beam_sensor_kernel(
@@ -394,8 +388,8 @@ def sum_gaussian_beam_real_pallas(
                 pt_ref,
                 Mr_ref,
                 Mi_ref,
-                amplitude_ref,
-                angle_ref,
+                amplitude_real_ref,
+                amplitude_imag_ref,
                 omega_ref,
                 sensors_ref,
                 domain_ref,
@@ -436,15 +430,11 @@ def sum_gaussian_beam_real_pallas(
                 )
 
                 omega = omega_ref[:, 0][:, None]
-                phase = (
-                    omega * (phase_linear + phase_quadratic)
-                    + angle_ref[0, :, 0][:, None]
-                )
+                phase = omega * (phase_linear + phase_quadratic)
                 contribution = (
-                    amplitude_ref[0, :, 0][:, None]
-                    * jnp.cos(phase)
-                    * jnp.exp(-omega * decay_quadratic)
-                )
+                    amplitude_real_ref[0, :, 0][:, None] * jnp.cos(phase)
+                    - amplitude_imag_ref[0, :, 0][:, None] * jnp.sin(phase)
+                ) * jnp.exp(-omega * decay_quadratic)
                 partial_sum = jnp.sum(contribution, axis=0)
 
                 @pl.when(pl.program_id(2) == 0)
@@ -529,8 +519,8 @@ def sum_gaussian_beam_real_pallas(
                 pt,
                 Mr,
                 Mi,
-                amplitude,
-                angle,
+                amplitude_real,
+                amplitude_imag,
                 omega0,
                 sensors,
                 domain_size,
@@ -546,8 +536,8 @@ def sum_gaussian_beam_real_pallas(
                     jnp.swapaxes(Mi, 0, 1).reshape(
                         (num_times, padded_beams, ndim * ndim)
                     ),
-                    jnp.swapaxes(amplitude, 0, 1)[..., None],
-                    jnp.swapaxes(angle, 0, 1)[..., None],
+                    jnp.swapaxes(amplitude_real, 0, 1)[..., None],
+                    jnp.swapaxes(amplitude_imag, 0, 1)[..., None],
                     omega0[:, None],
                     jnp.swapaxes(sensors, 0, 1),
                     domain_size,
@@ -582,8 +572,8 @@ def sum_gaussian_beam_real_pallas(
             pt = pad_beams_and_times(pt)
             Mr = pad_beams_and_times(Mr)
             Mi = pad_beams_and_times(Mi)
-            amplitude = pad_beams_and_times(amplitude)
-            angle = pad_beams_and_times(angle)
+            amplitude_real = pad_beams_and_times(amplitude_real)
+            amplitude_imag = pad_beams_and_times(amplitude_imag)
             omega0 = jnp.pad(omega0, ((0, beam_padding),))
             if not initial_field_was_none:
                 initial_field = jnp.pad(initial_field, ((0, time_padding), (0, 0)))
@@ -593,8 +583,8 @@ def sum_gaussian_beam_real_pallas(
                 pt_ref,
                 Mr_ref,
                 Mi_ref,
-                amplitude_ref,
-                angle_ref,
+                amplitude_real_ref,
+                amplitude_imag_ref,
                 omega_ref,
                 sensors_ref,
                 domain_ref,
@@ -636,15 +626,11 @@ def sum_gaussian_beam_real_pallas(
                 )
 
                 omega = omega_ref[:, 0, 0][:, None, None]
-                phase = (
-                    omega * (phase_linear + phase_quadratic)
-                    + angle_ref[:, :, 0][:, :, None]
-                )
+                phase = omega * (phase_linear + phase_quadratic)
                 contribution = (
-                    amplitude_ref[:, :, 0][:, :, None]
-                    * jnp.cos(phase)
-                    * jnp.exp(-omega * decay_quadratic)
-                )
+                    amplitude_real_ref[:, :, 0][:, :, None] * jnp.cos(phase)
+                    - amplitude_imag_ref[:, :, 0][:, :, None] * jnp.sin(phase)
+                ) * jnp.exp(-omega * decay_quadratic)
                 partial_sum = jnp.sum(contribution, axis=0)
 
                 @pl.when(pl.program_id(2) == 0)
@@ -732,8 +718,8 @@ def sum_gaussian_beam_real_pallas(
                 pt,
                 Mr,
                 Mi,
-                amplitude,
-                angle,
+                amplitude_real,
+                amplitude_imag,
                 omega0,
                 sensors,
                 domain_size,
@@ -745,8 +731,8 @@ def sum_gaussian_beam_real_pallas(
                     pt,
                     Mr.reshape((padded_beams, padded_times, ndim * ndim)),
                     Mi.reshape((padded_beams, padded_times, ndim * ndim)),
-                    amplitude[..., None],
-                    angle[..., None],
+                    amplitude_real[..., None],
+                    amplitude_imag[..., None],
                     omega0[:, None, None],
                     jnp.swapaxes(sensors, 0, 1),
                     domain_size,
@@ -763,8 +749,8 @@ def sum_gaussian_beam_real_pallas(
             pt_ref,
             Mr_ref,
             Mi_ref,
-            amplitude_ref,
-            angle_ref,
+            amplitude_real_ref,
+            amplitude_imag_ref,
             omega_ref,
             sensors_ref,
             domain_ref,
@@ -802,14 +788,11 @@ def sum_gaussian_beam_real_pallas(
                 )
 
                 omega = omega_ref[beam_idx]
-                phase = (
-                    omega * (phase_linear + phase_quadratic) + angle_ref[beam_idx, 0]
-                )
+                phase = omega * (phase_linear + phase_quadratic)
                 contribution = (
-                    amplitude_ref[beam_idx, 0]
-                    * jnp.cos(phase)
-                    * jnp.exp(-omega * decay_quadratic)
-                )
+                    amplitude_real_ref[beam_idx, 0] * jnp.cos(phase)
+                    - amplitude_imag_ref[beam_idx, 0] * jnp.sin(phase)
+                ) * jnp.exp(-omega * decay_quadratic)
                 return accumulator + contribution
 
             zero = jnp.zeros((sensor_block_size,), dtype=real_dtype)
@@ -820,8 +803,8 @@ def sum_gaussian_beam_real_pallas(
             pt_ref,
             Mr_ref,
             Mi_ref,
-            amplitude_ref,
-            angle_ref,
+            amplitude_real_ref,
+            amplitude_imag_ref,
             omega_ref,
             sensors_ref,
             domain_ref,
@@ -833,8 +816,8 @@ def sum_gaussian_beam_real_pallas(
                 pt_ref,
                 Mr_ref,
                 Mi_ref,
-                amplitude_ref,
-                angle_ref,
+                amplitude_real_ref,
+                amplitude_imag_ref,
                 omega_ref,
                 sensors_ref,
                 domain_ref,
@@ -846,8 +829,8 @@ def sum_gaussian_beam_real_pallas(
             pt_ref,
             Mr_ref,
             Mi_ref,
-            amplitude_ref,
-            angle_ref,
+            amplitude_real_ref,
+            amplitude_imag_ref,
             omega_ref,
             sensors_ref,
             domain_ref,
@@ -860,8 +843,8 @@ def sum_gaussian_beam_real_pallas(
                 pt_ref,
                 Mr_ref,
                 Mi_ref,
-                amplitude_ref,
-                angle_ref,
+                amplitude_real_ref,
+                amplitude_imag_ref,
                 omega_ref,
                 sensors_ref,
                 domain_ref,
@@ -956,8 +939,8 @@ def sum_gaussian_beam_real_pallas(
         pt,
         Mr,
         Mi,
-        amplitude,
-        angle,
+        amplitude_real,
+        amplitude_imag,
         omega0,
         sensors,
         domain_size,
@@ -1125,11 +1108,6 @@ def _sum_gaussian_beam_real_hom_diag_3d_reference(
     matrix_real = jnp.real(Mt).astype(trajectory_dtype)
     matrix_imag = jnp.imag(Mt).astype(trajectory_dtype)
     At_flat = At_flat.astype(jnp.complex64)
-    angle_real = jnp.where(
-        (jnp.real(At_flat) == 0) & (jnp.imag(At_flat) == 0),
-        jnp.asarray(1e-12, dtype=At_flat.real.dtype),
-        jnp.real(At_flat),
-    )
     from beamax.gb.core import _sum_gaussian_beam_real_components_xla
 
     return _sum_gaussian_beam_real_components_xla(
@@ -1137,8 +1115,8 @@ def _sum_gaussian_beam_real_hom_diag_3d_reference(
         pt,
         matrix_real,
         matrix_imag,
-        (2.0 * jnp.abs(At_flat)).astype(trajectory_dtype),
-        jnp.arctan2(jnp.imag(At_flat), angle_real).astype(trajectory_dtype),
+        (2.0 * jnp.real(At_flat)).astype(trajectory_dtype),
+        (2.0 * jnp.imag(At_flat)).astype(trajectory_dtype),
         omega0,
         sensors,
         domain_size,
