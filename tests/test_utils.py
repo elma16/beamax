@@ -388,3 +388,15 @@ def test_interpolate_fourier_roundtrip_spatial_to_fourier():
     arr = jnp.ones((4,))
     out = interpolate_fourier(arr, (8,), input_type="spatial", output_type="fourier")
     assert out.shape == (8,)
+
+
+@pytest.mark.parametrize("sizes", [(5, 6), (6, 5), (5, 8), (8, 5)])
+def test_fourier_resize_preserves_shifted_frequency_bins(sizes):
+    n, target = sizes
+    k = jnp.arange(n)
+    field = 2 + jnp.exp(2j * jnp.pi * k / n)
+    resized = interpolate_fourier(field, (target,), "spatial", "spatial")
+    expected = (2 + jnp.exp(2j * jnp.pi * jnp.arange(target) / target)) * (
+        n / target
+    ) ** 0.5
+    assert jnp.allclose(resized, expected)

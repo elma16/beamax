@@ -207,7 +207,8 @@ def interpolate_fourier(
 
     Notes
     -----
-    Assumes periodic boundaries. Uses `pad_array` then `crop_centered` in frequency.
+    Assumes periodic boundaries. Crops or pads the shifted spectrum around
+    the zero-frequency bin on each axis.
     """
     desired_size = _normalise_target_shape(
         desired_size, array.ndim, name="desired_size"
@@ -225,10 +226,14 @@ def interpolate_fourier(
     if input_type == "spatial":
         x = jnp.fft.fftshift(jnp.fft.fftn(x, norm="ortho"))
 
-    curr = x.shape
-    larger = tuple(max(d, c) for d, c in zip(desired_size, curr))
-    x = pad_array(x, larger, mode="constant")
-    x = crop_centered(x, desired_size)
+    # fftshift places DC at n // 2 for both parities.
+    common = tuple(min(a, b) for a, b in zip(x.shape, desired_size))
+    starts = tuple(n // 2 - k // 2 for n, k in zip(x.shape, common))
+    x = x[tuple(slice(i, i + k) for i, k in zip(starts, common))]
+    left = tuple(n // 2 - k // 2 for n, k in zip(desired_size, common))
+    x = jnp.pad(
+        x, tuple((pad, n - k - pad) for pad, n, k in zip(left, desired_size, common))
+    )
 
     if output_type == "spatial":
         x = jnp.fft.ifftn(jnp.fft.ifftshift(x), norm="ortho")
