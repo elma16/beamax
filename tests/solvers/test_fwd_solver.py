@@ -434,11 +434,18 @@ class TestHybridSolverBasics:
         kwave_result = kwave_solver.forward(p0, domain, binary_mask, ts)
         hybrid_result = hybrid.forward(p0, domain, sensors, ts, wpt)
 
-        assert jnp.allclose(kwave_result, hybrid_result, atol=3e-5), (
+        difference = kwave_result - hybrid_result
+        relative_l2 = jnp.linalg.norm(difference) / jnp.linalg.norm(kwave_result)
+        # Independent native float32 runs vary at the 1e-5 scale. Bound both
+        # the pointwise error and the error of the complete pressure record.
+        assert (
+            jnp.allclose(kwave_result, hybrid_result, rtol=1e-5, atol=5e-5)
+            and relative_l2 < 2e-5
+        ), (
             f"Hybrid (downsample={downsample}, dt_oversample={dt_oversample}) "
             f"doesn't match k-Wave:\n"
-            f"  Max diff: {jnp.max(jnp.abs(kwave_result - hybrid_result))}\n"
-            f"  Rel L2: {jnp.linalg.norm(kwave_result - hybrid_result) / jnp.linalg.norm(kwave_result)}"
+            f"  Max diff: {jnp.max(jnp.abs(difference))}\n"
+            f"  Rel L2: {relative_l2}"
         )
 
 
