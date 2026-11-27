@@ -722,14 +722,17 @@ class HybridSolver(eqx.Module):
                     ),
                 )
             if method == "adjoint":
-                return self.hf_solver.adjoint(
-                    data,
-                    domain,
-                    sensors,
-                    kwargs["sources"],
-                    ts,
-                    kwargs["data_domain"],
-                    kwargs["data_wpt"],
+                return cast(
+                    jnp.ndarray,
+                    self.hf_solver.adjoint(
+                        data,
+                        domain,
+                        sensors,
+                        kwargs["sources"],
+                        ts,
+                        kwargs["data_domain"],
+                        kwargs["data_wpt"],
+                    ),
                 )
             raise ValueError(f"Unknown HF method: {method!r}")
 

@@ -82,3 +82,38 @@ def chart_data(data, surface, ts, wpt):
     return data.reshape(shape), Domain(
         shape, (dt, *surface.spacing), (False, *surface.periodic)
     )
+
+
+def detector_measure(detectors, pairing, element_measures, count):
+    """Physical detector measure per channel in acquisition order."""
+    from beamax.surfaces import DetectorSurface
+
+    chart = isinstance(detectors, DetectorSurface)
+    if pairing is None:
+        if not chart:
+            raise ValueError("Supply a pairing for a binary detector mask.")
+        pairing = "surface_area"
+    if pairing not in ("surface_area", "element_sum", "euclidean"):
+        raise ValueError("Choose surface_area, element_sum or euclidean.")
+    if pairing != "surface_area":
+        if element_measures is not None:
+            raise ValueError("Element measures apply only to the surface_area pairing.")
+        return pairing, 1.0
+    if chart:
+        if element_measures is not None:
+            raise ValueError("A chart supplies its physical element measures.")
+        theta, _ = detectors.active_parameters(detectors.params_flat())
+        measure = np.asarray(detectors.area_element(theta)) * np.prod(detectors.spacing)
+    else:
+        if element_measures is None:
+            raise ValueError(
+                "Supply element_measures for a mask with surface_area pairing."
+            )
+        measure = np.asarray(element_measures)
+    if measure.shape not in ((), (count,)) or not np.all(
+        np.isfinite(measure) & (measure > 0)
+    ):
+        raise ValueError(
+            "Give positive finite element measures, scalar or one per receiver."
+        )
+    return pairing, measure

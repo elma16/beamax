@@ -1647,14 +1647,21 @@ class MSGBSolver(eqx.Module):
         self,
         data: jnp.ndarray,
         domain: Domain,
-        sensors: Union[Sensor, jnp.ndarray],
-        sources: Sensor,
-        ts: jnp.ndarray,
-        data_domain: Domain,
-        data_wpt: MSWPT,
+        sensors=None,
+        sources=None,
+        ts=None,
+        data_domain=None,
+        data_wpt=None,
         *,
+        detectors=None,
+        front=None,
+        eval_points=None,
+        pairing=None,
+        element_measures=None,
+        guard=None,
+        return_diagnostics=False,
         window: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
+    ) -> jnp.ndarray | tuple[jnp.ndarray, dict]:
         r"""
         Principal-symbol MSGB approximation of the continuous PAT adjoint.
 
@@ -1698,6 +1705,62 @@ class MSGBSolver(eqx.Module):
         NotImplementedError
             If ``domain.lam`` is nonzero. This approximation uses a lossless domain.
         """
+        if detectors is not None:
+            from beamax.solvers._detectors import detector_measure
+            from beamax.surfaces import DetectorSurface, surface_adjoint
+
+            if any(v is not None for v in (sensors, sources, data_domain)):
+                raise TypeError("Give detectors and ts for the acquisition.")
+            surface = oriented_surface(domain, detectors, front)
+            data, acquisition = chart_data(data, surface, ts, data_wpt)
+            pairing, measure = detector_measure(
+                detectors, pairing, element_measures, surface.num_sensors
+            )
+            guard = self.adjoint_relative_guard if guard is None else guard
+            operator_pairing = pairing
+            scale = 1.0
+            if pairing == "euclidean":
+                operator_pairing = "element_sum"
+                scale = math.prod(domain.dx) / acquisition.dx[0]
+            elif pairing == "surface_area" and not isinstance(
+                detectors, DetectorSurface
+            ):
+                data = data * jnp.broadcast_to(measure, (surface.num_sensors,)).reshape(
+                    surface.shape
+                )
+                operator_pairing = "element_sum"
+            image, diagnostic = surface_adjoint(
+                data,
+                acquisition,
+                data_wpt,
+                surface,
+                domain,
+                self.thr,
+                pairing=operator_pairing,
+                guard=guard,
+                window=window,
+                eval_points=eval_points,
+                **self._chart_options(domain, ts),
+            )
+            image = image * scale
+            diagnostic["adjoint_formula"] = "general"
+            return (image, diagnostic) if return_diagnostics else image
+        if (
+            any(v is not None for v in (front, eval_points, pairing, element_measures))
+            or return_diagnostics
+            or guard is not None
+        ):
+            raise TypeError("These options require detectors.")
+        if (
+            sensors is None
+            or sources is None
+            or ts is None
+            or data_domain is None
+            or data_wpt is None
+        ):
+            raise TypeError(
+                "Give the boundary source, evaluation points, acquisition grid, times and transform."
+            )
         q_T, _ = self.adjoint_with_params(
             data,
             domain,

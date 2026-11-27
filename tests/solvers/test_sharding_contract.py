@@ -39,3 +39,35 @@ def test_forward_params_are_really_partitioned(two_device_strategy):
 def test_nondivisible_beam_count_fails_clearly(two_device_strategy):
     with pytest.raises(ValueError, match="not divisible"):
         two_device_strategy.shard_beam_params(*_forward_params(3))
+
+
+@pytest.mark.parametrize("operation", ["time_reversal", "adjoint"])
+def test_complex_surface_inverse_matches_sharded_plane(two_device_strategy, operation):
+    from beamax import Domain, DyadicDecomposition, MSWPT
+    from beamax.gb.gb_solvers import solve_hom_diag
+    from beamax.solvers import MSGBSolver
+    from beamax.surfaces import DetectorSurface
+
+    d = Domain((8, 8), (0.125, 0.125), (False, False), c=1.0)
+    plane = DetectorSurface.plane(2, spacing=(0.125,), shape=(8,))
+    ts = jnp.arange(8) * 0.0625
+    dd = Domain((8, 8), (0.0625, 0.125), (False, False))
+    wpt = MSWPT(DyadicDecomposition(1, dd.N, (4,), (1, 1)), 2, "rectangular_mirror")
+    solver = MSGBSolver(
+        thr=16,
+        thr_strat="top_n",
+        batch_size=8,
+        input_type="spatial",
+        ode_solver=solve_hom_diag,
+        sum_method="all_complex",
+        sharding=two_device_strategy,
+    )
+    rng = np.random.default_rng(621)
+    y = jnp.asarray(rng.normal(size=dd.N) + 1j * rng.normal(size=dd.N))
+    points = d.grid[1:5, 2:5]
+    solve = getattr(solver, operation)
+    # Legacy and chart methods must propagate both frequency halves.
+    reference = solve(y, d, points, plane.to_sensor(d), ts, dd, wpt)
+    image = solve(y, d, detectors=plane, ts=ts, data_wpt=wpt, eval_points=points)
+    assert np.iscomplexobj(image)
+    np.testing.assert_allclose(image, reference, rtol=5e-5, atol=3e-6)

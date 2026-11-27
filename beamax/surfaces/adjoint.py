@@ -82,7 +82,9 @@ def surface_adjoint(
         raise ValueError(
             "The residual must match the acquisition grid and have at least two time samples."
         )
-    if jnp.iscomplexobj(data) or not jnp.all(jnp.isfinite(data)):
+    if (tr_options.get("use_real", True) and jnp.iscomplexobj(data)) or not jnp.all(
+        jnp.isfinite(data)
+    ):
         raise ValueError("The surface adjoint requires real, finite residuals.")
     data = data.astype(jnp.result_type(data, 1.0))
     if window is not None:

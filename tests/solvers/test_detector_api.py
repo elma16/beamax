@@ -134,3 +134,91 @@ def test_solver_time_reversal_matches_chart(experiment, sensor):
         np.testing.assert_allclose(
             solver.time_reversal(y, domain, **opts), image, rtol=2e-5, atol=3e-6
         )
+
+
+def test_adjoint_pairing_units_and_invalid_measures(experiment):
+    solver, domain, ts, _, _ = experiment
+    chart = DetectorSurface.plane(2, value=0.5, spacing=(0.125,), shape=(4,))
+    mask = chart.to_mask(domain).binary_mask
+    wpt = MSWPT(DyadicDecomposition(1, (16, 4), (2,), (4, 1)), 2, "rectangular_mirror")
+    data = np.random.default_rng(424).normal(size=(16, 4))
+    base = dict(ts=ts, data_wpt=wpt, eval_points=domain.grid[2:4, 3:6])
+    equal = solver.adjoint(data, domain, detectors=chart, pairing="element_sum", **base)
+    euclidean = solver.adjoint(
+        data, domain, detectors=mask, front=1, pairing="euclidean", **base
+    )
+    np.testing.assert_allclose(
+        euclidean, equal * np.prod(domain.dx) / float(ts[1]), atol=2e-6, rtol=2e-5
+    )
+    for pairing, measures, pattern in [
+        ("undefined", None, "Choose"),
+        ("element_sum", 0.1, "only"),
+        ("surface_area", None, "Supply"),
+        ("surface_area", [1, 2], "one per"),
+        ("surface_area", [1.0, 0.0, 2.0, 1.0], "positive"),
+    ]:
+        with pytest.raises(ValueError, match=pattern):
+            solver.adjoint(
+                data,
+                domain,
+                detectors=mask,
+                front=1,
+                pairing=pairing,
+                element_measures=measures,
+                **base,
+            )
+    with pytest.raises(ValueError, match="chart supplies"):
+        solver.adjoint(data, domain, detectors=chart, element_measures=0.125, **base)
+
+
+def test_solver_adjoint_preserves_pairings_and_window(experiment):
+    from beamax.surfaces import surface_adjoint
+
+    solver, domain, ts, _, _ = experiment
+    surface = DetectorSurface.plane(
+        2, value=1.25, origin=(0.25,), spacing=(0.125,), shape=(4,), front=-1
+    )
+    dd = Domain((16, 4), (0.0625, *surface.spacing), (False, False))
+    wpt = MSWPT(DyadicDecomposition(1, dd.N, (2,), (4, 1)), 2, "rectangular_mirror")
+    y = jnp.asarray(np.random.default_rng(81).normal(size=dd.N))
+    opts = dict(
+        ts=ts,
+        data_wpt=wpt,
+        eval_points=domain.grid[5:8, 4:7],
+        window=jnp.hanning(16),
+        guard=0.2,
+    )
+    image, diag = solver.adjoint(
+        y, domain, detectors=surface, **opts, return_diagnostics=True
+    )
+    ref, _ = surface_adjoint(
+        y,
+        dd,
+        wpt,
+        surface,
+        domain,
+        64,
+        window=opts["window"],
+        guard=0.2,
+        eval_points=opts["eval_points"],
+        batch_size=32,
+    )
+    assert diag["adjoint_formula"] == "general"
+    np.testing.assert_allclose(image, ref, rtol=2e-5, atol=2e-6)
+    mask = surface.to_mask(domain).binary_mask
+    np.testing.assert_allclose(
+        solver.adjoint(
+            y,
+            domain,
+            detectors=mask,
+            front=-1,
+            pairing="surface_area",
+            element_measures=0.125,
+            **opts,
+        ),
+        ref,
+        rtol=2e-5,
+        atol=2e-6,
+    )
+    with pytest.raises(ValueError, match="pairing"):
+        solver.adjoint(y, domain, detectors=mask, front=-1, **opts)
