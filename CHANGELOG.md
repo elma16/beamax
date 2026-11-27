@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `KWaveSolver(device="metal")` runs k-Wave forward simulations on Apple
+  silicon with macOS 15 or newer. The first forward call downloads and
+  verifies the NeuroHarmonics executable, then caches it for later runs.
+
 ## [0.3.0] — 2026-08-24
 
 ### Changed

@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import os
 import tempfile
+from unittest.mock import Mock
 
 from beamax import geometry, utils
 
@@ -502,6 +503,8 @@ def test_cpp_binary_path_uses_env_when_no_explicit_path(tmp_path, monkeypatch):
 
 def test_cpp_binary_path_omits_default_binary_path(tmp_path, monkeypatch):
     monkeypatch.delenv("BEAMAX_KWAVE_BINARY_PATH", raising=False)
+    install = Mock()
+    monkeypatch.setattr(kwave_solver_module, "install_kwave_metal", install)
     monkeypatch.setattr(
         kwave_solver_module,
         "_default_kwave_binary_path",
@@ -513,6 +516,108 @@ def test_cpp_binary_path_omits_default_binary_path(tmp_path, monkeypatch):
 
     assert selected == tmp_path / "kspaceFirstOrder-OMP"
     assert "binary_path" not in kwargs
+    install.assert_not_called()
+
+
+@pytest.mark.parametrize("selection", ["automatic", "environment", "explicit"])
+def test_metal_forward_selects_binary_and_gpu_device(tmp_path, monkeypatch, selection):
+    installed = tmp_path / "installed-metal"
+    install = Mock(return_value=installed)
+    monkeypatch.setattr(kwave_solver_module, "metal_supported", lambda: True)
+    monkeypatch.setattr(kwave_solver_module, "install_kwave_metal", install)
+    monkeypatch.delenv("BEAMAX_KWAVE_BINARY_PATH", raising=False)
+    expected = installed
+    options = {}
+    if selection in ("environment", "explicit"):
+        expected = tmp_path / "kspaceFirstOrder-Metal"
+        expected.touch()
+        monkeypatch.setenv("BEAMAX_KWAVE_BINARY_PATH", str(tmp_path))
+    if selection == "explicit":
+        expected = tmp_path / "custom-metal"
+        expected.touch()
+        options["binary_path"] = expected
+
+    domain = geometry.Domain(N=(4, 6), dx=(1.0, 1.0), c=1.0, periodic=(True, True))
+    mask = np.zeros(domain.N, dtype=bool)
+    mask[1, 3] = True
+    ts = np.arange(8, dtype=float)
+    run = Mock(return_value={"p": np.arange(8, dtype=float)})
+    monkeypatch.setattr(kwave_solver_module, "kspaceFirstOrder", run)
+
+    solver = KWaveSolver(backend="cpp", device="metal", **options)
+    install.assert_not_called()
+    solver.forward(np.ones(domain.N), domain, mask, ts)
+    if selection == "automatic":
+        install.assert_called_once_with()
+    else:
+        install.assert_not_called()
+    run.assert_called_once()
+    kwargs = run.call_args.kwargs
+    assert (kwargs["backend"], kwargs["device"]) == ("cpp", "gpu")
+    assert kwargs["binary_path"] == str(expected)
+
+
+@pytest.mark.parametrize("operation", ["time_reversal", "adjoint"])
+def test_metal_inverse_uses_cpu_without_cpp_options(monkeypatch, operation):
+    domain = geometry.Domain(N=(4, 6), dx=(1.0, 1.0), c=1.0, periodic=(True, True))
+    mask = np.zeros(domain.N, dtype=bool)
+    mask[1, 3] = True
+    ts = np.arange(8, dtype=float)
+    run = Mock(return_value={"p_final": np.zeros(domain.N)})
+    monkeypatch.setattr(kwave_solver_module, "kspaceFirstOrder", run)
+    install = Mock()
+    monkeypatch.setattr(kwave_solver_module, "install_kwave_metal", install)
+    solver = KWaveSolver(
+        device="metal", binary_path="unused", device_num=0, num_threads=2
+    )
+
+    getattr(solver, operation)(np.ones((1, ts.size)), domain, mask, mask, ts)
+    run.assert_called_once()
+    kwargs = run.call_args.kwargs
+    assert (kwargs["backend"], kwargs["device"]) == ("python", "cpu")
+    assert {"binary_path", "device_num", "num_threads"}.isdisjoint(kwargs)
+    install.assert_not_called()
+
+
+def test_metal_install_failure_can_be_retried(tmp_path, monkeypatch):
+    monkeypatch.delenv("BEAMAX_KWAVE_BINARY_PATH", raising=False)
+    monkeypatch.setattr(kwave_solver_module, "metal_supported", lambda: True)
+    binary = tmp_path / "kspaceFirstOrder-Metal"
+    install = Mock(side_effect=[OSError("download interrupted"), binary])
+    monkeypatch.setattr(kwave_solver_module, "install_kwave_metal", install)
+    kwargs = {"device": "metal"}
+
+    with pytest.raises(OSError, match="download interrupted"):
+        kwave_solver_module._configure_cpp_binary_kwargs(kwargs)
+
+    assert kwave_solver_module._configure_cpp_binary_kwargs(kwargs) == binary
+    assert kwargs == {"device": "gpu", "binary_path": str(binary)}
+    assert install.call_count == 2
+
+
+def test_metal_save_only_skips_install(tmp_path, monkeypatch):
+    monkeypatch.delenv("BEAMAX_KWAVE_BINARY_PATH", raising=False)
+    monkeypatch.setattr(kwave_solver_module, "metal_supported", lambda: True)
+    binary = tmp_path / "kspaceFirstOrder-Metal"
+    monkeypatch.setattr(kwave_solver_module, "metal_binary_path", lambda: binary)
+    install = Mock()
+    monkeypatch.setattr(kwave_solver_module, "install_kwave_metal", install)
+
+    kwargs = {"backend": "cpp", "device": "metal", "save_only": True}
+    assert kwave_solver_module._configure_cpp_binary_kwargs(kwargs) == binary
+    install.assert_not_called()
+
+
+def test_metal_requires_supported_host(monkeypatch):
+    monkeypatch.setattr(kwave_solver_module, "metal_supported", lambda: False)
+
+    with pytest.raises(RuntimeError, match="Apple silicon"):
+        kwave_solver_module._select_cpp_binary_path({"device": "metal"})
+
+
+def test_metal_requires_cpp_backend():
+    with pytest.raises(ValueError, match="backend='cpp'"):
+        KWaveSolver(backend="python", device="metal")
 
 
 def test_cpp_backend_has_power_law_absorption_sensitivity():

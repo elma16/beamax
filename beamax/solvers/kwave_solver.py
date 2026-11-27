@@ -11,6 +11,12 @@ import jax
 import jax.numpy as jnp
 
 from beamax.geometry import Domain
+from beamax.install_kwave_metal import (
+    METAL_BINARY_NAME,
+    install as install_kwave_metal,
+    metal_binary_path,
+    metal_supported,
+)
 
 from kwave.kgrid import kWaveGrid
 from kwave.kmedium import kWaveMedium
@@ -70,6 +76,8 @@ def _uniform_time_step(ts: Any) -> float:
 
 
 def _binary_name(device: str) -> str:
+    if device == "metal":
+        return METAL_BINARY_NAME
     name = "kspaceFirstOrder-CUDA" if device == "gpu" else "kspaceFirstOrder-OMP"
     if sys.platform == "win32":
         name += ".exe"
@@ -104,11 +112,14 @@ def _select_cpp_binary_path(kwargs: dict) -> tuple[Path, bool]:
     """
     Resolve the C++ binary path.
 
-    Returns `(binary_path, should_forward)` where `should_forward` means the
-    path came from beamax/user configuration and must be passed to
-    k-wave-python.
+    Return the path and whether k-wave-python needs an explicit override.
     """
     device = kwargs.get("device", "cpu")
+    if device == "metal" and not metal_supported():
+        raise RuntimeError(
+            "The k-Wave Metal solver requires Apple silicon, native arm64 Python, "
+            "and macOS 15 or later."
+        )
     explicit = kwargs.get("binary_path")
     if explicit:
         return _normalize_kwave_binary_path(explicit, device=device), True
@@ -117,11 +128,20 @@ def _select_cpp_binary_path(kwargs: dict) -> tuple[Path, bool]:
     if env_override:
         return _normalize_kwave_binary_path(env_override, device=device), True
 
+    if device == "metal":
+        # Saving HDF5 inputs does not launch the executable.
+        if kwargs.get("save_only"):
+            return metal_binary_path(), True
+        return install_kwave_metal(), True
+
     return _default_kwave_binary_path(device), False
 
 
 def _configure_cpp_binary_kwargs(kwargs: dict) -> Path:
     binary_path, should_forward = _select_cpp_binary_path(kwargs)
+    if kwargs.get("device") == "metal":
+        # k-wave-python accepts "gpu" and runs the explicitly selected executable.
+        kwargs["device"] = "gpu"
 
     if should_forward:
         kwargs["binary_path"] = str(binary_path)
@@ -173,6 +193,10 @@ class KWaveSolver:
       source and terminal-field scalings needed for the discrete transpose.
     - ``binary_path`` can be supplied directly or via
       ``BEAMAX_KWAVE_BINARY_PATH``. Direct kwargs take precedence.
+    - On Apple silicon with macOS 15 or later, select ``device="metal"``
+      for C++ forward solves. The first forward run downloads and verifies
+      the Metal executable. Later runs use the cached copy. Time reversal
+      and the adjoint on the same solver run on the CPU.
     - Regular C++ solves with the legacy default ``data_path`` use k-Wave's
       per-run scratch directory. Supply a custom path to retain the HDF5 files.
 
@@ -235,6 +259,11 @@ class KWaveSolver:
         ):
             supplied.pop("data_path")
         self._solver_kwargs = {**defaults, **supplied}
+        if (
+            self._solver_kwargs["device"] == "metal"
+            and self._solver_kwargs["backend"] != "cpp"
+        ):
+            raise ValueError("device='metal' requires backend='cpp'.")
         self._explicit_solver_options = set(supplied)
 
     def _create_kgrid(self, domain: Domain, ts: Array) -> kWaveGrid:
@@ -352,6 +381,10 @@ class KWaveSolver:
         kwargs = self._kwargs_for_domain(domain)
         if force_python:
             kwargs["backend"] = "python"
+            if kwargs["device"] == "metal":
+                kwargs["device"] = "cpu"
+                for option in ("binary_path", "device_num", "num_threads"):
+                    kwargs.pop(option, None)
 
         medium = kWaveMedium(
             sound_speed=np.asarray(domain.sound_speed_array),

@@ -73,6 +73,7 @@ nav:
   - index.md
   - Guides:
       - Custom low-frequency solvers: guides/custom-low-frequency-solvers.md
+      - Run k-Wave on Apple Metal: guides/kwave-metal.md
   - Examples:
       - examples/index.md
       - Forward propagation: examples/forward.md
