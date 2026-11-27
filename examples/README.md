@@ -1,10 +1,10 @@
 # Examples
 
-Start with [wave-packet selection](wave-packets/2d_packet_selection.py) using
-the base installation. Then follow [forward propagation](forward/2d_forward_comparison.py)
-and [reconstruction](reconstruction/2d_time_reversal_and_adjoint.py) for the
-2D photoacoustic workflow. Run scripts from the repository root or open their
-Colab notebooks below.
+Compare MSGB and k-Wave in the [forward](forward/2d_forward_comparison.ipynb),
+[time-reversal](reconstruction/2d_time_reversal.ipynb), and
+[adjoint](reconstruction/2d_adjoint.ipynb) notebooks. Each prints first-call
+and repeat runtimes. Run the scripts from the repository root or use the
+Colab links below.
 
 ## Gallery
 
@@ -14,10 +14,12 @@ Colab notebooks below.
 
 ### Forward propagation
 
-- [`2d_forward_comparison.py`](forward/2d_forward_comparison.py) — Compare MSGB and k-Wave sensor data for a 2D wave packet. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/forward/2d_forward_comparison.ipynb)
+- [`2d_forward_comparison.py`](forward/2d_forward_comparison.py) — Compare MSGB and k-Wave pressure recordings from a 2D wave packet. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/forward/2d_forward_comparison.ipynb)
 
 ### Reconstruction
 
+- [`2d_adjoint.py`](reconstruction/2d_adjoint.py) — Compare MSGB and k-Wave adjoint images from one detector line. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_adjoint.ipynb)
+- [`2d_time_reversal.py`](reconstruction/2d_time_reversal.py) — Compare MSGB and k-Wave time reversal images from one detector line. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal.ipynb)
 - [`2d_time_reversal_and_adjoint.py`](reconstruction/2d_time_reversal_and_adjoint.py) — Compare 2D MSGB and k-Wave time-reversal and adjoint reconstructions. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal_and_adjoint.ipynb)
 
 ### Rays and autodiff

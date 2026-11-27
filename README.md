@@ -49,10 +49,10 @@ MSGB reconstruction examples. [Apple silicon setup and benchmark](docs/guides/kw
 - [Decompose an initial pressure field](examples/wave-packets/2d_packet_selection.py) and see
   how much accuracy you retain with 16 or 64 wave-packet coefficients. This
   uses the base installation.
-- [Simulate a 2D measurement](examples/forward/2d_forward_comparison.py)
+- [Simulate a 2D measurement](examples/forward/2d_forward_comparison.ipynb)
   with MSGB and k-Wave. Compare the pressure at a line of receivers.
-- [Reconstruct a 2D image](examples/reconstruction/2d_time_reversal_and_adjoint.py)
-  from one measurement using time reversal and the adjoint.
+- Reconstruct the same two sources with [time reversal](examples/reconstruction/2d_time_reversal.ipynb)
+  or [the adjoint](examples/reconstruction/2d_adjoint.ipynb). Each notebook times MSGB and k-Wave.
 
 See the [example gallery](docs/examples/index.md) for setup, Colab notebooks
 and examples of ray bending, autodiff and absorption.
@@ -62,9 +62,10 @@ For development setup and tests, see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Reference
 
 - Jianliang Qian and Lexing Ying, ["Fast Multiscale Gaussian Wavepacket Transforms and Multiscale Gaussian Beams for the Wave Equation"](https://doi.org/10.1137/100787313), *Multiscale Modeling & Simulation*, 8(5), 1803-1837, 2010. [Full text (PDF)](https://stanford.edu/~lexing/GBwave.pdf)
+- Michele Berra, Maarten V. de Hoop, and José Luis Romero, "A multi-scale Gaussian beam parametrix for the wave equation: The Dirichlet boundary value problem", *Journal of Differential Equations*, 309, 949–993, 2022. [Published article](https://doi.org/10.1016/j.jde.2021.11.043) · [Open preprint](https://arxiv.org/abs/1705.00337)
 
 Related acoustic simulation projects include [k-Wave](https://github.com/ucl-bug/k-wave), [k-Wave-python](https://github.com/waltsims/k-wave-python), and [j-Wave](https://github.com/ucl-bug/jwave).
 
 ## Citation and license
 
-If you use beamax, please cite this repository. For MSWPT/MSGB, also cite Qian and Ying (2010). beamax is released under the [MIT license](LICENSE).
+If you use beamax, please cite this repository. For MSWPT/MSGB, also cite Qian and Ying (2010). For Gaussian beam matching at the detector boundary in time reversal, cite Berra, de Hoop, and Romero (2022). beamax is released under the [MIT license](LICENSE).

@@ -36,3 +36,19 @@ references:
     year: 2010
     doi: "10.1137/100787313"
     url: "https://doi.org/10.1137/100787313"
+  - type: article
+    title: "A multi-scale Gaussian beam parametrix for the wave equation: The Dirichlet boundary value problem"
+    authors:
+      - family-names: Berra
+        given-names: Michele
+      - family-names: de Hoop
+        given-names: Maarten V.
+      - family-names: Romero
+        given-names: José Luis
+    journal: Journal of Differential Equations
+    volume: 309
+    start: 949
+    end: 993
+    year: 2022
+    doi: "10.1016/j.jde.2021.11.043"
+    url: "https://doi.org/10.1016/j.jde.2021.11.043"

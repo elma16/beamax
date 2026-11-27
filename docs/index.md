@@ -22,3 +22,5 @@ the native k-Wave solver and experimental JAX acceleration for MSGB.
 - `beamax.plotter`: optional styling and MSWPT coefficient visualisation.
 
 The MSWPT/MSGB implementation follows Jianliang Qian and Lexing Ying, ["Fast Multiscale Gaussian Wavepacket Transforms and Multiscale Gaussian Beams for the Wave Equation"](https://doi.org/10.1137/100787313), *Multiscale Modeling & Simulation*, 8(5), 1803-1837, 2010. [Full text (PDF)](https://stanford.edu/~lexing/GBwave.pdf)
+
+MSGB time reversal uses the boundary matching construction of Michele Berra, Maarten V. de Hoop, and José Luis Romero to launch Gaussian beams from measured pressure traces. [Published article (2022)](https://doi.org/10.1016/j.jde.2021.11.043) · [Open preprint](https://arxiv.org/abs/1705.00337)

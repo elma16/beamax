@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
 from pathlib import Path
+from textwrap import dedent
 
 from example_metadata import (
     EXAMPLE_REVISION,
@@ -58,43 +60,64 @@ def title_from_path(path: Path) -> str:
     return title
 
 
-def generate_nb_from_py(py_path: Path, *, check: bool = False) -> bool:
-    """Generate a missing public notebook, or report that it is missing."""
+def example_cells(src: str) -> list[tuple[str, list[str]]]:
+    """Split the marked setup and main() body into sequential Colab cells."""
+    if not re.search(r"^# %% ", src, re.MULTILINE):
+        return [("code", notebook_code_source(src))]
+
+    module = ast.parse(src)
+    main = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    lines = src.splitlines(keepends=True)
+    start = module.body[0].end_lineno if ast.get_docstring(module) else 0
+    setup = "".join(lines[start : main.lineno - 1])
+    body = dedent("".join(lines[main.lineno : main.end_lineno]))
+    sections = re.split(r"^# %% (.+)\n", setup + body, flags=re.MULTILINE)
+    cells = []
+    if preamble := sections[0].strip():
+        cells.append(("code", notebook_code_source(preamble)))
+    for title, code in zip(sections[1::2], sections[2::2]):
+        cells.append(("markdown", [f"## {title}"]))
+        cells.append(("code", notebook_code_source(code.strip())))
+    return cells
+
+
+def sync_notebook(py_path: Path, *, check: bool = False) -> bool:
+    """Generate missing notebooks and refresh the ones managed by this tool."""
     nb_path = py_path.with_suffix(".ipynb")
-    if nb_path.exists():
-        return False
     src = py_path.read_text()
     info = example_info_from_text(src)
     if not info.notebook:
         return False
-    rel_nb = str(nb_path)
-    title = title_from_path(py_path)
+    if nb_path.exists():
+        old = json.loads(nb_path.read_text())
+        if not (
+            old["metadata"].get("beamax_generated") or is_thin_generated_notebook(old)
+        ):
+            return False
+
+    content = [
+        ("markdown", banner_md(str(nb_path), title_from_path(py_path))),
+        ("code", install_cell_source(list(info.extras))),
+        *example_cells(src),
+    ]
+    cells = []
+    for index, (kind, source) in enumerate(content):
+        cell = {
+            "cell_type": kind,
+            "id": cell_id(nb_path, index),
+            "metadata": {},
+            "source": source,
+        }
+        if kind == "code":
+            cell.update(execution_count=None, outputs=[])
+        cells.append(cell)
 
     nb = {
-        "cells": [
-            {
-                "cell_type": "markdown",
-                "id": cell_id(nb_path, 0),
-                "metadata": {},
-                "source": banner_md(rel_nb, title),
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "id": cell_id(nb_path, 1),
-                "metadata": {},
-                "outputs": [],
-                "source": install_cell_source(list(info.extras)),
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "id": cell_id(nb_path, 2),
-                "metadata": {},
-                "outputs": [],
-                "source": notebook_code_source(src),
-            },
-        ],
+        "cells": cells,
         "metadata": {
             "kernelspec": {
                 "display_name": "Python 3",
@@ -106,7 +129,11 @@ def generate_nb_from_py(py_path: Path, *, check: bool = False) -> bool:
         "nbformat": 4,
         "nbformat_minor": 5,
     }
-    new_text = json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
+    if len(cells) > 3:
+        nb["metadata"]["beamax_generated"] = True
+    new_text = json.dumps(nb, indent=1, ensure_ascii=False, sort_keys=True) + "\n"
+    if nb_path.exists() and nb_path.read_text() == new_text:
+        return False
     if not check:
         nb_path.write_text(new_text)
     return True
@@ -121,49 +148,6 @@ def is_thin_generated_notebook(nb: dict) -> bool:
         return False
     install_source = "".join(cells[1].get("source", []))
     return "Install beamax for Google Colab" in install_source
-
-
-def sync_generated_nb_from_py(py_path: Path, *, check: bool = False) -> bool:
-    """Refresh a generated notebook, or report that it is stale."""
-    nb_path = py_path.with_suffix(".ipynb")
-    if not nb_path.exists():
-        return False
-
-    nb = json.loads(nb_path.read_text())
-    if not is_thin_generated_notebook(nb):
-        return False
-
-    src = py_path.read_text()
-    info = example_info_from_text(src)
-    rel_nb = str(nb_path)
-    nb["cells"][0] = {
-        "cell_type": "markdown",
-        "id": cell_id(nb_path, 0),
-        "metadata": {},
-        "source": banner_md(rel_nb, title_from_path(py_path)),
-    }
-    nb["cells"][1] = {
-        "cell_type": "code",
-        "execution_count": None,
-        "id": cell_id(nb_path, 1),
-        "metadata": {},
-        "outputs": [],
-        "source": install_cell_source(list(info.extras)),
-    }
-    nb["cells"][2] = {
-        "cell_type": "code",
-        "execution_count": None,
-        "id": cell_id(nb_path, 2),
-        "metadata": {},
-        "outputs": [],
-        "source": notebook_code_source(src),
-    }
-    new_text = json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
-    if nb_path.read_text() == new_text:
-        return False
-    if not check:
-        nb_path.write_text(new_text)
-    return True
 
 
 def main() -> None:
@@ -181,21 +165,15 @@ def main() -> None:
         if "__pycache__" not in path.parts
     ]
 
-    nbs_synced = sum(
-        sync_generated_nb_from_py(path, check=args.check) for path in scripts
-    )
-    nbs_generated = sum(generate_nb_from_py(path, check=args.check) for path in scripts)
-
+    changed = sum(sync_notebook(path, check=args.check) for path in scripts)
     if args.check:
-        if nbs_synced or nbs_generated:
+        if changed:
             raise SystemExit(
-                f"example notebooks are stale ({nbs_synced} changed, "
-                f"{nbs_generated} missing); run tools/finalize_examples.py"
+                f"{changed} example notebooks need tools/finalize_examples.py"
             )
         print("example notebooks are up to date")
     else:
-        print(f"notebooks synced: {nbs_synced}")
-        print(f"notebooks generated: {nbs_generated}")
+        print(f"notebooks updated: {changed}")
 
 
 if __name__ == "__main__":
