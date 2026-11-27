@@ -17,9 +17,9 @@ def test_runtime_version_matches_project_metadata():
     version = metadata["project"]["version"]
     citation = (root / "CITATION.cff").read_text()
 
-    assert beamax.__version__ == version == "0.3.0"
+    assert beamax.__version__ == version == "0.4.0"
     assert f"version: {version}" in citation
-    assert "date-released: 2026-08-24" in citation
+    assert "date-released: 2026-11-27" in citation
 
 
 def test_import_beamax_does_not_eagerly_import_scipy():

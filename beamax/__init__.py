@@ -4,7 +4,7 @@ from importlib import import_module
 from types import ModuleType
 from typing import Any
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .geometry import Domain, Sensor
 from .decomposition import DyadicDecomposition

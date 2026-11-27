@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-27
+
 ### Added
 
 - MSGB, k-Wave, and Hybrid accept a sampled `DetectorSurface` or a binary
