@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import equinox as eqx
 from scipy.signal.windows import kaiser
 from scipy.ndimage import zoom
-from typing import Any, Literal, Optional, Tuple, Callable
+from typing import cast, Any, Literal, Optional, Tuple, Callable
 from dataclasses import dataclass
 
 from beamax.solvers.hybrid_solver_utils import split_frequency_components
@@ -709,14 +709,17 @@ class HybridSolver(eqx.Module):
             if method == "forward":
                 return self.hf_solver.forward(data, domain, sensors, ts, wpt, **kwargs)
             if method == "time_reversal":
-                return self.hf_solver.time_reversal(
-                    data,
-                    domain,
-                    sensors,
-                    kwargs["sources"],
-                    ts,
-                    kwargs["data_domain"],
-                    kwargs["data_wpt"],
+                return cast(
+                    jnp.ndarray,
+                    self.hf_solver.time_reversal(
+                        data,
+                        domain,
+                        sensors,
+                        kwargs["sources"],
+                        ts,
+                        kwargs["data_domain"],
+                        kwargs["data_wpt"],
+                    ),
                 )
             if method == "adjoint":
                 return self.hf_solver.adjoint(

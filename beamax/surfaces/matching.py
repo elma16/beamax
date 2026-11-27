@@ -238,6 +238,10 @@ def surface_time_reversal(
     keep_fn=None,
     aggregate_method="scan",
     pallas_config=None,
+    select_coefficients=boundary_coefficients,
+    use_real=True,
+    sharding=None,
+    time_origin=0.0,
 ):
     """MSGB time reversal from boundary data on ``surface`` (beamax pipeline with curved matching).
 
@@ -262,6 +266,10 @@ def surface_time_reversal(
         keep_fn=keep_fn,
         aggregate_method=aggregate_method,
         pallas_config=pallas_config,
+        select_coefficients=select_coefficients,
+        use_real=use_real,
+        sharding=sharding,
+        time_origin=time_origin,
     )
 
 
@@ -282,6 +290,10 @@ def _backpropagate_surface(
     keep_fn=None,
     aggregate_method="scan",
     pallas_config=None,
+    select_coefficients=boundary_coefficients,
+    use_real=True,
+    sharding=None,
+    time_origin=0.0,
 ):
     """Select and render real boundary packets using the supplied launch parameters."""
     if aggregate_method not in ("scan", "terminal_xla", "pallas", "all"):
@@ -298,7 +310,7 @@ def _backpropagate_surface(
         raise ValueError(
             "Data, acquisition domain and transform must have the same shape."
         )
-    if jnp.iscomplexobj(data):
+    if use_real and jnp.iscomplexobj(data):
         raise ValueError("Curved time reversal requires real-valued pressure traces.")
     points = domain.grid if eval_points is None else jnp.asarray(eval_points)
     if points.ndim < 1 or points.shape[-1] != domain.ndim:
@@ -312,11 +324,13 @@ def _backpropagate_surface(
         ode_solver = (
             gb_solvers.solve_hom_TR if homogeneous else gb_solvers.solve_ODE_batch_t
         )
-    coeff_idx, values = boundary_coefficients(data, data_wpt, top_n)
+    coeff_idx, values = select_coefficients(data, data_wpt, top_n)
     params, diag = parameter_fn(
         coeff_idx, data_domain, data_wpt, surface, domain.c_fn, include_Q
     )
     pts, Mts, xts, oms, ats, signum, ts = params
+    ts = ts.at[:, 0].add(time_origin)
+    diag["t_gamma"] = ts[:, 0]
     ats = ats * values[:, None]
     if keep_fn is not None:
         ats = ats * jnp.asarray(keep_fn(params, diag))[:, None]
@@ -325,6 +339,8 @@ def _backpropagate_surface(
         render_params = utils.batch_data(
             *render_params, batch_size=batch_size, zero_padded_args=(4,)
         )
+    if sharding is not None and aggregate_method == "all":
+        render_params = sharding.shard_tr_params(*render_params)
     rec = tr_solver_utils.compute_TR_result(
         render_params,
         c=domain.c_fn,
@@ -336,6 +352,7 @@ def _backpropagate_surface(
         aggregate_method=aggregate_method,
         pallas_config=pallas_config,
         solver_config=solver_config,
+        use_real=use_real,
     )
     diag["coefficients"] = values
     return 2.0 * rec, diag

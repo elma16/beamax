@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass, replace
 from numbers import Integral, Real
-from typing import Literal, Union, Optional, Tuple
+from typing import Any, Literal, Union, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import equinox as eqx
@@ -20,7 +20,7 @@ from beamax.solvers.msgb_solvers.tr_solver_utils import (
     compute_TR_parameters,
 )
 from beamax.geometry import Domain, Sensor
-from beamax.solvers._detectors import forward_positions
+from beamax.solvers._detectors import forward_positions, oriented_surface, chart_data
 from beamax.transforms import MSWPT
 from beamax import utils
 from beamax.gb.gb_solvers import (
@@ -978,34 +978,15 @@ class MSGBSolver(eqx.Module):
         # pair: the real renderer supplies its conjugate.  Apart from avoiding
         # duplicate rays, this makes ``top_n`` count actual packet
         # representatives, consistently with the real forward solver.
-        half_frame = self.use_real and data_wpt.has_conjugate_frame
-        threshold = self._effective_top_n(data_wpt, half_frame=half_frame)
-        if self._streams_top_n(data_wpt, data.dtype):
-            coeff_idx, max_coeffs = streamed_top_n_coefficients(
-                data,
-                data_wpt,
-                top_n=int(threshold),
-                input_type=self.input_type,
-                positive_half=half_frame,
-                scale=0.5,
-                boxes_per_chunk=self._boxes_per_chunk(),
-            )
-        else:
-            # Zero initial derivative gives c+ = 0.5 WPT(data).
-            c_pos = 0.5 * data_wpt.forward(data, self.input_type)
-            if half_frame:
-                c_pos = c_pos * data_wpt.half_mask
-            coeff_idx, max_coeffs = threshold_coefficients(
-                c_pos, threshold, self.thr_strat
-            )
+        coeff_idx, max_coeffs = self._boundary_coefficients(
+            data, data_wpt, self.thr, input_type=self.input_type
+        )
 
         pts, Mts, xts, ωts, ats, signum, beam_times = compute_TR_parameters(
             coeff_idx, data_domain, data_wpt, sources
         )
 
         ats = ats * max_coeffs[:, None]
-        if self.use_real and not half_frame:
-            ats = 0.5 * ats
 
         # Only these aggregators consume an explicit batch axis.
         inverse_aggregate = self._effective_inverse_aggregate_method()
@@ -1361,16 +1342,66 @@ class MSGBSolver(eqx.Module):
             sensor_data = sensor_data[1:]
         return sensor_data, params
 
+    def _boundary_coefficients(
+        self, data, data_wpt, threshold, *, input_type="spatial"
+    ):
+        """Select and scale pressure packets for the configured inverse renderer."""
+        half_frame = self.use_real and data_wpt.has_conjugate_frame
+        threshold = self._effective_top_n(data_wpt, half_frame=half_frame)
+        if self._streams_top_n(data_wpt, data.dtype):
+            coeff_idx, max_coeffs = streamed_top_n_coefficients(
+                data,
+                data_wpt,
+                top_n=int(threshold),
+                input_type=input_type,
+                positive_half=half_frame,
+                scale=0.5,
+                boxes_per_chunk=self._boxes_per_chunk(),
+            )
+        else:
+            # Zero initial derivative gives c+ = 0.5 WPT(data).
+            c_pos = 0.5 * data_wpt.forward(data, input_type)
+            if half_frame:
+                c_pos = c_pos * data_wpt.half_mask
+            coeff_idx, max_coeffs = threshold_coefficients(
+                c_pos, threshold, self.thr_strat
+            )
+
+        if self.use_real and not half_frame:
+            max_coeffs = 0.5 * max_coeffs
+        return coeff_idx, max_coeffs
+
+    def _chart_options(self, domain, ts) -> dict[str, Any]:
+        method = self._effective_inverse_aggregate_method()
+        return dict(
+            batch_size=self.batch_size,
+            ode_solver=self.tr_ode_solver,
+            solver_config=self.ode_config,
+            aggregate_method=method,
+            pallas_config=self._effective_pallas_config(
+                domain.periodic, aggregate_method=method
+            ),
+            select_coefficients=self._boundary_coefficients,
+            use_real=self.use_real,
+            sharding=self.sharding,
+            time_origin=float(ts[0]),
+        )
+
     def time_reversal(
         self,
         data: jnp.ndarray,
         domain: Domain,
-        sensors: Sensor | jnp.ndarray,
-        sources: Sensor,
-        ts,
-        data_domain: Domain,
-        data_wpt: MSWPT,
-    ) -> jnp.ndarray:
+        sensors=None,
+        sources=None,
+        ts=None,
+        data_domain=None,
+        data_wpt=None,
+        *,
+        detectors=None,
+        front=None,
+        eval_points=None,
+        return_diagnostics=False,
+    ) -> jnp.ndarray | tuple[jnp.ndarray, dict]:
         """
         MSGB time-reversal reconstruction.
 
@@ -1411,6 +1442,36 @@ class MSGBSolver(eqx.Module):
         -----
         Time reversal uses a separate launch time for each boundary packet.
         """
+        if detectors is not None:
+            from beamax.surfaces import surface_time_reversal
+
+            if any(v is not None for v in (sensors, sources, data_domain)):
+                raise TypeError("Give detectors and ts for the acquisition.")
+            surface = oriented_surface(domain, detectors, front)
+            data, acquisition = chart_data(data, surface, ts, data_wpt)
+            image, diagnostic = surface_time_reversal(
+                data,
+                acquisition,
+                data_wpt,
+                surface,
+                domain,
+                self.thr,
+                eval_points=eval_points,
+                **self._chart_options(domain, ts),
+            )
+            return (image, diagnostic) if return_diagnostics else image
+        if front is not None or eval_points is not None or return_diagnostics:
+            raise TypeError("These options require detectors.")
+        if (
+            sensors is None
+            or sources is None
+            or ts is None
+            or data_domain is None
+            or data_wpt is None
+        ):
+            raise TypeError(
+                "Give the boundary source, evaluation points, acquisition grid, times and transform."
+            )
         p0_recon, _ = self.time_reversal_with_params(
             data, domain, sensors, sources, ts, data_domain, data_wpt
         )

@@ -22,3 +22,63 @@ def forward_positions(domain, detectors):
     if not np.isrealobj(values) or not np.all(np.isfinite(values)):
         raise ValueError("Detector positions must be real and finite.")
     return jnp.asarray(values)
+
+
+def oriented_surface(domain, detectors, front):
+    from beamax.surfaces import DetectorSurface
+
+    if isinstance(detectors, DetectorSurface):
+        if front is not None or detectors.ndim != domain.ndim:
+            raise ValueError(
+                "Use a surface of the domain dimension with its own orientation."
+            )
+        return detectors
+    if front not in (-1, 1):
+        raise ValueError("A planar mask requires front=1 or front=-1.")
+    positions = np.asarray(Sensor(domain, binary_mask=detectors).positions)
+    axes = [np.unique(positions[:, i]) for i in range(domain.ndim)]
+    fixed = [i for i, a in enumerate(axes) if len(a) == 1]
+    if len(fixed) != 1 or np.prod([len(a) for a in axes]) != len(positions):
+        raise ValueError("Give a complete planar mask or an oriented DetectorSurface.")
+    normal = fixed[0]
+    tangents = [a for i, a in enumerate(axes) if i != normal]
+    if any(
+        not np.allclose(
+            np.diff(a),
+            (a[-1] - a[0]) / (len(a) - 1),
+            rtol=1e-5,
+            atol=4 * np.finfo(a.dtype).eps * np.max(abs(a)),
+        )
+        for a in tangents
+    ):
+        raise ValueError("Planar detectors must be uniformly sampled.")
+    return DetectorSurface.plane(
+        domain.ndim,
+        axis=normal,
+        value=axes[normal][0],
+        origin=tuple(a[0] for a in tangents),
+        spacing=tuple((a[-1] - a[0]) / (len(a) - 1) for a in tangents),
+        shape=tuple(len(a) for a in tangents),
+        front=front,
+    )
+
+
+def chart_data(data, surface, ts, wpt):
+    from beamax.geometry import Domain
+    from beamax.solvers.msgb_solvers.msgb_solver import _validate_time_grid
+
+    dt = _validate_time_grid(ts)
+    assert dt is not None  # The inverse requires at least two samples.
+    if ts[0] < 0:
+        raise ValueError("Acquisition times must be nonnegative.")
+    shape = (len(ts), *surface.shape)
+    data = jnp.asarray(data)
+    if data.shape not in (shape, (len(ts), surface.num_sensors)):
+        raise ValueError("Expected time-first detector traces in chart order.")
+    if wpt is None or tuple(wpt.dyadic_decomp.N) != shape:
+        raise ValueError(
+            "The data transform must match the time and detector sampling."
+        )
+    return data.reshape(shape), Domain(
+        shape, (dt, *surface.spacing), (False, *surface.periodic)
+    )
