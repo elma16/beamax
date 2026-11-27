@@ -9,9 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- MSGB, k-Wave, and Hybrid accept a sampled `DetectorSurface` or a binary
+  mask through `detectors=` for forward, time reversal, and adjoint solves.
+  Forward pressure has one row per time sample and one column per detector.
+  Pass those traces and the same detectors to either inverse.
+- MSGB supports time reversal and adjoint on
+  curved detector surfaces. On a complete, uniformly sampled inward-facing
+  ring with a compatible exterior sound speed, `adjoint` selects the circular
+  formula automatically. Surface adjoints use detector areas or arc lengths
+  by default. [Detector geometry and adjoint weighting](docs/api/surfaces.md)
+- MSGB evaluates forward pressure at physical receiver positions. The Python
+  k-Wave backend can record off-grid traces by linear interpolation. Native
+  k-Wave recording and all k-Wave inverse solves require grid-aligned
+  detectors. `surface.to_mask(domain, snap=True)` explicitly maps receivers
+  to their nearest grid points and reports the channel ordering.
 - `KWaveSolver(backend="mac")` runs k-Wave on Apple silicon with macOS 15
   or newer. The first Metal solve downloads, verifies, and caches the
   NeuroHarmonics executable. Existing `device="metal"` calls also select it.
+- The reconstruction examples show how to reuse a planar detector or a ring
+  for forward and inverse solves. The 2D and 3D MSWPT coefficient plots
+  accept `display_order="array"` to align their axes with NumPy array indices.
 
 ### Changed
 
@@ -19,6 +36,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reversal, and the adjoint. The default `backend="cpp"` uses the native
   OpenMP CPU executable for all three. Select `backend="python"` explicitly
   to reproduce an inverse run that previously fell back to Python.
+- `MSGBSolver.forward` propagates from time zero even when the first requested
+  sample is later. The underlying Gaussian beam integrators take their
+  initial state at the first supplied time.
+- MSGB time reversal and adjoint now require a lossless domain. The k-Wave
+  adjoint validates the lossless-medium assumption and rejects smoothed
+  initial pressure, which would make the forward map nonlinear.
+- Hybrid records both frequency bands at the same receivers in the same
+  order. It keeps the low-frequency solve on the original grid when
+  coarsening would move a receiver. Both inverse components use the
+  detector geometry and sampling times of the supplied traces.
+
+### Fixed
+
+- Fourier cropping and padding preserve the DC bin when grid parity changes.
+  MSWPT analysis and synthesis now agree on the frequency centres and
+  widths of wave packets, including odd-width supports and rectangular grids.
+- Gaussian beam propagation carries constant absorption through the analytic,
+  numerical, and fused solvers and preserves phase through a focus. Batched
+  Hamiltonian derivatives and gradients at zero beam amplitude are corrected.
+- MSGB forward handles the initial pressure derivative's zero-frequency
+  component on a periodic grid with constant sound speed. Planar MSGB
+  inverses launch both frequency signs inward and count each conjugate
+  packet pair once when selecting real data with `top_n`.
+- Hybrid crops low-frequency fields along each spatial axis and passes
+  Fourier coefficients to an MSGB component configured for Fourier input.
+- The native C++ k-Wave backend preserves time and sensor order when both
+  axes have the same length, and retains the channel axis for one sensor.
+  k-Wave inverse calls validate the trace length. Simulations using legacy
+  k-Wave options get independent scratch files by default.
 
 ## [0.3.0] — 2026-08-24
 
