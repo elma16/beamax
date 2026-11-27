@@ -24,9 +24,12 @@ PUBLIC_EXAMPLES_ROOT = Path("examples")
 def banner_md(
     rel_nb: str,
     title: str,
+    description: str,
 ) -> list[str]:
     return [
         f"# {title}\n",
+        "\n",
+        description + "\n",
         "\n",
         f"[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]({colab_url(rel_nb)})\n",
     ]
@@ -80,8 +83,17 @@ def example_cells(src: str) -> list[tuple[str, list[str]]]:
     if preamble := sections[0].strip():
         cells.append(("code", notebook_code_source(preamble)))
     for title, code in zip(sections[1::2], sections[2::2]):
-        cells.append(("markdown", [f"## {title}"]))
-        cells.append(("code", notebook_code_source(code.strip())))
+        # Leading prose belongs with the heading in Colab. Keep comments
+        # attached to individual statements inside the executable cell.
+        lines = code.strip().splitlines()
+        notes = []
+        while lines and lines[0].startswith("# "):
+            notes.append(lines.pop(0)[2:])
+        heading = f"## {title}"
+        if notes:
+            heading += "\n\n" + " ".join(notes)
+        cells.append(("markdown", notebook_code_source(heading)))
+        cells.append(("code", notebook_code_source("\n".join(lines).strip())))
     return cells
 
 
@@ -100,7 +112,10 @@ def sync_notebook(py_path: Path, *, check: bool = False) -> bool:
             return False
 
     content = [
-        ("markdown", banner_md(str(nb_path), title_from_path(py_path))),
+        (
+            "markdown",
+            banner_md(str(nb_path), title_from_path(py_path), info.description),
+        ),
         ("code", install_cell_source(list(info.extras))),
         *example_cells(src),
     ]

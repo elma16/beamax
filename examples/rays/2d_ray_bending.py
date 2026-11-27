@@ -4,6 +4,7 @@ Example extras: viz-mpl
 Example smoke: false
 """
 
+# %% Import the ray solver and plotting tools
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -17,6 +18,7 @@ from beamax.plotter import use_beamax_style
 jax.config.update("jax_enable_x64", True)
 
 
+# %% Define a smooth lens in a sound-speed gradient
 def speed_field(x: jnp.ndarray) -> jnp.ndarray:
     lens_center = jnp.array([0.46, 0.52])
     lens = jnp.exp(-35.0 * jnp.sum((x - lens_center) ** 2, axis=-1))
@@ -24,6 +26,7 @@ def speed_field(x: jnp.ndarray) -> jnp.ndarray:
     return 1.05 + vertical_gradient - 0.28 * lens
 
 
+# %% Launch 60 parallel rays and integrate their trajectories
 def solve_rays() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     n_rays = 60
     ts = jnp.linspace(0.0, 0.75, 48)
@@ -54,6 +57,7 @@ def solve_rays() -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
 
 
 def main() -> None:
+    # %% Evaluate the rays and measure their change of direction
     plot_dir = Path("plots/rays")
     plot_dir.mkdir(parents=True, exist_ok=True)
     use_beamax_style()
@@ -63,6 +67,7 @@ def main() -> None:
     direction_angles = jnp.arctan2(pt[:, -1, 1], pt[:, -1, 0])
     initial_angles = jnp.arctan2(pt[:, 0, 1], pt[:, 0, 0])
 
+    # %% Draw the trajectories over the sound-speed field
     grid_n = 128
     x = jnp.linspace(0.0, 1.0, grid_n)
     y = jnp.linspace(0.0, 1.0, grid_n)
@@ -104,6 +109,8 @@ def main() -> None:
 
     out_path = plot_dir / "2d_ray_bending.png"
     fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    if "inline" in plt.get_backend().lower():
+        plt.show()
     plt.close(fig)
 
     mean_lateral_shift = float(jnp.mean(jnp.abs(final[:, 1] - x0[:, 1])))

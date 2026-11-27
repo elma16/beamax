@@ -38,6 +38,7 @@ def test_plotter_public_exports():
         "plot_mswpt_coeffs",
         "plot_mswpt_coeffs_3d",
         "plot_packet_box_scanner",
+        "save_comparison_figure",
         "use_beamax_style",
     ]
 
@@ -287,9 +288,9 @@ def test_plot_mswpt_coeffs_3d_rectangular_projection(array_order):
         plt.close(fig)
 
 
-def test_forward_thesis_residuals_share_scale_and_receiver():
+def test_forward_thesis_residuals_share_scale_and_receiver(tmp_path):
     plt = pytest.importorskip("matplotlib.pyplot")
-    from beamax.plotter import plot_forward_records
+    from beamax.plotter import plot_forward_records, save_comparison_figure
 
     kw = np.arange(60.0).reshape(5, 12)
     ms, hybrid = kw.copy(), kw.copy()
@@ -312,6 +313,10 @@ def test_forward_thesis_residuals_share_scale_and_receiver():
                 (left, 73),
                 atol=1,
             )
+        png = tmp_path / "plots" / "forward.png"
+        save_comparison_figure(fig, png, fixed_canvas=True)
+        assert plt.imread(png).shape[:2] == (1222, 1560)
+        assert plt.fignum_exists(fig.number)
         assert panels[1].images[0].norm is panels[2].images[0].norm
         assert panels[0].images[0].get_clim() == (
             min(a.min() for a in (kw, ms, hybrid)),

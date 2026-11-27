@@ -1,5 +1,7 @@
 """Matplotlib panels adapted from thesis_experiments.figures and the Chapter 4/5 replotters."""
 
+from pathlib import Path
+
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -295,3 +297,31 @@ def plot_packet_box_scanner(
         handletextpad=0.45,
     )
     return fig
+
+
+def save_comparison_figure(
+    fig: Figure, path: str | Path, *, fixed_canvas=False, show=False
+):
+    """Export a thesis comparison at 300 dpi and optionally display the saved PNG.
+
+    Use fixed_canvas=True for the forward plate to preserve its published margins.
+    The one-face inverse plate uses a tight crop. With show=True the figure is
+    displayed in a notebook or interactive backend and closed after display.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Tick locators also consult rcParams at save time. Display the exported
+    # PNG in Colab so its inline formatter cannot change the ticks or crop.
+    with plt.rc_context(_STYLE):
+        bounds = fig.bbox_inches if fixed_canvas else "tight"
+        fig.savefig(path, dpi=300, bbox_inches=bounds, pad_inches=0.05)
+        backend = plt.get_backend().lower()
+        if show and "inline" in backend:
+            from IPython.display import Image, display
+
+            display(Image(filename=str(path), retina=True))
+        elif show and backend != "agg":
+            plt.show()
+    if show:
+        plt.close(fig)

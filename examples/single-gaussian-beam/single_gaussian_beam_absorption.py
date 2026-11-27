@@ -4,6 +4,7 @@ Example extras: kwave,viz-mpl
 Example smoke: false
 """
 
+# %% Import the beam and k-Wave solvers
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -18,11 +19,13 @@ from beamax.solvers import KWaveSolver
 jax.config.update("jax_enable_x64", True)
 
 
+# %% Convert the damping rate to k-Wave units
 def lam_to_alpha_db_per_cm(lam: float, c0: float) -> float:
     r"""Return $\alpha_{\mathrm{dB/cm}}=(\log_{10}e)\lambda/(10c_0)$."""
     return float(jnp.log10(jnp.e) / 5.0 * lam / c0 / 2.0)
 
 
+# %% Construct and propagate the two signed beam modes
 def msgb_real_beam(domain, ts, lam: float) -> jnp.ndarray:
     """Evaluate a right/left mode pair so the recorded field is real-valued."""
     b, d = 1, 1
@@ -56,6 +59,7 @@ def msgb_real_beam(domain, ts, lam: float) -> jnp.ndarray:
     return jnp.squeeze(beam(+1) + beam(-1))
 
 
+# %% Record the same field on a 1D k-Wave strip
 def kwave_run(
     p0_1d,
     ts,
@@ -92,13 +96,16 @@ def kwave_run(
     return np.asarray(solver.forward(p0_2d, kw_domain, detectors=binary_mask, ts=ts))
 
 
+# %% Set a homogeneous unit sound speed
+def c_fn(x):
+    return 1.0 + 0.0 * x[..., 0]
+
+
 def main() -> None:
+    # %% Set the grid, speed and observation times
     n = 512
     cfl = 0.3
     lam = 5.0
-
-    def c_fn(x):
-        return 1.0 + 0.0 * x[..., 0]
 
     domain = geometry.Domain(
         N=(n,),
@@ -110,6 +117,7 @@ def main() -> None:
     ts = domain.generate_time_domain()
     c0 = float(c_fn(jnp.zeros(1)))
 
+    # %% Propagate with and without absorption
     u_loss = np.asarray(msgb_real_beam(domain, ts, lam=0.0))
     u_abs = np.asarray(msgb_real_beam(domain, ts, lam=lam))
 
@@ -131,12 +139,14 @@ def main() -> None:
         cfl=cfl,
     ).reshape(len(ts), n)
 
+    # %% Measure the relative field errors
     e2_loss = utils.rel_l2(k_loss, u_loss)
     e2_abs = utils.rel_l2(k_abs, u_abs)
     print(f"Damping coefficient lam = {lam}, alpha_coeff = {alpha_db:.4f} dB/cm")
     print(f"Lossless  rel-L2 (MSGB vs k-Wave): {e2_loss:.3e}")
     print(f"Absorbing rel-L2 (MSGB vs k-Wave): {e2_abs:.3e}")
 
+    # %% Plot the pressure fields, amplitudes and final profiles
     extent = [0.0, 1.0, float(ts[0]), float(ts[-1])]
     norm_abs = Normalize(
         vmin=min(k_abs.min(), u_abs.min()), vmax=max(k_abs.max(), u_abs.max())
@@ -187,6 +197,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "single_gaussian_beam_absorption.png"
     fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    if "inline" in plt.get_backend().lower():
+        plt.show()
     plt.close(fig)
     print(f"Saved figure to {out_path}")
 

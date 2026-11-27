@@ -4,6 +4,7 @@ Example extras: viz-mpl,autodiff
 Example smoke: false
 """
 
+# %% Import JAX, the beam solver and the optimiser
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -22,6 +23,7 @@ YMIN, YMAX = -10.0, 10.0
 EXTENT = [XMIN, XMAX, YMIN, YMAX]
 
 
+# %% Parameterise the sound speed with a neural network
 class NeuralSoundSpeed:
     def __init__(self, hidden_dim: int = 32, base_c: float = 1.0):
         self.base_c = base_c
@@ -50,6 +52,7 @@ class NeuralSoundSpeed:
         return self.base_c + delta_c
 
 
+# %% Define the source aperture, launch directions and focal point
 def ray_setup():
     n_rays = 20
     source_x = jnp.linspace(-5.0, 5.0, n_rays)
@@ -67,6 +70,7 @@ def ray_setup():
     return x0, p0, m0, a0, mode, ts, focus
 
 
+# %% Trace the rays through the current speed field
 def solve_rays(
     params: dict[str, jnp.ndarray],
     sound_speed: NeuralSoundSpeed,
@@ -84,6 +88,7 @@ def solve_rays(
     return xt
 
 
+# %% Measure how closely the rays focus
 def focusing_loss(
     params: dict[str, jnp.ndarray],
     sound_speed: NeuralSoundSpeed,
@@ -116,6 +121,7 @@ def focusing_loss(
     }
 
 
+# %% Sample the learned sound speed on a grid
 def speed_map(
     sound_speed: NeuralSoundSpeed,
     params: dict[str, jnp.ndarray],
@@ -129,6 +135,7 @@ def speed_map(
     return sound_speed(grid_points, params)
 
 
+# %% Draw the initial and optimised ray paths
 def plot_rays_before_after(
     out_path,
     c_init_map,
@@ -180,9 +187,12 @@ def plot_rays_before_after(
     fig.colorbar(im, ax=ax2)
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    if "inline" in plt.get_backend().lower():
+        plt.show()
     plt.close(fig)
 
 
+# %% Plot the loss history
 def plot_loss(out_path, loss_history: list[float]) -> None:
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(loss_history)
@@ -190,9 +200,12 @@ def plot_loss(out_path, loss_history: list[float]) -> None:
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    if "inline" in plt.get_backend().lower():
+        plt.show()
     plt.close(fig)
 
 
+# %% Plot the change in sound speed
 def plot_speed_delta(out_path, c_init_map, c_opt_map, focus) -> None:
     diff_map = c_opt_map - c_init_map
     delta_max = float(jnp.max(jnp.abs(diff_map)))
@@ -212,10 +225,13 @@ def plot_speed_delta(out_path, c_init_map, c_opt_map, focus) -> None:
     fig.colorbar(im, ax=ax)
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    if "inline" in plt.get_backend().lower():
+        plt.show()
     plt.close(fig)
 
 
 def main() -> None:
+    # %% Initialise the rays and the sound-speed model
     plot_dir = Path("plots/rays")
     plot_dir.mkdir(parents=True, exist_ok=True)
     use_beamax_style()
@@ -224,6 +240,7 @@ def main() -> None:
     sound_speed = NeuralSoundSpeed(hidden_dim=32)
     params = sound_speed.params
 
+    # %% Differentiate the focusing loss and configure Adam
     loss_grad = jax.jit(
         jax.value_and_grad(
             lambda current_params: focusing_loss(
@@ -255,6 +272,7 @@ def main() -> None:
     best_params = params
     best_xt = xt_init
 
+    # %% Update the speed field and retain the best iterate
     num_iters = 300
     print("Optimizing speed of sound field for ray focusing...")
     for step in range(num_iters):
@@ -277,6 +295,7 @@ def main() -> None:
                 f"focus {float(aux['focus']):.4f} | spread {float(aux['spread']):.4f}"
             )
 
+    # %% Compare the initial and optimised solutions
     c_init_map = speed_map(sound_speed, sound_speed.params)
     c_opt_map = speed_map(sound_speed, best_params)
 

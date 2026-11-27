@@ -13,6 +13,7 @@ import numpy as np
 from beamax._comparison_plots import (
     plot_packet_box_scanner,
     plot_forward_records,
+    save_comparison_figure,
 )
 from beamax.decomposition import DyadicDecomposition
 
@@ -21,6 +22,7 @@ __all__ = [
     "plot_mswpt_coeffs",
     "plot_mswpt_coeffs_3d",
     "plot_packet_box_scanner",
+    "save_comparison_figure",
     "use_beamax_style",
 ]
 

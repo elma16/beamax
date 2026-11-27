@@ -7,7 +7,10 @@ records the mixed two-packet source on 128 boundary nodes of the open 128 × 128
 grid with a 20-cell external absorbing layer. Both operations use that acquisition.
 MSGB uses the thesis 256 × 128 detector-data transform and closed-form
 homogeneous propagation. The notebook prints first-call and repeat runtimes for
-the acquisition and each of the four reconstructions.
+the acquisition and each of the four reconstructions. In the solver cell,
+`tr_ode_solver=solve_hom_TR` selects the analytic homogeneous back-propagator
+and `sum_method="scan_real"` selects standard JAX beam summation. The two
+adjoint calls use `pairing="surface_area"` for the physical surface measure.
 
 The five panels show the initial pressure, k-Wave and MSGB time reversal, and
 k-Wave and MSGB adjoints. Red triangles mark the detectors. The two profiles
