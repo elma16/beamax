@@ -11,10 +11,11 @@ from .matching import (
     surface_time_reversal,
     surface_tr_parameters,
 )
-from .surface import DetectorSurface
+from .surface import DetectorMask, DetectorSurface
 from .ring import ring_adjoint, ring_dirichlet_from_source
 
 __all__ = [
+    "DetectorMask",
     "DetectorSurface",
     "ring_adjoint",
     "ring_dirichlet_from_source",

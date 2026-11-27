@@ -25,9 +25,24 @@ The example returns a 16 × 16 image with the coordinates and order of `points`.
 
 ## Detector mask order
 
-A binary detector mask enumerates channels in C-order over the grid. To use those traces on a sparse ring, reorder the last axis with `pressure = mask_traces[..., ring.mask_to_chart(domain)]`. To inject chart traces into the same mask, use the inverse permutation `np.argsort(ring.mask_to_chart(domain))`.
+A binary mask enumerates receivers in C order over the grid. A surface enumerates them in parameter order. For example, the four receivers below lie on grid nodes. The ring starts at its rightmost receiver, while the mask starts at its leftmost receiver.
 
-A dense array can map multiple detector elements to the same grid point. In that case, the binary mask conversion raises an error.
+```python
+domain = Domain((16, 16), (0.125, 0.125), (False, False))
+ring = DetectorSurface.circle((1.0, 0.875), radius=0.5, n=4)
+mapping = ring.to_mask(domain)
+mask = mapping.binary_mask
+chart_traces = mask_traces[..., mapping.mask_to_chart]
+mask_traces = chart_traces[..., mapping.chart_to_mask]
+```
+
+Both permutations index the channel axis of a flat `(Nt, Ndetectors)` record, including when the record is square. For a 3D patch, flatten its two parameter axes in C order before applying the permutation.
+
+By default, `to_mask` requires every receiver to coincide with a grid node to within floating-point roundoff. For deliberate nearest-node sampling, use `mapping = surface.to_mask(domain, snap=True)`. Compare `mapping.realized_positions` with `surface.positions()` to see how far each receiver moved, in the original surface order.
+
+If you start with a mask, import `Sensor` from `beamax` and use `Sensor(domain, binary_mask=mask).positions` to recover the grid coordinates in mask order. Reconstructing a particular chart from those nodes also requires its parametrization and orientation.
+
+Both modes reject positions outside the half-open domain and any two receivers that map to the same node. Inside the last grid interval, snapping selects the last node. Halfway ties between adjacent nodes round to the even index. The existing `surface.to_sensor(domain)` and `surface.mask_to_chart(domain)` calls use nearest-node masks.
 
 ## Open arcs and patches
 

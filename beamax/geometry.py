@@ -418,6 +418,27 @@ class Domain(eqx.Module):
         return time_domain
 
 
+def _nearest_grid_indices(domain: Domain, positions: jnp.ndarray) -> np.ndarray:
+    """Return distinct receiver nodes in input order within the half-open domain."""
+    if positions.ndim != 2 or positions.shape[1] != domain.ndim:
+        raise ValueError(
+            f"positions must have shape (Ns, ndim) for ndim={domain.ndim}, "
+            f"got {positions.shape}."
+        )
+    coords = np.asarray(positions)
+    if not np.all(np.isfinite(coords)):
+        raise ValueError("positions must contain only finite values.")
+    if np.any(coords < 0) or np.any(coords >= np.asarray(domain.grid_size)):
+        raise ValueError("positions must lie inside the half-open domain [0, N*dx).")
+    nearest = jnp.rint(positions / jnp.asarray(domain.dx)).astype(int)
+    cells = np.asarray(jnp.clip(nearest, 0, jnp.asarray(domain.N) - 1))
+    if len(np.unique(cells, axis=0)) != len(cells):
+        raise ValueError(
+            "positions must map to distinct grid points after quantisation."
+        )
+    return cells
+
+
 class Sensor(eqx.Module):
     """
     Sampling geometry for receivers or sources.
@@ -481,60 +502,17 @@ class Sensor(eqx.Module):
         self.domain = domain
 
         if positions is not None:
-            positions = self._normalize_positions(positions)
+            positions = jnp.asarray(positions)
+            if positions.ndim == 1:
+                positions = positions[None, :]
+            cells = _nearest_grid_indices(domain, positions)
             self._positions = positions
-            self._binary_mask = self._positions_to_mask(positions)
+            self._binary_mask = jnp.zeros(domain.N).at[tuple(cells.T)].set(1)
         else:
             assert binary_mask is not None  # exclusive-or guard above
             binary_mask = self._normalize_mask(binary_mask)
             self._binary_mask = binary_mask
             self._positions = self._mask_to_positions(binary_mask)
-
-    def _normalize_positions(
-        self, positions: Float[Array, "..."]
-    ) -> Float[Array, "Ns d"]:
-        """
-        Validate positions and coerce a single point to shape ``(1, d)``.
-
-        Parameters
-        ----------
-        positions : array-like
-            Physical sensor positions.
-
-        Returns
-        -------
-        jnp.ndarray, shape (Ns, d)
-
-        Raises
-        ------
-        ValueError
-            If the shape is invalid or any point falls outside the domain.
-        """
-        positions = jnp.asarray(positions)
-        if positions.ndim == 1:
-            positions = positions[None, :]
-        if positions.ndim != 2 or positions.shape[1] != self.domain.ndim:
-            raise ValueError(
-                "positions must have shape (Ns, ndim) or (ndim,), "
-                f"got {positions.shape} for ndim={self.domain.ndim}."
-            )
-
-        pos_np = np.asarray(positions)
-        if not np.all(np.isfinite(pos_np)):
-            raise ValueError("positions must contain only finite values.")
-        lower = np.zeros(self.domain.ndim)
-        upper = np.asarray(self.domain.grid_size)
-        if np.any(pos_np < lower) or np.any(pos_np >= upper):
-            raise ValueError(
-                "positions must lie inside the half-open domain [0, N*dx)."
-            )
-        indices = np.rint(pos_np / np.asarray(self.domain.dx)).astype(int)
-        indices = np.clip(indices, 0, np.asarray(self.domain.N) - 1)
-        if np.unique(indices, axis=0).shape[0] != indices.shape[0]:
-            raise ValueError(
-                "positions must map to distinct grid points after quantisation."
-            )
-        return positions
 
     def _normalize_mask(self, mask: Num[Array, "..."]) -> Num[Array, "*N"]:
         """
@@ -569,26 +547,6 @@ class Sensor(eqx.Module):
                 "binary_mask must contain at least one positive active entry."
             )
         return mask
-
-    def _positions_to_mask(self, positions: Float[Array, "Ns d"]) -> Num[Array, "*N"]:
-        """
-        Convert physical positions to a binary mask.
-
-        Parameters
-        ----------
-        positions : jnp.ndarray, shape (Ns, d)
-            Physical coordinates.
-
-        Returns
-        -------
-        jnp.ndarray, shape (*N,), dtype=int
-            1 at nearest grid indices (rounded), else 0.
-        """
-        sensor_indices = jnp.round(positions / jnp.array(self.domain.dx)).astype(int)
-        upper_indices = jnp.array(self.domain.N) - 1
-        sensor_indices = jnp.clip(sensor_indices, 0, upper_indices)
-        mask = jnp.zeros(self.domain.N)
-        return mask.at[tuple(sensor_indices.T)].set(1)
 
     def _mask_to_positions(self, mask: Num[Array, "*N"]) -> Float[Array, "Ns d"]:
         """

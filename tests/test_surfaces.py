@@ -31,6 +31,116 @@ def test_mask_permutation_and_duplicate_grid_cells():
         dense.to_sensor(domain)
 
 
+@pytest.mark.parametrize("x64", [False, True], ids=["float32", "float64"])
+def test_exact_mask_orders_a_translated_ring_and_square_traces(x64):
+    with jax.enable_x64(x64):
+        domain = Domain((14, 11), (0.1, 0.2), (False, False))
+        ring = DetectorSurface.circle((0.7, 1.0), 0.4, 4)
+        mapping = ring.to_mask(domain)
+        chart_cells = np.array([[11, 5], [7, 7], [3, 5], [7, 3]])
+        expected_mask = np.zeros(domain.N, dtype=bool)
+        expected_mask[tuple(chart_cells.T)] = True
+        assert mapping.binary_mask.dtype == bool
+        np.testing.assert_array_equal(mapping.binary_mask, expected_mask)
+        np.testing.assert_array_equal(
+            mapping.realized_positions, domain.grid[tuple(chart_cells.T)]
+        )
+        np.testing.assert_array_equal(mapping.mask_to_chart, [3, 2, 0, 1])
+        np.testing.assert_array_equal(mapping.chart_to_mask, [2, 3, 1, 0])
+
+        # Each value identifies both its time row and its physical receiver.
+        field = np.arange(np.prod(domain.N)).reshape(domain.N)
+        times = 1000 * np.arange(4)[:, None]
+        mask_traces = times + field[expected_mask]
+        chart_traces = times + field[tuple(chart_cells.T)]
+        np.testing.assert_array_equal(
+            mask_traces[:, mapping.mask_to_chart], chart_traces
+        )
+        np.testing.assert_array_equal(
+            chart_traces[:, mapping.chart_to_mask], mask_traces
+        )
+
+
+def test_mask_flattens_two_patch_axes_in_chart_order():
+    domain = Domain((7, 6, 3), (0.5, 0.25, 0.5), (False,) * 3)
+    patch = DetectorSurface.parametric(
+        lambda t: jnp.array([2 - t[1], 0.5 + t[0], 0.5]),
+        3,
+        (0.0, 0.0),
+        (0.25, 0.5),
+        (2, 3),
+        front_vector=(0, 0, 1),
+    )
+    mapping = patch.to_mask(domain)
+    np.testing.assert_array_equal(mapping.mask_to_chart, [4, 2, 0, 5, 3, 1])
+    np.testing.assert_array_equal(mapping.realized_positions, patch.positions())
+    np.testing.assert_array_equal(
+        mapping.realized_positions[mapping.chart_to_mask],
+        domain.grid[mapping.binary_mask],
+    )
+
+
+def test_off_grid_ring_requires_snapping_and_reports_realized_nodes():
+    domain = Domain((16, 16), (0.125, 0.125), (False, False))
+    ring = DetectorSurface.circle((1.025, 0.85), 0.5, 4)
+    with pytest.raises(ValueError, match="off-grid"):
+        ring.to_mask(domain)
+    with pytest.raises(TypeError, match="boolean"):
+        ring.to_mask(domain, snap="false")
+    mapping = ring.to_mask(domain, snap=True)
+    expected = [[1.5, 0.875], [1.0, 1.375], [0.5, 0.875], [1.0, 0.375]]
+    np.testing.assert_array_equal(mapping.realized_positions, expected)
+    np.testing.assert_allclose(ring.positions(), np.array(expected) + [0.025, -0.025])
+    np.testing.assert_array_equal(
+        mapping.binary_mask, ring.to_sensor(domain).binary_mask
+    )
+    np.testing.assert_array_equal(mapping.mask_to_chart, ring.mask_to_chart(domain))
+
+
+def test_mask_requires_distinct_nodes():
+    domain = Domain((8, 3), (1.0, 1.0), (False, False))
+    folded = DetectorSurface.parametric(
+        lambda t: jnp.array([t[0] ** 2, 1.0]),
+        2,
+        (-1.0,),
+        (1.0,),
+        (4,),
+        front_vector=(0, 1),
+    )
+    with pytest.raises(ValueError, match="distinct"):
+        folded.to_mask(domain)
+
+    # Both float32 positions round to index 4 on the actual grid.
+    with jax.enable_x64(False):
+        domain = Domain((8, 8), (0.1, 0.1), (False, False))
+        close = DetectorSurface.plane(
+            2, value=0.2, origin=(0.35,), spacing=(0.05,), shape=(2,)
+        )
+        with pytest.raises(ValueError, match="distinct"):
+            close.to_mask(domain, snap=True)
+
+
+@pytest.mark.parametrize("snap", [False, True])
+@pytest.mark.parametrize("x", [-0.01, 1.0, np.nan, np.inf])
+def test_mask_rejects_invalid_positions_before_snapping(x, snap):
+    domain = Domain((8,), (0.125,), (False,))
+    with pytest.raises(ValueError, match="half-open|finite"):
+        DetectorSurface.point(x).to_mask(domain, snap=snap)
+
+
+@pytest.mark.parametrize(("x", "node"), [(0.0625, 0), (0.1875, 2), (0.99, 7)])
+def test_snapped_point_handles_halfway_ties_and_last_interval(x, node):
+    domain = Domain((8,), (0.125,), (False,))
+    point = DetectorSurface.point(x)
+    with pytest.raises(ValueError, match="off-grid"):
+        point.to_mask(domain)
+    mapping = point.to_mask(domain, snap=True)
+    np.testing.assert_array_equal(np.flatnonzero(mapping.binary_mask), [node])
+    np.testing.assert_array_equal(mapping.realized_positions, [[node * 0.125]])
+    np.testing.assert_array_equal(mapping.mask_to_chart, [0])
+    np.testing.assert_array_equal(mapping.chart_to_mask, [0])
+
+
 def test_open_arc_padding_masks_packet_centres_and_retains_original_midpoint():
     surface = DetectorSurface.arc((0.0, 0.0), 1.0, 0.1, 1.7, 16)
     data, padded = surface.prepare_open_data(

@@ -21,6 +21,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from beamax.geometry import Domain, Sensor, _nearest_grid_indices
+
 
 def _check_samples(n, minimum):
     if (
@@ -39,6 +41,22 @@ def _raw_normal(J):
     if d == 2:
         return jnp.stack([-J[1, 0], J[0, 0]])
     return jnp.cross(J[:, 0], J[:, 1])
+
+
+@dataclass(frozen=True, eq=False)
+class DetectorMask:
+    """Grid representation of a sampled detector surface.
+
+    ``binary_mask`` has the domain shape. Row ``j`` of ``realized_positions``
+    is the grid position of chart element ``j``. Index the last axis of a
+    flat pressure record with ``mask_to_chart`` or ``chart_to_mask`` to read
+    its channels in the indicated order.
+    """
+
+    binary_mask: np.ndarray
+    realized_positions: np.ndarray
+    mask_to_chart: np.ndarray
+    chart_to_mask: np.ndarray
 
 
 @dataclass(frozen=True, eq=False)
@@ -224,22 +242,46 @@ class DetectorSurface:
 
     def to_sensor(self, domain):
         """Construct a nearest-voxel mask. Coincident mask cells raise ValueError."""
-        from beamax.geometry import Sensor
-
         return Sensor(domain, positions=self.positions())
 
-    def mask_to_chart(self, domain):
-        """Return indices for `kwave_traces[..., indices]` in flat chart order.
+    def to_mask(self, domain: Domain, *, snap: bool = False) -> DetectorMask:
+        """Map distinct chart elements to grid nodes, preserving their channel order.
 
-        The inverse permutation maps chart channels to C-order mask channels.
+        By default each position must coincide with a node up to floating-point
+        roundoff. With ``snap=True``, use the nearest node on each axis. A tie
+        rounds to the even index. Both modes require positions in [0, N*dx)
+        and a separate node for each element.
         """
-        sensor = self.to_sensor(domain)
-        mask = np.asarray(sensor.binary_mask, dtype=bool)
-        # Use exactly the rounding and clamping used to construct Sensor's mask.
-        cells = jnp.rint(sensor.positions / jnp.asarray(domain.dx)).astype(int)
-        cells = np.asarray(jnp.clip(cells, 0, jnp.asarray(domain.N) - 1))
-        linear = np.ravel_multi_index(tuple(cells.T), domain.N)
-        return np.searchsorted(np.flatnonzero(mask), linear)
+        if not isinstance(snap, (bool, np.bool_)):
+            raise TypeError("snap must be a boolean.")
+        positions = self.positions()
+        cells = _nearest_grid_indices(domain, positions)
+        realized = np.asarray(jnp.asarray(cells) * jnp.asarray(domain.dx))
+        if not snap:
+            # Allow chart arithmetic roundoff, capped at a small fraction of a cell.
+            eps = jnp.finfo(jnp.result_type(positions, 0.0)).eps
+            dx = np.asarray(domain.dx)
+            tolerance = np.minimum(
+                4 * eps * np.maximum(np.abs(realized), dx), 1e-3 * dx
+            )
+            if np.any(np.abs(np.asarray(positions) - realized) > tolerance):
+                raise ValueError(
+                    "Surface positions are off-grid. Use snap=True to select the nearest nodes."
+                )
+        mask = np.zeros(domain.N, dtype=bool)
+        mask[tuple(cells.T)] = True
+        flat_cells = np.ravel_multi_index(tuple(cells.T), domain.N)
+        chart_to_mask = np.argsort(flat_cells)
+        return DetectorMask(
+            binary_mask=mask,
+            realized_positions=realized,
+            mask_to_chart=np.argsort(chart_to_mask),
+            chart_to_mask=chart_to_mask,
+        )
+
+    def mask_to_chart(self, domain):
+        """Return indices for reading nearest-node mask traces in flat chart order."""
+        return self.to_mask(domain, snap=True).mask_to_chart
 
     def prepare_open_data(self, data, *, padding, taper):
         """Taper open chart edges and zero-pad each side in sensor samples.
