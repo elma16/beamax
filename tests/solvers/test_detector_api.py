@@ -283,3 +283,54 @@ def test_specialization_requires_eligible_geometry_and_exterior(experiment):
     ring = DetectorSurface.circle((1.0, 1.0), 0.5, 8)
     assert circular_boundary_speed(ring, variable, 1.0) is None
     assert circular_boundary_speed(ring, variable, None) is None
+
+
+def test_kwave_rejects_ambiguous_input_and_off_grid_image_points(experiment):
+    from beamax.solvers import KWaveSolver
+
+    solver, domain, ts, _, p0 = experiment
+    kw = KWaveSolver(backend="python", pml_size=0, smooth_p0=False)
+    chart = DetectorSurface.circle((1.0, 0.875), 0.5, 4)
+    mask = chart.to_mask(domain).binary_mask
+    data = np.zeros((len(ts), 4))
+    with pytest.raises(TypeError, match="only one"):
+        kw.forward(p0, domain, mask, ts, detectors=chart)
+    for method in (kw.time_reversal, kw.adjoint):
+        with pytest.raises(ValueError, match="time-first"):
+            method(data.T, domain, detectors=chart, ts=ts)
+        with pytest.raises(TypeError, match="time-first"):
+            method(data, domain, detectors=chart, ts=ts, data_layout="ns_nt")
+        with pytest.raises(ValueError, match="start at zero"):
+            method(data, domain, detectors=chart, ts=ts + ts[1])
+    for points, pattern in [
+        (np.array([[0.01, 0.125]]), "grid nodes"),
+        (np.array([[0.0, np.nan]]), "finite"),
+    ]:
+        with pytest.raises(ValueError, match=pattern):
+            kw.adjoint(data, domain, detectors=chart, ts=ts, eval_points=points)
+
+
+def test_kwave_surface_matches_permuted_mask_and_weighted_adjoint():
+    from beamax.solvers import KWaveSolver
+
+    kw = KWaveSolver(backend="python", pml_size=0, smooth_p0=False)
+    d = Domain((12, 12), (0.125,) * 2, (False, False), c=1.0)
+    ring = DetectorSurface.circle((0.75, 0.625), 0.25, 4)
+    mapping = ring.to_mask(d)
+    ts = np.arange(4) * 0.025
+    p0 = np.random.default_rng(71).normal(size=d.N)
+    chart = kw.forward(p0, d, detectors=ring, ts=ts)
+    mask = kw.forward(p0, d, mapping.binary_mask, ts)
+    np.testing.assert_allclose(chart, mask[:, mapping.mask_to_chart])
+    y = np.random.default_rng(92).normal(size=(4, 4))
+    image_mask = np.ones(d.N, bool)
+    args = (y[:, mapping.chart_to_mask], d, image_mask, mapping.binary_mask, ts)
+    tr = kw.time_reversal(*args, data_layout="nt_ns")
+    np.testing.assert_allclose(kw.time_reversal(y, d, detectors=ring, ts=ts), tr)
+    euclidean = kw.adjoint(*args, data_layout="nt_ns")
+    weight = ts[1] * (2 * np.pi * 0.25 / 4) / np.prod(d.dx)
+    points = d.grid[2:5, 3:6]
+    result = kw.adjoint(y, d, detectors=ring, ts=ts, eval_points=points)
+    np.testing.assert_allclose(
+        result, weight * euclidean[2:5, 3:6], atol=2e-6, rtol=2e-5
+    )

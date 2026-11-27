@@ -239,3 +239,40 @@ def test_native_inverse_against_python_and_forward(native_engine, shape, pml_siz
         reference = cpu.adjoint(*args, data_layout="nt_ns")
         image = native.adjoint(*args, data_layout="nt_ns")
         assert np.linalg.norm(image - reference) / np.linalg.norm(reference) < 1e-4
+
+
+def test_native_surface_order_and_pairing(native_engine):
+    from beamax.surfaces import DetectorSurface
+
+    backend, binary = native_engine
+    kw = KWaveSolver(
+        backend=backend, binary_path=binary, pml_size=0, smooth_p0=False, quiet=True
+    )
+    domain = Domain((16, 16), (0.125, 0.125), (False, False), c=1.0)
+    surface = DetectorSurface.circle((1.0, 0.875), 0.5, 4)
+    mapping = surface.to_mask(domain)
+    ts = np.arange(4) * 0.025
+    rng = np.random.default_rng(810)
+    p0 = rng.normal(size=domain.N)
+    pressure = kw.forward(p0, domain, detectors=surface, ts=ts)
+    reference = kw.forward(p0, domain, mapping.binary_mask, ts)
+    np.testing.assert_allclose(
+        pressure, reference[:, mapping.mask_to_chart], rtol=2e-5, atol=2e-6
+    )
+    data = rng.normal(size=(4, 4))
+    args = (
+        data[:, mapping.chart_to_mask],
+        domain,
+        np.ones(domain.N, bool),
+        mapping.binary_mask,
+        ts,
+    )
+    for operation in ("time_reversal", "adjoint"):
+        solve = getattr(kw, operation)
+        kwargs = {"pairing": "euclidean"} if operation == "adjoint" else {}
+        np.testing.assert_allclose(
+            solve(data, domain, detectors=surface, ts=ts, **kwargs),
+            solve(*args, data_layout="nt_ns"),
+            rtol=2e-5,
+            atol=2e-6,
+        )

@@ -117,3 +117,40 @@ def detector_measure(detectors, pairing, element_measures, count):
             "Give positive finite element measures, scalar or one per receiver."
         )
     return pairing, measure
+
+
+def grid_detectors(domain, detectors):
+    from beamax.surfaces import DetectorSurface
+
+    if isinstance(detectors, DetectorSurface):
+        mapping = detectors.to_mask(domain)
+        return mapping.binary_mask, mapping
+    return np.asarray(
+        Sensor(domain, binary_mask=detectors).binary_mask, dtype=bool
+    ), None
+
+
+def grid_image(field, domain, points):
+    if points is None:
+        return field
+    points = np.asarray(points)
+    if (
+        points.ndim < 1
+        or points.shape[-1] != domain.ndim
+        or not np.all(np.isfinite(points))
+    ):
+        raise ValueError("eval_points must contain finite physical coordinates.")
+    cells = np.rint(points / domain.dx).astype(int)
+    eps = (
+        np.finfo(points.dtype).eps if np.issubdtype(points.dtype, np.floating) else 0.0
+    )
+    if (
+        np.any(cells < 0)
+        or np.any(cells >= domain.N)
+        or np.any(
+            abs(points - cells * domain.dx)
+            > np.minimum(1e-3, 4 * eps * np.maximum(abs(cells), 1)) * domain.dx
+        )
+    ):
+        raise ValueError("Grid reconstruction requires eval_points on grid nodes.")
+    return field[tuple(np.moveaxis(cells, -1, 0))]

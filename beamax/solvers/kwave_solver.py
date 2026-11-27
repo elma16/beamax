@@ -10,6 +10,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from beamax.solvers._detectors import grid_image
 from beamax.geometry import Domain
 from beamax.install_kwave_metal import (
     METAL_BINARY_NAME,
@@ -465,13 +466,47 @@ class KWaveSolver:
             **kwargs,
         )
 
+    def _detector_inverse_inputs(
+        self,
+        data,
+        domain,
+        detectors,
+        ts,
+        *,
+        adjoint=False,
+        pairing=None,
+        element_measures=None,
+    ):
+        from beamax.solvers._detectors import grid_detectors, detector_measure
+
+        mask, mapping = grid_detectors(domain, detectors)
+        count = int(mask.sum())
+        data = np.asarray(data)
+        expected = (len(ts), count)
+        if mapping is not None and data.shape == (len(ts), *detectors.shape):
+            data = data.reshape(expected)
+        if data.shape != expected:
+            raise ValueError(
+                f"Expected time-first detector data with shape {expected}."
+            )
+        if adjoint:
+            pairing, measure = detector_measure(
+                detectors, pairing, element_measures, count
+            )
+            if pairing != "euclidean":
+                data = data * (_uniform_time_step(ts) * measure / np.prod(domain.dx))
+        if mapping is not None:
+            data = data[:, mapping.chart_to_mask]
+        return data, mask
+
     def forward(
         self,
         p0: Union[np.ndarray, jnp.ndarray],
         domain: Domain,
-        sensors: Union[np.ndarray, jnp.ndarray],
-        ts: Union[np.ndarray, jnp.ndarray],
+        sensors=None,
+        ts=None,
         *,
+        detectors=None,
         record: str = "p",
     ) -> np.ndarray:
         """
@@ -496,6 +531,14 @@ class KWaveSolver:
             per-sensor pressure statistic has shape ``(Ns,)``. Sensor
             channels follow NumPy C mask order on all backends.
         """
+        if ts is None:
+            raise TypeError("k-Wave requires the acquisition times.")
+        if (
+            detectors is not None
+            and np.asarray(ts).size
+            and np.asarray(ts).flat[0] != 0
+        ):
+            raise ValueError("k-Wave acquisition times must start at zero.")
         p0_array = np.asarray(p0)
         if tuple(p0_array.shape) != domain.N:
             raise ValueError(f"p0 must have shape {domain.N}; got {p0_array.shape}.")
@@ -504,6 +547,13 @@ class KWaveSolver:
         source = kSource()
         source.p0 = p0_array
 
+        from beamax.solvers._detectors import grid_detectors
+
+        mapping = None
+        if detectors is not None:
+            if sensors is not None:
+                raise TypeError("Give only one of sensors and detectors.")
+            sensors, mapping = grid_detectors(domain, detectors)
         sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
         backend = str(self._solver_kwargs.get("backend", "cpp")).lower()
         sensor = (
@@ -530,7 +580,7 @@ class KWaveSolver:
                 f"The selected k-Wave backend did not return record {record!r}."
             )
         out = np.asarray(result[record])
-        if (backend == "cpp" and record != "p") or record.endswith(("_final", "_all")):
+        if record.endswith(("_final", "_all")):
             return out
         if record == "p" and out.ndim == 1 and ns == 1:
             out = out[:, None]
@@ -541,6 +591,8 @@ class KWaveSolver:
         if backend == "cpp" and out.ndim == 2 and out.shape == (simulation_nt, ns):
             out = out[:nt, sensor_channels_to_c_order(sensor_mask)]
 
+        if mapping is not None:
+            out = out[..., mapping.mask_to_chart]
         return out
 
     @staticmethod
@@ -662,10 +714,12 @@ class KWaveSolver:
         self,
         data: Union[np.ndarray, jnp.ndarray],
         domain,
-        sensors,
-        sources,
-        ts: Union[np.ndarray, jnp.ndarray],
+        sensors=None,
+        sources=None,
+        ts=None,
         *,
+        detectors=None,
+        eval_points=None,
         record: str = "p_final",
         data_layout: str = "auto",
     ) -> np.ndarray:
@@ -699,6 +753,29 @@ class KWaveSolver:
         Enforces $p(\mathbf{x}_s,t)=d(t,\mathbf{x}_s)$ as a Dirichlet source,
         where $d$ denotes ``sensor_data``.
         """
+        if ts is None:
+            raise TypeError("k-Wave requires the acquisition times.")
+        if (
+            detectors is not None
+            and np.asarray(ts).size
+            and np.asarray(ts).flat[0] != 0
+        ):
+            raise ValueError("k-Wave acquisition times must start at zero.")
+        if detectors is not None:
+            if (
+                sensors is not None
+                or sources is not None
+                or data_layout not in ("auto", "nt_ns")
+            ):
+                raise TypeError(
+                    "detectors requires time-first data and replaces sources and sensors."
+                )
+            data, sources = self._detector_inverse_inputs(data, domain, detectors, ts)
+            sensors = np.ones(domain.N, dtype=bool)
+            data_layout = "nt_ns"
+        elif eval_points is not None:
+            raise TypeError("These options require detectors.")
+
         sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
         source_mask = self._validate_mask(np.asarray(sources), domain, name="sources")
         sensor_data = self._coerce_sensor_data_layout(
@@ -727,16 +804,22 @@ class KWaveSolver:
             raise ValueError(
                 f"The selected k-Wave backend did not return record {record!r}."
             )
-        return out[record]
+        if detectors is not None and eval_points is not None and record != "p_final":
+            raise ValueError("eval_points requires a terminal pressure record.")
+        return grid_image(out[record], domain, eval_points)
 
     def adjoint(
         self,
         data: Union[np.ndarray, jnp.ndarray],
         domain,
-        sensors,
-        sources,
-        ts: Union[np.ndarray, jnp.ndarray],
+        sensors=None,
+        sources=None,
+        ts=None,
         *,
+        detectors=None,
+        eval_points=None,
+        pairing=None,
+        element_measures=None,
         record: str = "p_final",
         data_layout: str = "auto",
     ) -> np.ndarray:
@@ -799,6 +882,41 @@ class KWaveSolver:
         required by Eq. (B.2), so this implementation requires isotropic grid
         spacing.
         """
+        if ts is None:
+            raise TypeError("k-Wave requires the acquisition times.")
+        if (
+            detectors is not None
+            and np.asarray(ts).size
+            and np.asarray(ts).flat[0] != 0
+        ):
+            raise ValueError("k-Wave acquisition times must start at zero.")
+        if detectors is not None:
+            if (
+                sensors is not None
+                or sources is not None
+                or data_layout not in ("auto", "nt_ns")
+            ):
+                raise TypeError(
+                    "detectors requires time-first data and replaces sources and sensors."
+                )
+            data, sources = self._detector_inverse_inputs(
+                data,
+                domain,
+                detectors,
+                ts,
+                adjoint=True,
+                pairing=pairing,
+                element_measures=element_measures,
+            )
+            sensors = np.ones(domain.N, dtype=bool)
+            data_layout = "nt_ns"
+        elif (
+            eval_points is not None
+            or pairing is not None
+            or element_measures is not None
+        ):
+            raise TypeError("These options require detectors.")
+
         if record != "p_final":
             raise ValueError(
                 f"The scaled k-Wave adjoint requires record='p_final'; got {record!r}."
@@ -870,4 +988,6 @@ class KWaveSolver:
                 "k-Wave returned an adjoint field with unexpected shape "
                 f"{terminal_pressure.shape}; expected {domain.N}."
             )
-        return terminal_pressure / (sound_speed**2 * density)
+        return grid_image(
+            terminal_pressure / (sound_speed**2 * density), domain, eval_points
+        )
