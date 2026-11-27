@@ -20,6 +20,7 @@ from beamax.solvers.msgb_solvers.tr_solver_utils import (
     compute_TR_parameters,
 )
 from beamax.geometry import Domain, Sensor
+from beamax.solvers._detectors import forward_positions
 from beamax.transforms import MSWPT
 from beamax import utils
 from beamax.gb.gb_solvers import (
@@ -1139,10 +1140,11 @@ class MSGBSolver(eqx.Module):
         self,
         p0: jnp.ndarray,
         domain: Domain,
-        sensors: Union[Sensor, jnp.ndarray],
-        ts: jnp.ndarray,
-        wpt: MSWPT,
+        sensors: Union[Sensor, jnp.ndarray, None] = None,
+        ts: Optional[jnp.ndarray] = None,
+        wpt: Optional[MSWPT] = None,
         *,
+        detectors=None,
         dpdt: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         r"""
@@ -1186,6 +1188,12 @@ class MSGBSolver(eqx.Module):
         jnp.ndarray, shape (Nt, Ns)
             Pressure at each sensor over time.
         """
+        if ts is None or wpt is None:
+            raise TypeError("MSGB forward requires ts and wpt.")
+        if detectors is not None:
+            if sensors is not None:
+                raise TypeError("Give only one of detectors and sensors.")
+            sensors = forward_positions(domain, detectors)
         sensor_data, _ = self.forward_with_params(
             p0, domain, sensors, ts, wpt, dpdt=dpdt
         )
@@ -1195,10 +1203,11 @@ class MSGBSolver(eqx.Module):
         self,
         p0: jnp.ndarray,
         domain: Domain,
-        sensors: Union[Sensor, jnp.ndarray],
-        ts: jnp.ndarray,
-        wpt: MSWPT,
+        sensors: Union[Sensor, jnp.ndarray, None] = None,
+        ts: Optional[jnp.ndarray] = None,
+        wpt: Optional[MSWPT] = None,
         *,
+        detectors=None,
         dpdt: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
         """
@@ -1215,6 +1224,12 @@ class MSGBSolver(eqx.Module):
             Beam parameters used in the solve:
             ``(p0s, M0s, x0s, omegas, a0s, modes)``.
         """
+        if ts is None or wpt is None:
+            raise TypeError("MSGB forward requires ts and wpt.")
+        if detectors is not None:
+            if sensors is not None:
+                raise TypeError("Give only one of detectors and sensors.")
+            sensors = forward_positions(domain, detectors)
         dpdt_was_omitted = dpdt is None
         if tuple(p0.shape) != domain.N or (
             dpdt is not None and tuple(dpdt.shape) != domain.N
