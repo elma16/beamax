@@ -1,4 +1,5 @@
 site_name: beamax
+site_url: https://elma16.github.io/beamax/
 site_description: Multiscale Gaussian Beams in JAX — API documentation.
 site_author: Elliott Macneil
 
@@ -73,9 +74,10 @@ nav:
   - index.md
   - Guides:
       - Custom low-frequency solvers: guides/custom-low-frequency-solvers.md
-      - Run k-Wave on Apple Metal: guides/kwave-metal.md
+      - Apple silicon with k-Wave and JAX: guides/kwave-metal.md
   - Examples:
       - examples/index.md
+      - Wave packets: examples/wave-packets.md
       - Forward propagation: examples/forward.md
       - Reconstruction: examples/reconstruction.md
       - Rays and autodiff: examples/rays.md

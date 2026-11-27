@@ -4,9 +4,14 @@ beamax provides multiscale Gaussian beam solvers and wave-packet transforms for 
 
 ## Start here
 
-- Install with `pip install beamax`.
-- Browse the [example gallery](examples/index.md).
-- Use the navigation under **Basic API** for generated API documentation.
+Install Beamax with `python -m pip install beamax` (Python 3.12 or newer).
+Use the [wave-packet tutorial](examples/wave-packets.md) to decompose and
+recover an initial pressure field with the base installation. Follow the
+[example gallery](examples/index.md) to simulate the pressure at a detector
+array and reconstruct an image from the measurements.
+
+On an Apple silicon Mac, the [Metal guide](guides/kwave-metal.md) covers
+the native k-Wave solver and experimental JAX acceleration for MSGB.
 
 ## Packages
 
@@ -16,4 +21,4 @@ beamax provides multiscale Gaussian beam solvers and wave-packet transforms for 
 - `beamax.solvers`: MSGB, hybrid, and optional k-Wave solvers.
 - `beamax.plotter`: optional styling and MSWPT coefficient visualisation.
 
-The MSWPT/MSGB implementation follows Jianliang Qian and Lexing Ying, ["Fast Multiscale Gaussian Wavepacket Transforms and Multiscale Gaussian Beams for the Wave Equation"](https://doi.org/10.1137/100787313), *Multiscale Modeling & Simulation*, 8(5), 1803-1837, 2010.
+The MSWPT/MSGB implementation follows Jianliang Qian and Lexing Ying, ["Fast Multiscale Gaussian Wavepacket Transforms and Multiscale Gaussian Beams for the Wave Equation"](https://doi.org/10.1137/100787313), *Multiscale Modeling & Simulation*, 8(5), 1803-1837, 2010. [Full text (PDF)](https://stanford.edu/~lexing/GBwave.pdf)

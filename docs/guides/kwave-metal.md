@@ -69,4 +69,43 @@ as `binary_path` when constructing `KWaveSolver`, or set
 `BEAMAX_KWAVE_BINARY_PATH` to that file for the run. Beamax checks
 `binary_path` first, then the environment variable, then its user cache.
 
-MSGB runs through JAX and uses JAX's device configuration.
+## SciPy import error on an Apple silicon Mac
+
+If a local k-Wave notebook on macOS 27 fails to import `_spropack` with a
+`__thread_bss` loader error, check which SciPy wheel is installed.
+k-wave-python 0.6.2 pins SciPy 1.15.3. On an M4 with CPython 3.12, the
+default `macosx_14_0_arm64` wheel failed to load, while the official
+`macosx_12_0_arm64` wheel of the same version imported successfully.
+[SciPy issue](https://github.com/scipy/scipy/issues/25635)
+
+Run these commands in the Python 3.12 environment used by your notebook,
+then restart its kernel.
+
+```sh
+python -m pip download --only-binary=:all: --no-deps --platform macosx_12_0_arm64 \
+    --python-version 3.12 --implementation cp --abi cp312 scipy==1.15.3
+python -m pip install --no-deps --force-reinstall ./scipy-1.15.3-cp312-cp312-macosx_12_0_arm64.whl
+python -c "import scipy.sparse.linalg"
+```
+
+## Experimental JAX acceleration for MSGB
+
+`KWaveSolver(backend="mac")` selects the native k-Wave executable. The
+Gaussian beam calculations in `MSGBSolver` run through JAX. On Apple
+silicon, the optional `jax-mps` plugin can run some of those calculations
+on the GPU. Beamax's standard installation uses JAX on CPU on these Macs.
+
+In a float32 test on one M4 Mac mini, a 128 × 128 homogeneous forward
+simulation with 256 selected packets, 128 receivers and 256 time samples took
+**202 ms on GPU and 575 ms on CPU**. These are medians of five calls after
+compilation, each timed until its output was ready. The sensor records differed
+by `7.4e-7` in relative L2 norm. The test used JAX, jaxlib and `jax-mps`
+0.11.1. The plugin documents its compatible JAX versions and the
+`JAX_PLATFORMS=mps` device setting. [jax-mps 0.11.1](https://pypi.org/project/jax-mps/0.11.1/)
+
+Use the CPU backend (`JAX_PLATFORMS=cpu`) for the gallery and for float64
+work. The tested plugin lacks float64 support. On the same M4, MSGB time
+reversal and adjoint reached an unsupported complex triangular solve, and
+forward propagation with spatially varying sound speed reached an unsupported
+Python callback. The native k-Wave Metal backend described above supports
+all three k-Wave operations. [Plugin source for precision handling](https://raw.githubusercontent.com/tillahoffmann/jax-mps/v0.11.1/src/pjrt_plugin/mlx_buffer.cc)

@@ -10,13 +10,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from example_metadata import ExampleInfo, read_example_info
+from example_metadata import ExampleInfo, colab_url, read_example_info
 
-GITHUB_REPO = "elma16/beamax"
-GITHUB_BRANCH = "main"
 PUBLIC_EXAMPLES_ROOT = Path("examples")
 
 GROUPS = [
+    ("wave-packets", "Wave packets"),
     ("forward", "Forward propagation"),
     ("reconstruction", "Reconstruction"),
     ("rays", "Rays and autodiff"),
@@ -37,10 +36,6 @@ def gallery_sort_key(entry: tuple[Path, ExampleInfo]) -> tuple[bool, str]:
     """Sort base smoke examples before optional examples, then by filename."""
     path, info = entry
     return (not info.smoke, path.name)
-
-
-def colab_url(rel_nb: str) -> str:
-    return f"https://colab.research.google.com/github/{GITHUB_REPO}/blob/{GITHUB_BRANCH}/{rel_nb}"
 
 
 def gallery_entry(py_path: Path, info: ExampleInfo) -> str:
@@ -92,8 +87,11 @@ python tools/run_examples.py --directory examples --include-optional --silent-fi
     )
     intro = """# Examples
 
-Run scripts from the repository root. Selected examples include Colab notebooks;
-optional requirements are listed below.
+Start with [wave-packet selection](wave-packets/2d_packet_selection.py) using
+the base installation. Then follow [forward propagation](forward/2d_forward_comparison.py)
+and [reconstruction](reconstruction/2d_time_reversal_and_adjoint.py) for the
+2D photoacoustic workflow. Run scripts from the repository root or open their
+Colab notebooks below.
 
 ## Gallery
 """

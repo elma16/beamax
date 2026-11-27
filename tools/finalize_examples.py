@@ -9,15 +9,14 @@ import json
 import re
 from pathlib import Path
 
-from example_metadata import example_info_from_text
+from example_metadata import (
+    EXAMPLE_REVISION,
+    GITHUB_REPO,
+    colab_url,
+    example_info_from_text,
+)
 
-GITHUB_REPO = "elma16/beamax"
-GITHUB_BRANCH = "main"
 PUBLIC_EXAMPLES_ROOT = Path("examples")
-
-
-def colab_url(rel_nb: str) -> str:
-    return f"https://colab.research.google.com/github/{GITHUB_REPO}/blob/{GITHUB_BRANCH}/{rel_nb}"
 
 
 def banner_md(
@@ -35,8 +34,7 @@ def install_cell_source(extras: list[str]) -> list[str]:
     extras_spec = f"[{','.join(extras)}]" if extras else ""
     return [
         "# Install beamax for Google Colab. Safe to skip when running locally.\n",
-        "%%capture\n",
-        f'%pip install --quiet "beamax{extras_spec} @ git+https://github.com/{GITHUB_REPO}.git"',
+        f'%pip install --quiet "beamax{extras_spec} @ git+https://github.com/{GITHUB_REPO}.git@{EXAMPLE_REVISION}"',
     ]
 
 

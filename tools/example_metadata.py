@@ -8,6 +8,12 @@ from pathlib import Path
 
 
 FALSE_VALUES = {"0", "false", "no", "off"}
+GITHUB_REPO = "elma16/beamax"
+EXAMPLE_REVISION = "v0.4.0"
+
+
+def colab_url(notebook: str) -> str:
+    return f"https://colab.research.google.com/github/{GITHUB_REPO}/blob/{EXAMPLE_REVISION}/{notebook}"
 
 
 @dataclass(frozen=True)
