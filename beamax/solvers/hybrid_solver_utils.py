@@ -408,7 +408,7 @@ def downsample_domain(
 
 def split_frequency_components(
     p0: jnp.ndarray,
-    sensors_mask: jnp.ndarray,
+    sensors_mask: jnp.ndarray | None,
     input_type: str,
     output_type: str,
     wpt: MSWPT,
@@ -419,7 +419,7 @@ def split_frequency_components(
     downsample: bool = False,
     use_pow2: bool = False,
     gh: Optional[jnp.ndarray] = None,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Domain]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None, Domain]:
     r"""
     Split input into high- and low-frequency components.
 
@@ -505,7 +505,8 @@ def split_frequency_components(
     if downsample and windowing != "none":
         bounds = _box_support_bounds(wpt.dyadic_decomp, domain, idx_box, wpt.redundancy)
         p0_LF_ft = downsample_p0(p0_LF_ft, bounds, use_pow2)
-        sensors_mask_ds = resize_sensor_mask(sensors_mask, p0_LF_ft.shape)
+        if sensors_mask is not None:
+            sensors_mask_ds = resize_sensor_mask(sensors_mask, p0_LF_ft.shape)
         dom_downsample = downsample_domain(domain, p0_LF_ft)
 
     p0_HF = utils.convert_space(p0_HF_ft, "fourier", output_type)

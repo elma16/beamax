@@ -7,6 +7,7 @@ low-frequency component is supplied through a small adapter callable API.
 
 import warnings
 from copy import copy
+from inspect import signature
 import math
 import numpy as np
 import jax.numpy as jnp
@@ -33,6 +34,14 @@ _HYBRID_OPERATION_NAMES: tuple[HybridOperationName, ...] = (
 
 
 __all__ = ["HybridBackend", "HybridContext", "HybridSolver", "HybridSolverConfig"]
+
+
+def _for_spatial_input(solver):
+    if isinstance(solver, MSGBSolver) and solver.input_type == "fourier":
+        # The frequency splitter returns spatial fields for both solvers.
+        solver = copy(solver)
+        object.__setattr__(solver, "input_type", "spatial")
+    return solver
 
 
 @dataclass(frozen=True)
@@ -162,10 +171,12 @@ class HybridContext:
 
     domain: Domain
     component_domain: Domain
-    component_sensor_mask: jnp.ndarray
+    component_sensor_mask: jnp.ndarray | np.ndarray | None
     ts: jnp.ndarray
     target_shape: Tuple[int, ...]
     sources: Any = None
+    detectors: Any = None
+    wpt: Any = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +197,9 @@ class HybridBackend:
     time_reversal: Optional[HybridOperation] = None
     adjoint: Optional[HybridOperation] = None
     name: str = "low-frequency backend"
+
+    detector_api: bool = False
+    requires_image_transform: bool = False
 
     def __post_init__(self) -> None:
         """Validate that the backend exposes at least one operation."""
@@ -249,8 +263,20 @@ class HybridBackend:
         operations: dict[str, HybridOperation] = {}
 
         if callable(getattr(solver, "forward", None)):
+            detector_solver = _for_spatial_input(solver)
 
             def forward(component: jnp.ndarray, context: HybridContext) -> Any:
+                if context.detectors is not None:
+                    kwargs = (
+                        {"wpt": context.wpt} if isinstance(solver, MSGBSolver) else {}
+                    )
+                    return detector_solver.forward(
+                        component,
+                        context.component_domain,
+                        detectors=context.detectors,
+                        ts=context.ts,
+                        **kwargs,
+                    )
                 return solver.forward(
                     component,
                     context.component_domain,
@@ -286,11 +312,21 @@ class HybridBackend:
 
             operations["adjoint"] = adjoint
 
+        try:
+            detector_api = all(
+                "detectors" in signature(getattr(solver, op)).parameters
+                for op in operations
+            )
+        except (TypeError, ValueError):
+            # Some extension callables expose no inspectable Python signature.
+            detector_api = False
         return cls(
             forward=operations.get("forward"),
             time_reversal=operations.get("time_reversal"),
             adjoint=operations.get("adjoint"),
             name=backend_name,
+            detector_api=detector_api,
+            requires_image_transform=isinstance(solver, MSGBSolver),
         )
 
 
@@ -375,12 +411,7 @@ class HybridSolver(eqx.Module):
             Alternative: pass config parameters as kwargs.
         """
         self.lf_backend = lf_backend
-        if isinstance(hf_solver, MSGBSolver) and hf_solver.input_type == "fourier":
-            # The splitter returns spatial fields. Keep the original solver
-            # available for callers that supply its Fourier-domain input.
-            hf_solver = copy(hf_solver)
-            object.__setattr__(hf_solver, "input_type", "spatial")
-        self.hf_solver = hf_solver
+        self.hf_solver = _for_spatial_input(hf_solver)
 
         if config is not None and config_kwargs:
             raise ValueError("Pass either config or keyword configuration, not both.")
@@ -634,10 +665,12 @@ class HybridSolver(eqx.Module):
     def _split_frequencies(
         self,
         data: jnp.ndarray,
-        mask: jnp.ndarray,
+        mask: jnp.ndarray | None,
         wpt: MSWPT,
         domain: Domain,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, Domain]:
+        *,
+        downsample=None,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None, Domain]:
         """
         Split data into high- and low-frequency components.
 
@@ -673,7 +706,7 @@ class HybridSolver(eqx.Module):
             windowing=wpt.windowing,
             domain=domain,
             cutoff_freq=self.config.cutoff_freq,
-            downsample=self.config.downsample,
+            downsample=self.config.downsample if downsample is None else downsample,
             use_pow2=self.config.use_pow2,
         )
 
@@ -765,13 +798,77 @@ class HybridSolver(eqx.Module):
                 stacklevel=3,
             )
 
+    def _forward_at_detectors(self, p0, domain, detectors, ts, wpt):
+        from beamax.solvers._detectors import grid_detectors
+        from beamax.surfaces import DetectorSurface
+
+        is_chart = isinstance(detectors, DetectorSurface)
+        if is_chart:
+            mask = None
+            count = detectors.num_sensors
+        else:
+            mask, _ = grid_detectors(domain, detectors)
+            count = int(mask.sum())
+        high, low, _, coarse = self._split_frequencies(p0, None, wpt, domain)
+        lf_detectors = detectors
+        if coarse.N != domain.N:
+            if self.lf_backend.requires_image_transform:
+                aligned = False
+            elif is_chart:
+                try:
+                    detectors.to_mask(coarse)
+                    aligned = True
+                except ValueError:
+                    aligned = False
+            else:
+                # Work in integer indices to test alignment without coordinate roundoff.
+                assert mask is not None
+                scaled = np.argwhere(mask) * np.asarray(coarse.N)
+                aligned = not np.any(scaled % np.asarray(domain.N))
+                if aligned:
+                    lf_detectors = np.zeros(coarse.N, dtype=bool)
+                    lf_detectors[tuple((scaled // np.asarray(domain.N)).T)] = True
+            if not aligned:
+                high, low, _, coarse = self._split_frequencies(
+                    p0, None, wpt, domain, downsample=False
+                )
+        low = low.real * math.sqrt(math.prod(coarse.N) / math.prod(domain.N))
+        times = self._extend_time(ts)
+        expected = (len(times), count)
+        if isinstance(self.hf_solver, MSGBSolver):
+            hf = self.hf_solver.forward(
+                high.real, domain, detectors=detectors, ts=times, wpt=wpt
+            )
+        else:
+            hf = self.hf_solver.forward(
+                high.real, domain, detectors=detectors, ts=times
+            )
+        if self.lf_backend.detector_api:
+            ctx = HybridContext(
+                domain, coarse, None, times, expected, detectors=lf_detectors, wpt=wpt
+            )
+            lf = self.lf_backend.require("forward")(low, ctx)
+        else:
+            lf_mask, order = grid_detectors(coarse, lf_detectors)
+            ctx = HybridContext(domain, coarse, lf_mask, times, expected)
+            lf = self.lf_backend.require("forward")(low, ctx)
+            if order is not None:
+                lf = jnp.asarray(lf)[:, order.mask_to_chart]
+        if np.shape(hf) != expected or np.shape(lf) != expected:
+            raise ValueError(
+                f"Both hybrid components must return pressure with shape {expected}."
+            )
+        return self._apply_window(jnp.asarray(hf) + jnp.asarray(lf))[: len(ts)]
+
     def forward(
         self,
         p0: jnp.ndarray,
         domain: Domain,
-        sensors: Sensor,
-        ts: jnp.ndarray,
-        wpt: MSWPT,
+        sensors=None,
+        ts=None,
+        wpt=None,
+        *,
+        detectors=None,
     ) -> jnp.ndarray:
         """
         Forward solve with hybrid approach.
@@ -794,6 +891,14 @@ class HybridSolver(eqx.Module):
         jnp.ndarray
             Sensor data, shape (Nt, Ns)
         """
+        if ts is None or wpt is None:
+            raise TypeError("Hybrid forward requires ts and wpt.")
+        if detectors is not None:
+            if sensors is not None:
+                raise TypeError("Give only one of detectors and sensors.")
+            return self._forward_at_detectors(p0, domain, detectors, ts, wpt)
+        if sensors is None:
+            raise TypeError("Give a detector surface or mask.")
         self._validate_configuration(domain)
 
         mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors

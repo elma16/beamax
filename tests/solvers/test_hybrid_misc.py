@@ -693,3 +693,50 @@ def test_hybrid_fourier_input_with_fourier_configured_msgb():
     np.testing.assert_allclose(
         run("fourier", utils.unitary_fft(p)), run("spatial", p), atol=2e-6
     )
+
+
+@pytest.mark.parametrize("normal_cell,size", [(8, 16), (9, 32)])
+@pytest.mark.parametrize("as_mask", [False, True])
+def test_lf_grid_keeps_each_fine_receiver_in_place(normal_cell, size, as_mask):
+    import numpy as np
+    from beamax import Domain, DyadicDecomposition, MSWPT
+    from beamax.surfaces import DetectorSurface
+
+    domain = Domain((32, 32), (0.125,) * 2, (False, False), c=1.0)
+    chart = DetectorSurface.plane(
+        2, value=normal_cell * 0.125, origin=(1.0,), spacing=(0.25,), shape=(4,)
+    )
+    detectors = chart.to_mask(domain).binary_mask if as_mask else chart
+    ts = jnp.arange(4) * 0.025
+    wpt = MSWPT(
+        DyadicDecomposition(2, domain.N, (4, 8), (1, 1)), 2, "rectangular_mirror"
+    )
+    field = 1.0 + 0.25 * jnp.cos(2 * jnp.pi * domain.grid[..., 1] / 4.0)
+
+    class ZeroHF:
+        def forward(self, data, domain, *, detectors, ts):
+            return jnp.zeros((len(ts), 4))
+
+    def record_low(data, ctx):
+        assert tuple(ctx.component_domain.N) == (size, size)
+        mask = np.asarray(ctx.component_sensor_mask, bool)
+        np.testing.assert_array_equal(
+            ctx.component_domain.grid[mask], chart.positions()
+        )
+        return jnp.broadcast_to(data[mask], (len(ctx.ts), 4))
+
+    solver = HybridSolver(
+        hf_solver=ZeroHF(),
+        lf_backend=HybridBackend(forward=record_low),
+        cutoff_freq=4.0,
+        downsample=True,
+        use_pow2=True,
+        use_time_extension=False,
+        use_windowing=False,
+    )
+    actual = solver.forward(field, domain, detectors=detectors, ts=ts, wpt=wpt)
+    _, low, _, _ = solver._split_frequencies(field, None, wpt, domain, downsample=False)
+    reference = low.real[chart.to_mask(domain).binary_mask]
+    np.testing.assert_allclose(
+        actual, np.broadcast_to(reference, (4, 4)), atol=2e-6, rtol=2e-5
+    )

@@ -364,3 +364,51 @@ def test_python_cartesian_receivers_match_linear_interpolation(shape, inside):
     for op in (kw.time_reversal, kw.adjoint):
         with pytest.raises(ValueError, match="distinct|off-grid"):
             op(actual, domain, detectors=surface, ts=ts)
+
+
+def test_hybrid_detector_traces_with_fourier_low_frequency_msgb(experiment):
+    from beamax.solvers import HybridBackend, HybridSolver
+
+    hf, domain, ts, wpt, p0 = experiment
+    ring = DetectorSurface.circle((1.0, 0.875), 0.5, 8)
+    lf = MSGBSolver(64, "top_n", 32, "fourier", solve_hom_diag, "scan_real")
+    hybrid = HybridSolver(
+        hf_solver=hf,
+        lf_backend=HybridBackend.from_beamax_solver(lf),
+        cutoff_freq=4.0,
+        downsample=True,
+        use_time_extension=False,
+        use_windowing=False,
+    )
+    actual = hybrid.forward(p0, domain, detectors=ring, ts=ts, wpt=wpt)
+    high, low, _, _ = hybrid._split_frequencies(p0, None, wpt, domain, downsample=False)
+    options = dict(detectors=ring, ts=ts, wpt=wpt)
+    expected = hf.forward(high.real, domain, **options) + hf.forward(
+        low.real, domain, **options
+    )
+    np.testing.assert_allclose(actual, expected, rtol=3e-5, atol=3e-6)
+    assert lf.input_type == "fourier"
+
+
+def test_hybrid_keeps_the_recorded_channels_and_times(experiment):
+    from beamax.solvers import HybridSolver, HybridBackend, KWaveSolver
+
+    hf, domain, ts, wpt, p0 = experiment
+    kw = KWaveSolver(backend="python", pml_size=0, smooth_p0=False)
+    hybrid = HybridSolver(
+        hf_solver=hf,
+        lf_backend=HybridBackend.from_beamax_solver(kw),
+        cutoff_freq=4.0,
+        downsample=True,
+        use_time_extension=False,
+        use_windowing=False,
+    )
+    chart = DetectorSurface.plane(
+        2, value=0.65, origin=(0.77,), spacing=(0.04,), shape=(2,)
+    )
+    actual = hybrid.forward(p0, domain, detectors=chart, ts=ts, wpt=wpt)
+    high, low, _, _ = hybrid._split_frequencies(p0, None, wpt, domain, downsample=False)
+    expected = hf.forward(
+        high.real, domain, detectors=chart, ts=ts, wpt=wpt
+    ) + kw.forward(low.real, domain, detectors=chart, ts=ts)
+    np.testing.assert_allclose(actual, expected, rtol=3e-5, atol=3e-6)
