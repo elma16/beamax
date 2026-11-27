@@ -549,13 +549,44 @@ class KWaveSolver:
 
         from beamax.solvers._detectors import grid_detectors
 
+        from beamax.surfaces import DetectorSurface
+
+        backend = str(self._solver_kwargs.get("backend", "cpp")).lower()
         mapping = None
+        cartesian = False
         if detectors is not None:
             if sensors is not None:
                 raise TypeError("Give only one of sensors and detectors.")
-            sensors, mapping = grid_detectors(domain, detectors)
-        sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
-        backend = str(self._solver_kwargs.get("backend", "cpp")).lower()
+            if isinstance(detectors, DetectorSurface):
+                if detectors.ndim != domain.ndim:
+                    raise ValueError("Detector and propagation dimensions must match.")
+                try:
+                    sensors, mapping = grid_detectors(domain, detectors)
+                except ValueError as error:
+                    if backend != "python":
+                        raise ValueError(
+                            "Native receivers require distinct grid nodes. Use Python forward or explicitly snap the surface."
+                        ) from error
+                    positions = np.asarray(detectors.positions(), dtype=float)
+                    spacing = np.asarray(domain.dx)
+                    maximum = (np.asarray(domain.N) - 1) * spacing
+                    if (
+                        not np.all(np.isfinite(positions))
+                        or np.any(positions < 0)
+                        or np.any(positions > maximum)
+                    ):
+                        raise ValueError(
+                            "Cartesian receivers must lie within the sampled grid."
+                        ) from error
+                    sensors = (positions - (np.asarray(domain.N) // 2) * spacing).T
+                    cartesian = True
+            else:
+                sensors, mapping = grid_detectors(domain, detectors)
+        sensor_mask = (
+            np.asarray(sensors)
+            if cartesian
+            else self._validate_mask(np.asarray(sensors), domain, name="sensors")
+        )
         sensor = (
             kSensor(mask=sensor_mask)
             if backend == "cpp" and record == "p"
@@ -563,7 +594,7 @@ class KWaveSolver:
         )
 
         nt = np.size(ts)
-        ns = int(np.count_nonzero(sensor_mask))
+        ns = sensor_mask.shape[1] if cartesian else int(np.count_nonzero(sensor_mask))
         simulation_nt = nt
         if backend == "cpp" and record == "p" and nt == ns:
             # k-Wave can mistake the time axis of a square C++ trace for the

@@ -334,3 +334,33 @@ def test_kwave_surface_matches_permuted_mask_and_weighted_adjoint():
     np.testing.assert_allclose(
         result, weight * euclidean[2:5, 3:6], atol=2e-6, rtol=2e-5
     )
+
+
+@pytest.mark.parametrize("shape,inside", [((11, 13), True), ((12, 14), False)])
+def test_python_cartesian_receivers_match_linear_interpolation(shape, inside):
+    from beamax.solvers import KWaveSolver
+
+    domain = Domain(shape, (0.125,) * 2, (False, False), c=1.0)
+    ts = np.arange(6) * 0.025
+    kw = KWaveSolver(backend="python", pml_size=1, pml_inside=inside, smooth_p0=False)
+    p0 = np.random.default_rng(814).normal(size=domain.N)
+    surface = DetectorSurface.plane(
+        2, value=0.625, origin=(0.65,), spacing=(0.025,), shape=(2,)
+    )
+    pair = np.zeros(shape, bool)
+    pair[5, 5:7] = True
+    reference = kw.forward(p0, domain, detectors=pair, ts=ts)
+    actual = kw.forward(p0, domain, detectors=surface, ts=ts)
+    weights = np.array([0.2, 0.4])
+    np.testing.assert_allclose(
+        actual,
+        (1 - weights) * reference[:, 0, None] + weights * reference[:, 1, None],
+        rtol=2e-5,
+        atol=2e-6,
+    )
+    assert not np.allclose(actual[:, 0], actual[:, 1])
+    with pytest.raises(ValueError, match="grid nodes"):
+        KWaveSolver(backend="cpp").forward(p0, domain, detectors=surface, ts=ts)
+    for op in (kw.time_reversal, kw.adjoint):
+        with pytest.raises(ValueError, match="distinct|off-grid"):
+            op(actual, domain, detectors=surface, ts=ts)
