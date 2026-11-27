@@ -2,6 +2,39 @@
 
 `beamax.surfaces` reconstructs real pressure traces sampled on a regular detector chart in free space. Data axes are time followed by the chart axes. The first time row corresponds to zero, and detector coordinates follow `surface.positions()` in row-major chart order.
 
+## Using the same detectors for all three operations
+
+Pass a sampled surface or binary mask as `detectors`. Forward pressure has shape `(Nt, Ndetectors)`. Pass those columns straight back to the same surface. The inverse uses the times of the supplied samples, including after Fourier resampling. Use `eval_points=domain.grid[...]` for a smaller reconstruction.
+
+This small example records one off-centre Gaussian on a four-element ring. Both reconstructions use the same grid region.
+
+```python
+import jax.numpy as jnp
+from beamax import Domain, DyadicDecomposition, MSWPT
+from beamax.gb.gb_solvers import solve_hom_diag
+from beamax.solvers import MSGBSolver
+from beamax.surfaces import DetectorSurface
+
+domain = Domain((16, 16), (0.125, 0.125), (False, False), c=1.0)
+ring = DetectorSurface.circle((1.0, 0.875), radius=0.5, n=4)
+p0 = jnp.exp(-jnp.sum((domain.grid - jnp.array([0.8, 0.7]))**2, axis=-1) / 0.03)
+ts = jnp.arange(16) * 0.0625
+image_wpt = MSWPT(DyadicDecomposition(1, domain.N, (4,), (1, 1)), 2, "rectangular_mirror")
+data_wpt = MSWPT(DyadicDecomposition(1, (16, 4), (2,), (4, 1)), 2, "rectangular_mirror")
+solver = MSGBSolver(thr=64, thr_strat="top_n", batch_size=32, input_type="spatial",
+                    ode_solver=solve_hom_diag, sum_method="scan_real")
+pressure = solver.forward(p0, domain, detectors=ring, ts=ts, wpt=image_wpt)
+options = dict(detectors=ring, ts=ts, data_wpt=data_wpt, eval_points=domain.grid[4:12, 4:12])
+tr = solver.time_reversal(pressure, domain, **options)
+adj, diagnostics = solver.adjoint(pressure, domain, **options, return_diagnostics=True)
+```
+
+MSGB evaluates each beam at the physical receiver positions. k-Wave Python forward can interpolate there. Native k-Wave forward and every k-Wave inverse require distinct grid nodes. A hybrid forward solve keeps the low-frequency component on the original grid when a coarser grid would move the receivers. The hybrid inverse uses the recorded chart and time samples for both bands.
+
+A chart supplies detector measures for the default `surface_area` adjoint pairing. A bare mask requires an explicit pairing. Use `element_sum` for equal detector weights with the time and image measures, or `euclidean` for unweighted discrete arrays. Supply `element_measures` in mask order for `surface_area`. MSGB inversion from a regular planar mask also needs `front=1` or `front=-1` along its normal axis. Supply an oriented chart for other geometries.
+
+The solver reports `diagnostics["adjoint_formula"]` as `"circular"` or `"general"`. A complete inward ring in homogeneous water selects the circular formula automatically. For a heterogeneous interior with a known homogeneous exterior, give its speed as `exterior_speed`. Beamax checks the speed at the ring elements.
+
 ## Ring time reversal and a region of interest
 
 This example uses 64 uniformly spaced elements on a 2.5 mm ring in water. Supply the measured pressure as an array of shape `(64, 64)`.

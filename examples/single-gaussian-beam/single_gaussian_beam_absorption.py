@@ -89,7 +89,7 @@ def kwave_run(
         quiet=True,
     )
     p0_2d = p0_1d[:, None]
-    return np.asarray(solver.forward(p0_2d, kw_domain, binary_mask, ts))
+    return np.asarray(solver.forward(p0_2d, kw_domain, detectors=binary_mask, ts=ts))
 
 
 def main() -> None:

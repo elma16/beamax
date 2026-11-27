@@ -100,3 +100,8 @@ References:
 
 - [j-Wave documentation](https://ucl-bug.github.io/jwave/index.html)
 - [j-Wave PyPI package](https://pypi.org/project/jwave/)
+
+
+## Detector-aware callbacks
+
+Set `detector_api=True` on a custom `HybridBackend` to accept the physical acquisition in `context.detectors`. A forward callback returns time-first pressure in detector order on `context.component_domain`. An inverse callback receives `context.acquisition`, `ts`, `wpt`, `eval_points`, `front`, `pairing` and `element_measures`. Apply the requested pairing once to that band's residual and return the requested image region. Existing mask-based callbacks can record at distinct grid nodes in C order. To wrap a Beamax solver, use `HybridBackend.from_beamax_solver(solver)`.

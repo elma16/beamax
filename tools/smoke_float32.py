@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 
-from beamax import Domain, DyadicDecomposition, MSWPT, Sensor
+from beamax import Domain, DyadicDecomposition, MSWPT
 from beamax.gb import gb_solvers
 from beamax.solvers import MSGBSolver
 
@@ -23,7 +23,7 @@ def main() -> None:
         redundancy=2,
         windowing="rectangular",
     )
-    sensors = Sensor(domain, binary_mask=jnp.ones(domain.N, dtype=jnp.int32))
+    mask = jnp.ones(domain.N, dtype=bool)
     p0 = jnp.cos(2 * jnp.pi * jnp.arange(16, dtype=jnp.float32) / 16)
     ts = jnp.linspace(0.0, 0.01, 3, dtype=jnp.float32)
     solver = MSGBSolver(
@@ -35,7 +35,7 @@ def main() -> None:
         sum_method="all_real",
     )
 
-    result = solver.forward(p0, domain, sensors, ts, transform)
+    result = solver.forward(p0, domain, detectors=mask, ts=ts, wpt=transform)
     if result.dtype != jnp.float32 or not bool(jnp.all(jnp.isfinite(result))):
         raise RuntimeError(f"invalid float32 result: dtype={result.dtype}")
 

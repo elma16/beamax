@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 
-from beamax import Domain, DyadicDecomposition, MSWPT, Sensor, utils
+from beamax import Domain, DyadicDecomposition, MSWPT, utils
 from beamax.gb import gb_solvers
 from beamax.plotter import use_beamax_style
 from beamax.solvers import KWaveSolver, MSGBSolver
@@ -89,7 +89,6 @@ def main() -> None:
 
     sensor_index = 5
     sensor_mask = jnp.zeros(shape).at[sensor_index, :].set(1.0)
-    sensors = Sensor(domain=domain, binary_mask=sensor_mask)
 
     decomposition = DyadicDecomposition(
         num_levels=2,
@@ -115,8 +114,10 @@ def main() -> None:
         quiet=True,
     )
 
-    msgb_data = np.asarray(msgb.forward(p0, domain, sensors, ts, wpt))
-    kwave_data = np.asarray(kwave.forward(p0, domain, sensor_mask, ts))
+    msgb_data = np.asarray(
+        msgb.forward(p0, domain, detectors=sensor_mask, ts=ts, wpt=wpt)
+    )
+    kwave_data = np.asarray(kwave.forward(p0, domain, detectors=sensor_mask, ts=ts))
     error = utils.rel_l2(kwave_data, msgb_data)
 
     plot_dir = Path("plots/forward")

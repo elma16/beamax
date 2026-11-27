@@ -12,7 +12,8 @@ from pathlib import Path
 
 from beamax import utils
 from beamax.decomposition import DyadicDecomposition
-from beamax.geometry import Domain, Sensor
+from beamax.geometry import Domain
+from beamax.surfaces import DetectorSurface
 from beamax.gb import gb_solvers
 from beamax.solvers import KWaveSolver, MSGBSolver
 from beamax.transforms import MSWPT
@@ -85,16 +86,6 @@ def prepare_data_domain_for_msgb(
 
     nt_data, ns = sensor_data_cropped.shape
     ts_data = jnp.linspace(float(ts[0]), float(ts[-1]), nt_data)
-    dt_data = float(ts_data[1] - ts_data[0])
-    dx_y = float(domain.dx[1])
-    domain_data = Domain(
-        N=(nt_data, ns),
-        dx=(dt_data, dx_y),
-        c=domain.c,
-        periodic=domain.periodic,
-        cfl=domain.cfl,
-    )
-
     # Match the dyadic aspect ratio to the rectangular data grid.
     n_min = min(nt_data, ns)
     box_aspect = (nt_data // n_min, ns // n_min)
@@ -105,7 +96,7 @@ def prepare_data_domain_for_msgb(
         box_aspect_ratio=box_aspect,
     )
     wpt_data = MSWPT(dyadic_data, redundancy=2, windowing="rectangular_mirror")
-    return sensor_data_cropped, domain_data, wpt_data, ts_data
+    return sensor_data_cropped, wpt_data, ts_data
 
 
 def plot_comparison(
@@ -116,7 +107,7 @@ def plot_comparison(
     adj_kw,
     adj_msgb,
     domain,
-    sensors,
+    sensor_mask,
     *,
     out_path,
 ):
@@ -174,7 +165,7 @@ def plot_comparison(
     ax_data.set_box_aspect(1)
     ax_data.set(xticks=[], yticks=[])
 
-    rr, cc = jnp.where(sensors.binary_mask)
+    rr, cc = jnp.where(sensor_mask)
     xs = (np.asarray(cc) + 0.5) * float(domain.dx[1])
     ys = (np.asarray(rr) + 0.5) * float(domain.dx[0])
     for ax in image_axes:
@@ -236,9 +227,9 @@ def main() -> None:
     ts = domain.generate_time_domain()
     p0 = make_two_gaussian_phantom(domain)
 
-    sensor_mask = jnp.zeros(n).at[0, :].set(1.0)
-    sensors = Sensor(domain=domain, binary_mask=sensor_mask)
-    image_mask = jnp.ones(n)
+    detectors = DetectorSurface.plane(
+        2, axis=0, value=0.0, spacing=(dx[1],), shape=(n[1],), front=1
+    )
 
     kwave = KWaveSolver(
         backend="python",
@@ -247,16 +238,14 @@ def main() -> None:
         smooth_p0=False,
         debug=False,
     )
-    data = kwave.forward(p0, domain, sensor_mask, ts)
+    data = kwave.forward(p0, domain, detectors=detectors, ts=ts)
 
     tr_kw = -coerce_image(
         kwave.time_reversal(
             data=data,
             domain=domain,
-            sensors=image_mask,
-            sources=sensor_mask,
+            detectors=detectors,
             ts=ts,
-            data_layout="nt_ns",
         ),
         n,
     )
@@ -264,15 +253,14 @@ def main() -> None:
         kwave.adjoint(
             data=data,
             domain=domain,
-            sensors=image_mask,
-            sources=sensor_mask,
+            detectors=detectors,
             ts=ts,
-            data_layout="nt_ns",
+            pairing="euclidean",
         ),
         n,
     )
 
-    sensor_cropped, domain_data, wpt_data, _ts_data = prepare_data_domain_for_msgb(
+    sensor_cropped, wpt_data, ts_data = prepare_data_domain_for_msgb(
         data,
         domain,
         ts,
@@ -293,23 +281,18 @@ def main() -> None:
         tr_ode_solver=gb_solvers.solve_ODE_batch_t,
         sum_method="scan_real",
     )
-    sensors_eval = Sensor(domain=domain, binary_mask=image_mask)
     tr_msgb_raw = msgb.time_reversal(
         data=sensor_cropped,
         domain=domain,
-        sensors=sensors_eval,
-        sources=sensors,
-        ts=ts,
-        data_domain=domain_data,
+        detectors=detectors,
+        ts=ts_data,
         data_wpt=wpt_data,
     )
     adj_msgb_raw = msgb.adjoint(
         data=sensor_cropped,
         domain=domain,
-        sensors=sensors_eval,
-        sources=sensors,
-        ts=ts,
-        data_domain=domain_data,
+        detectors=detectors,
+        ts=ts_data,
         data_wpt=wpt_data,
     )
     tr_msgb = np.asarray(tr_msgb_raw).real.reshape(n)
@@ -337,7 +320,7 @@ def main() -> None:
         adj_kw_s,
         adj_msgb_s,
         domain=domain,
-        sensors=sensors,
+        sensor_mask=detectors.to_mask(domain).binary_mask,
         out_path=out_path,
     )
     print(f"Saved figure to {out_path}")

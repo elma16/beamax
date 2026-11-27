@@ -25,6 +25,8 @@ Native solves require 2D or 3D grids with at least two points per axis and
 three points because k-wave-python interprets a two-row mask as coordinates.
 Beamax's field-returning methods require `save_only=False`.
 
+Pass the acquisition as `detectors=mask` or `detectors=surface`. The same receiver order applies to forward pressure and inverse input. A Python forward solve also supports off-grid surface elements. An inverse with `detectors=` accepts time-first traces on distinct grid nodes. Use `eval_points=domain.grid[...]` to select a region of the terminal field. A bare mask requires an explicit adjoint pairing. [Detector geometry and pairings](../surfaces.md)
+
 ## Pressure recordings
 
 For the native C++ and Mac backends, `record` selects the following results.

@@ -17,7 +17,7 @@ Select `backend="mac"` when creating the solver. The existing spelling
 from beamax.solvers import KWaveSolver
 
 solver = KWaveSolver(backend="mac")
-pressure = solver.forward(p0, domain, sensor_mask, ts)
+pressure = solver.forward(p0, domain, detectors=sensor_mask, ts=ts)
 ```
 
 On the first solve that uses Metal, Beamax downloads the executable, checks the
@@ -38,12 +38,11 @@ desired recording mask as `sensors`.
 
 ```python
 image = solver.time_reversal(
-    pressure, domain, sensors=sensor_mask, sources=sensor_mask, ts=ts,
-    data_layout="nt_ns",
+    pressure, domain, detectors=sensor_mask, ts=ts,
 )
 ```
 
-`solver.adjoint` accepts the same arguments and requires a lossless medium,
+For the Euclidean adjoint of the binary-mask recording, use `solver.adjoint(pressure, domain, detectors=sensor_mask, ts=ts, pairing="euclidean")`. It requires a lossless medium,
 equal grid spacing along each axis, and `smooth_p0=False` (the default).
 Beamax prepares the time-varying sources in the units and order expected by the
 native executable. The [solver API](../api/solvers/kwave_solver.md) lists
