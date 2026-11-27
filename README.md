@@ -35,9 +35,11 @@ pip install "beamax[viz-mpl]"
 pip install "beamax[kwave]"
 ```
 
-On Apple silicon with macOS 15 or newer, select `KWaveSolver(device="metal")`
-to run k-Wave forward simulations on the GPU. The first forward call downloads
-and verifies the Metal solver. Later calls reuse the cached executable.
+Use `KWaveSolver(backend="cpp")` for native k-Wave on the CPU (the default),
+`backend="python"` for the Python solver, or `backend="mac"` for Metal on
+Apple silicon with macOS 15 or newer. The backend applies to forward
+simulation, time reversal, and the adjoint. The first Metal solve downloads
+and verifies the executable, which later runs reuse.
 See the [Apple Metal setup guide](https://elma16.github.io/beamax/guides/kwave-metal/).
 
 ## Examples

@@ -250,9 +250,9 @@ def test_adjoint_applies_appendix_b_source_and_terminal_scalings(
     source_mask[0, :] = 1
     captured = {}
 
-    def fake_run(domain_arg, ts, source, sensor, *, force_python=False):
+    def fake_run(domain_arg, ts, source, sensor, *, inverse=False):
         captured["source"] = source
-        captured["force_python"] = force_python
+        captured["inverse"] = inverse
         return {"p_final": np.full(domain_arg.N, 120.0)}
 
     monkeypatch.setattr(solver, "_run_simulation", fake_run)
@@ -270,7 +270,7 @@ def test_adjoint_applies_appendix_b_source_and_terminal_scalings(
     # rho*c*dx/(4*dt) = 3*2*0.1/(4*0.01) = 15.
     np.testing.assert_allclose(captured["source"].p, 15.0 * beta)
     assert captured["source"].p_mode == "additive-no-correction"
-    assert captured["force_python"] is True
+    assert captured["inverse"] is True
     # p_final/(c^2*rho) = 120/(4*3) = 10.
     np.testing.assert_allclose(out, 10.0)
 

@@ -9,9 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `KWaveSolver(device="metal")` runs k-Wave forward simulations on Apple
-  silicon with macOS 15 or newer. The first forward call downloads and
-  verifies the NeuroHarmonics executable, then caches it for later runs.
+- `KWaveSolver(backend="mac")` runs k-Wave on Apple silicon with macOS 15
+  or newer. The first Metal solve downloads, verifies, and caches the
+  NeuroHarmonics executable. Existing `device="metal"` calls also select it.
+
+### Changed
+
+- `KWaveSolver` uses the selected backend for forward simulation, time
+  reversal, and the adjoint. The default `backend="cpp"` uses the native
+  OpenMP CPU executable for all three. Select `backend="python"` explicitly
+  to reproduce an inverse run that previously fell back to Python.
 
 ## [0.3.0] — 2026-08-24
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Union
+from typing import Any, Literal, Union
 import os
 import sys
 import tempfile
@@ -16,6 +16,11 @@ from beamax.install_kwave_metal import (
     install as install_kwave_metal,
     metal_binary_path,
     metal_supported,
+)
+from beamax.solvers._kwave_native import (
+    NATIVE_PRESSURE_RECORDS,
+    run_native_simulation,
+    sensor_channels_to_c_order,
 )
 
 from kwave.kgrid import kWaveGrid
@@ -176,6 +181,9 @@ class KWaveSolver:
     execution_options : kwave.options.SimulationExecutionOptions, optional
         Legacy execution-options object. It cannot be mixed with unified
         keyword options.
+    backend : {"cpp", "python", "mac"}, optional
+        Solver for forward propagation, time reversal and the adjoint. The
+        default is native C++ on the CPU when no legacy options are supplied.
     **kwargs
         Unified k-Wave arguments forwarded to
         :func:`kwave.kspaceFirstOrder`. If neither legacy options nor kwargs
@@ -186,17 +194,16 @@ class KWaveSolver:
     - Requires the ``[kwave]`` extra (``pip install 'beamax[kwave]'``).
     - Boundary handling uses a PML; :attr:`Domain.periodic` flags control
       PML-inside vs. PML-outside placement via the k-Wave options.
-    - Forward solves run on the C++ backend by default. Time-reversal falls
-      back to the pure-Python backend until the upstream ``CppSimulation``
-      path ships source preprocessing for time-varying pressure sources.
-      The adjoint also uses the Python backend and applies the Appendix-B
-      source and terminal-field scalings needed for the discrete transpose.
+    - ``backend="cpp"`` (default) uses the native OpenMP CPU solver,
+      ``backend="python"`` uses k-wave-python, and ``backend="mac"``
+      uses the native Apple Metal solver. This selection applies to forward,
+      time reversal, and adjoint calls on the instance.
     - ``binary_path`` can be supplied directly or via
       ``BEAMAX_KWAVE_BINARY_PATH``. Direct kwargs take precedence.
-    - On Apple silicon with macOS 15 or later, select ``device="metal"``
-      for C++ forward solves. The first forward run downloads and verifies
-      the Metal executable. Later runs use the cached copy. Time reversal
-      and the adjoint on the same solver run on the CPU.
+    - ``backend="mac"`` is shorthand for ``backend="cpp", device="metal"``.
+      On Apple silicon with macOS 15 or later, the first Metal run downloads
+      and verifies the executable. For native CUDA use ``backend="cpp",
+      device="gpu"`` on a supported host.
     - Regular C++ solves with the legacy default ``data_path`` use k-Wave's
       per-run scratch directory. Supply a custom path to retain the HDF5 files.
 
@@ -213,6 +220,8 @@ class KWaveSolver:
         self,
         simulation_options=None,
         execution_options=None,
+        *,
+        backend: Literal["cpp", "python", "mac"] | None = None,
         **kwargs,
     ):
         """
@@ -224,10 +233,14 @@ class KWaveSolver:
             Legacy simulation options object.
         execution_options : kwave.options.SimulationExecutionOptions, optional
             Legacy execution options object.
+        backend : {"cpp", "python", "mac"}, optional
+            Select native C++, k-wave-python, or Apple Metal for all solves.
         **kwargs
             Unified keyword options forwarded to
             :func:`kwave.kspaceFirstOrder`.
         """
+        if backend is not None:
+            kwargs["backend"] = backend
         uses_legacy_options = (
             simulation_options is not None or execution_options is not None
         )
@@ -259,11 +272,20 @@ class KWaveSolver:
         ):
             supplied.pop("data_path")
         self._solver_kwargs = {**defaults, **supplied}
-        if (
-            self._solver_kwargs["device"] == "metal"
-            and self._solver_kwargs["backend"] != "cpp"
-        ):
+        backend = self._solver_kwargs["backend"]
+        device = self._solver_kwargs["device"]
+        if backend == "mac":
+            if "device" in supplied and device not in ("gpu", "metal"):
+                raise ValueError(
+                    "backend='mac' uses the Apple GPU. Omit device or use device='metal'."
+                )
+            self._solver_kwargs.update(backend="cpp", device="metal")
+        elif backend not in ("cpp", "python"):
+            raise ValueError("backend must be 'cpp', 'python', or 'mac'.")
+        elif device == "metal" and backend != "cpp":
             raise ValueError("device='metal' requires backend='cpp'.")
+        elif device not in ("cpu", "gpu", "metal"):
+            raise ValueError("device must be 'cpu', 'gpu', or 'metal'.")
         self._explicit_solver_options = set(supplied)
 
     def _create_kgrid(self, domain: Domain, ts: Array) -> kWaveGrid:
@@ -345,7 +367,7 @@ class KWaveSolver:
         source: kSource,
         sensor: kSensor,
         *,
-        force_python: bool = False,
+        inverse: bool = False,
         extra_time_step: bool = False,
     ) -> dict[str, Any]:
         """
@@ -361,31 +383,28 @@ class KWaveSolver:
             k-Wave source object.
         sensor : kSensor
             k-Wave sensor object.
-        force_python : bool, default=False
-            Force the Python backend even when C++ is configured. Used for
-            time-varying source simulations where the C++ backend lacks
-            source-term preprocessing.
+        inverse : bool, default=False
+            Propagate the time-varying pressure source for time reversal or
+            the adjoint. Beamax prepares these sources for native executables.
         extra_time_step : bool, default=False
             Extend the validated grid by one time step at the same spacing.
 
         Returns
         -------
-        np.ndarray
-            Raw k-Wave result object/array returned by
-            :func:`kwave.kspaceFirstOrder`.
+        dict
+            k-Wave outputs keyed by record name.
         """
         kgrid = self._create_kgrid(domain, ts)
         if extra_time_step:
             kgrid.setTime(len(ts) + 1, kgrid.dt)
 
         kwargs = self._kwargs_for_domain(domain)
-        if force_python:
-            kwargs["backend"] = "python"
-            if kwargs["device"] == "metal":
-                kwargs["device"] = "cpu"
-                for option in ("binary_path", "device_num", "num_threads"):
-                    kwargs.pop(option, None)
-
+        if kwargs.get("save_only"):
+            raise ValueError(
+                "Beamax solver methods return simulation data and require save_only=False. "
+                "To prepare HDF5 inputs without running a solve, use k-wave-python's "
+                "kspaceFirstOrder(..., save_only=True)."
+            )
         medium = kWaveMedium(
             sound_speed=np.asarray(domain.sound_speed_array),
             density=(
@@ -401,19 +420,50 @@ class KWaveSolver:
             alpha_power=(self._alpha_power_for_kwave(domain)),
         )
 
-        if kwargs.get("backend") == "cpp":
-            _configure_cpp_binary_kwargs(kwargs)
+        if kwargs["backend"] == "cpp":
+            if not (kwargs.get("use_sg", True) and kwargs.get("use_kspace", True)):
+                raise ValueError(
+                    "Native k-Wave requires use_sg=True and use_kspace=True. "
+                    "Select backend='python' to disable either option."
+                )
+            if len(domain.N) not in (2, 3) or min(domain.N) < 2:
+                raise ValueError(
+                    "Native k-Wave requires a 2D or 3D grid with at least two points per axis."
+                )
+            if len(domain.N) == 2 and domain.N[0] == 2:
+                raise ValueError(
+                    "k-wave-python's native input writer interprets a two-row 2D mask as Cartesian coordinates."
+                )
+            records = sensor.record
+            if records and records[0] not in NATIVE_PRESSURE_RECORDS:
+                raise ValueError(
+                    f"Unsupported native k-Wave record {records[0]!r}. "
+                    f"Choose one of {', '.join(NATIVE_PRESSURE_RECORDS)}."
+                )
+            binary = _configure_cpp_binary_kwargs(kwargs)
+            if inverse or records:
+                kwargs["binary_path"] = binary
+                return run_native_simulation(kgrid, medium, source, sensor, **kwargs)
             _remove_stale_cpp_input(kwargs)
+        elif (
+            kwargs["pml_inside"]
+            and getattr(sensor, "record", None) == ["p_final"]
+            and any(p != 0 for p in np.atleast_1d(kwargs["pml_size"]))
+        ):
+            # k-wave-python 0.6.2 crops p_final even for an interior PML.
+            # Recording one sample everywhere keeps the original grid extent.
+            final_sample = kSensor(record=["p"])
+            final_sample.record_start_index = int(kgrid.Nt)
+            result = kspaceFirstOrder(kgrid, medium, source, final_sample, **kwargs)
+            return {"p_final": np.asarray(result["p"]).reshape(domain.N)}
 
-        result = kspaceFirstOrder(
+        return kspaceFirstOrder(
             kgrid,
             medium,
             source,
             sensor,
             **kwargs,
         )
-
-        return result
 
     def forward(
         self,
@@ -441,8 +491,10 @@ class KWaveSolver:
         Returns
         -------
         np.ndarray
-            Sensor time series ``(Nt, Ns)``. Sensor channels follow NumPy C
-            mask order for both the Python and standalone C++/CUDA backends.
+            Pressure time series ``(Nt, Ns)`` for ``record="p"``. A final
+            pressure or whole-grid extremum has shape ``domain.N``. A
+            per-sensor pressure statistic has shape ``(Ns,)``. Sensor
+            channels follow NumPy C mask order on all backends.
         """
         p0_array = np.asarray(p0)
         if tuple(p0_array.shape) != domain.N:
@@ -454,18 +506,16 @@ class KWaveSolver:
 
         sensor_mask = self._validate_mask(np.asarray(sensors), domain, name="sensors")
         backend = str(self._solver_kwargs.get("backend", "cpp")).lower()
-        if backend == "cpp" and record != "p":
-            raise ValueError("The standalone C++ backend supports record='p' only.")
         sensor = (
             kSensor(mask=sensor_mask)
-            if backend == "cpp"
+            if backend == "cpp" and record == "p"
             else kSensor(mask=sensor_mask, record=[record])
         )
 
         nt = np.size(ts)
         ns = int(np.count_nonzero(sensor_mask))
         simulation_nt = nt
-        if backend == "cpp" and nt == ns and not self._solver_kwargs.get("save_only"):
+        if backend == "cpp" and record == "p" and nt == ns:
             # k-Wave can mistake the time axis of a square C++ trace for the
             # sensor axis. One more step makes the output shape unambiguous.
             result = self._run_simulation(
@@ -475,7 +525,13 @@ class KWaveSolver:
         else:
             result = self._run_simulation(domain, ts, source, sensor)
 
-        out = np.array(result[record])
+        if record not in result:
+            raise ValueError(
+                f"The selected k-Wave backend did not return record {record!r}."
+            )
+        out = np.asarray(result[record])
+        if (backend == "cpp" and record != "p") or record.endswith(("_final", "_all")):
+            return out
         if record == "p" and out.ndim == 1 and ns == 1:
             out = out[:, None]
         if out.ndim == 2 and out.shape == (ns, simulation_nt):
@@ -483,25 +539,9 @@ class KWaveSolver:
 
         # Return the requested time samples with sensor channels in C order.
         if backend == "cpp" and out.ndim == 2 and out.shape == (simulation_nt, ns):
-            out = out[:nt, self._cpp_sensor_channels_to_c_order(sensor_mask)]
+            out = out[:nt, sensor_channels_to_c_order(sensor_mask)]
 
         return out
-
-    @staticmethod
-    def _cpp_sensor_channels_to_c_order(sensor_mask: np.ndarray) -> np.ndarray:
-        """Return indices that reorder C++ mask channels into NumPy C order.
-
-        k-Wave's standalone binaries follow MATLAB/Fortran linear indexing for
-        mask points.  The returned permutation ``perm`` is intended for
-        ``data[..., perm]`` when the final data axis is currently in that
-        Fortran order.
-        """
-        mask = np.asarray(sensor_mask) != 0
-        coords_c = np.argwhere(mask)
-        flat_f = np.flatnonzero(mask.ravel(order="F"))
-        coords_f = np.column_stack(np.unravel_index(flat_f, mask.shape, order="F"))
-        f_lookup = {tuple(coord): idx for idx, coord in enumerate(coords_f)}
-        return np.asarray([f_lookup[tuple(coord)] for coord in coords_c], dtype=int)
 
     @staticmethod
     def _coerce_sensor_data_layout(
@@ -682,8 +722,11 @@ class KWaveSolver:
 
         sensor = kSensor(mask=sensor_mask, record=[record])
 
-        # The C++ backend lacks time-varying source scaling.
-        out = self._run_simulation(domain, ts, src, sensor, force_python=True)
+        out = self._run_simulation(domain, ts, src, sensor, inverse=True)
+        if record not in out:
+            raise ValueError(
+                f"The selected k-Wave backend did not return record {record!r}."
+            )
         return out[record]
 
     def adjoint(
@@ -724,8 +767,10 @@ class KWaveSolver:
 
         Notes
         -----
-        This implementation requires a lossless medium. The returned field
-        is the algebraic transpose under unweighted discrete sums.
+        This implementation requires a lossless medium and uses unweighted
+        discrete sums. With an active absorbing boundary layer (PML),
+        damping can introduce a discrepancy from the exact transpose of the
+        finite-grid forward simulation.
         To represent a one-cell planar detector under the continuous surface
         and volume rectangle rules of Arridge et al. (2016), multiply the
         result by $\Delta t/\Delta x_{\mathrm{normal}}$.
@@ -818,8 +863,7 @@ class KWaveSolver:
 
         sensor = kSensor(mask=sensor_mask, record=[record])
 
-        # Only the Python backend preprocesses this source and returns p_final.
-        out = self._run_simulation(domain, ts, src, sensor, force_python=True)
+        out = self._run_simulation(domain, ts, src, sensor, inverse=True)
         terminal_pressure = np.asarray(out[record])
         if tuple(terminal_pressure.shape) != domain.N:
             raise ValueError(

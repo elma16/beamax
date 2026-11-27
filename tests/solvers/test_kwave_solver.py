@@ -159,6 +159,31 @@ def test_kwave_converges():
     )
 
 
+def test_python_terminal_pressure_keeps_cells_inside_pml():
+    shape = (12, 8)
+    domain = geometry.Domain(N=shape, dx=(1e-4,) * 2, c=1500.0, periodic=(False,) * 2)
+    solver = KWaveSolver(backend="python", pml_inside=True, pml_size=(2, 1), quiet=True)
+    ts = np.arange(9) * 1.5e-8
+    p0 = np.random.default_rng(12).standard_normal(shape)
+    all_cells = np.ones(shape, dtype=bool)
+    receivers = np.zeros(shape, dtype=bool)
+    receivers[(0, 4, 10), (5, 2, 7)] = True
+
+    history = solver.forward(p0, domain, all_cells, ts)
+    final = solver.forward(p0, domain, receivers, ts, record="p_final")
+    np.testing.assert_allclose(final, history[-1].reshape(shape), atol=1e-12)
+
+    # The first pressure sample is p0 at each receiver, including receivers in the PML.
+    residual = np.zeros((ts.size, int(receivers.sum())))
+    residual[0] = [0.75, -0.25, 2.0]
+    image = solver.adjoint(
+        residual, domain, receivers, receivers, ts, data_layout="nt_ns"
+    )
+    expected = np.zeros(shape)
+    expected[receivers] = residual[0]
+    np.testing.assert_allclose(image, expected, atol=1e-12)
+
+
 def test_kwave_adjoint_dot_product():
     """
     Numerical adjoint check: <A x, y> = <x, A^T y>.
@@ -182,7 +207,7 @@ def test_kwave_adjoint_dot_product():
     sensor_mask = sensor_mask.at[:, 0].set(1)
     sensors_all = jnp.ones(N)
 
-    # The adjoint forces Python, so use it forward for consistent sensor order.
+    # Exercise the Python forward and adjoint as one operator pair.
     solver = KWaveSolver(**{**_SOLVER_KWARGS, "backend": "python"})
 
     x = np.array(jax.random.normal(jax.random.PRNGKey(0), N, dtype=jnp.float32))
@@ -557,26 +582,97 @@ def test_metal_forward_selects_binary_and_gpu_device(tmp_path, monkeypatch, sele
     assert kwargs["binary_path"] == str(expected)
 
 
-@pytest.mark.parametrize("operation", ["time_reversal", "adjoint"])
-def test_metal_inverse_uses_cpu_without_cpp_options(monkeypatch, operation):
+@pytest.mark.parametrize(
+    ("options", "backend", "device", "engine"),
+    [
+        ({}, "cpp", "cpu", "OMP"),
+        ({"backend": "python"}, "python", "cpu", None),
+        ({"backend": "mac"}, "cpp", "gpu", "Metal"),
+        ({"backend": "cpp", "device": "metal"}, "cpp", "gpu", "Metal"),
+        ({"backend": "cpp", "device": "gpu"}, "cpp", "gpu", "CUDA"),
+    ],
+)
+@pytest.mark.parametrize("operation", ["forward", "time_reversal", "adjoint"])
+def test_selected_backend_handles_each_operator(
+    monkeypatch, tmp_path, options, backend, device, engine, operation
+):
     domain = geometry.Domain(N=(4, 6), dx=(1.0, 1.0), c=1.0, periodic=(True, True))
-    mask = np.zeros(domain.N, dtype=bool)
-    mask[1, 3] = True
+    mask = np.ones(domain.N, dtype=bool)
     ts = np.arange(8, dtype=float)
-    run = Mock(return_value={"p_final": np.zeros(domain.N)})
-    monkeypatch.setattr(kwave_solver_module, "kspaceFirstOrder", run)
-    install = Mock()
+    output = {"p_final": np.ones(domain.N), "p": np.ones((8, mask.size))}
+    upstream = Mock(return_value=output)
+    adapter = Mock(return_value=output)
+    binaries = {name: tmp_path / name for name in ("Metal", "OMP", "CUDA")}
+    for binary in binaries.values():
+        binary.touch()
+    install = Mock(return_value=binaries["Metal"])
+    monkeypatch.delenv("BEAMAX_KWAVE_BINARY_PATH", raising=False)
+    monkeypatch.setattr(kwave_solver_module, "metal_supported", lambda: True)
     monkeypatch.setattr(kwave_solver_module, "install_kwave_metal", install)
-    solver = KWaveSolver(
-        device="metal", binary_path="unused", device_num=0, num_threads=2
+    monkeypatch.setattr(kwave_solver_module, "kspaceFirstOrder", upstream)
+    monkeypatch.setattr(kwave_solver_module, "run_native_simulation", adapter)
+    monkeypatch.setattr(
+        kwave_solver_module,
+        "_default_kwave_binary_path",
+        lambda device: binaries["CUDA" if device == "gpu" else "OMP"],
     )
+    solver = KWaveSolver(**options)
+    if operation == "forward":
+        solver.forward(np.ones(domain.N), domain, mask, ts)
+    else:
+        getattr(solver, operation)(
+            np.ones((mask.size, ts.size)), domain, mask, mask, ts
+        )
 
-    getattr(solver, operation)(np.ones((1, ts.size)), domain, mask, mask, ts)
-    run.assert_called_once()
-    kwargs = run.call_args.kwargs
-    assert (kwargs["backend"], kwargs["device"]) == ("python", "cpu")
-    assert {"binary_path", "device_num", "num_threads"}.isdisjoint(kwargs)
-    install.assert_not_called()
+    if backend == "cpp" and operation != "forward":
+        adapter.assert_called_once()
+        upstream.assert_not_called()
+        assert Path(adapter.call_args.kwargs["binary_path"]) == binaries[engine]
+    else:
+        upstream.assert_called_once()
+        adapter.assert_not_called()
+        kwargs = upstream.call_args.kwargs
+        assert (kwargs["backend"], kwargs["device"]) == (backend, device)
+        if engine == "Metal":
+            assert Path(kwargs["binary_path"]) == binaries[engine]
+    assert install.call_count == int(engine == "Metal")
+
+
+@pytest.mark.parametrize("backend", ["cpp", "mac"])
+@pytest.mark.parametrize("option", ["use_sg", "use_kspace"])
+@pytest.mark.parametrize("operation", ["forward", "time_reversal", "adjoint"])
+def test_native_unsupported_options_are_explicit(backend, option, operation):
+    domain = geometry.Domain(N=(4, 6), dx=(1.0, 1.0), c=1.0, periodic=(True, True))
+    mask = np.ones(domain.N, dtype=bool)
+    ts = np.arange(8, dtype=float)
+    with pytest.raises((ValueError, NotImplementedError), match=option):
+        solver = KWaveSolver(backend=backend, **{option: False})
+        if operation == "forward":
+            solver.forward(np.ones(domain.N), domain, mask, ts)
+        else:
+            getattr(solver, operation)(
+                np.ones((mask.size, ts.size)), domain, mask, mask, ts
+            )
+
+
+@pytest.mark.parametrize("operation", ["forward", "time_reversal", "adjoint"])
+def test_field_returning_operations_reject_save_only(operation):
+    domain = geometry.Domain(N=(4, 6), dx=(1.0, 1.0), c=1.0, periodic=(True, True))
+    mask = np.ones(domain.N, dtype=bool)
+    ts = np.arange(8, dtype=float)
+    with pytest.raises(ValueError, match="save_only"):
+        solver = KWaveSolver(save_only=True)
+        if operation == "forward":
+            solver.forward(np.ones(domain.N), domain, mask, ts)
+        else:
+            getattr(solver, operation)(
+                np.ones((mask.size, ts.size)), domain, mask, mask, ts
+            )
+
+
+def test_mac_rejects_explicit_cpu_device():
+    with pytest.raises(ValueError, match="device"):
+        KWaveSolver(backend="mac", device="cpu")
 
 
 def test_metal_install_failure_can_be_retried(tmp_path, monkeypatch):
@@ -593,19 +689,6 @@ def test_metal_install_failure_can_be_retried(tmp_path, monkeypatch):
     assert kwave_solver_module._configure_cpp_binary_kwargs(kwargs) == binary
     assert kwargs == {"device": "gpu", "binary_path": str(binary)}
     assert install.call_count == 2
-
-
-def test_metal_save_only_skips_install(tmp_path, monkeypatch):
-    monkeypatch.delenv("BEAMAX_KWAVE_BINARY_PATH", raising=False)
-    monkeypatch.setattr(kwave_solver_module, "metal_supported", lambda: True)
-    binary = tmp_path / "kspaceFirstOrder-Metal"
-    monkeypatch.setattr(kwave_solver_module, "metal_binary_path", lambda: binary)
-    install = Mock()
-    monkeypatch.setattr(kwave_solver_module, "install_kwave_metal", install)
-
-    kwargs = {"backend": "cpp", "device": "metal", "save_only": True}
-    assert kwave_solver_module._configure_cpp_binary_kwargs(kwargs) == binary
-    install.assert_not_called()
 
 
 def test_metal_requires_supported_host(monkeypatch):
