@@ -177,6 +177,11 @@ class HybridContext:
     sources: Any = None
     detectors: Any = None
     wpt: Any = None
+    acquisition: Domain | None = None
+    eval_points: Any = None
+    pairing: str | None = None
+    element_measures: Any = None
+    front: int | None = None
 
 
 @dataclass(frozen=True)
@@ -289,6 +294,17 @@ class HybridBackend:
         if callable(getattr(solver, "time_reversal", None)):
 
             def time_reversal(component: jnp.ndarray, context: HybridContext) -> Any:
+                if context.detectors is not None:
+                    kwargs = dict(
+                        detectors=context.detectors,
+                        ts=context.ts,
+                        eval_points=context.eval_points,
+                    )
+                    if isinstance(solver, MSGBSolver):
+                        kwargs.update(data_wpt=context.wpt, front=context.front)
+                    return solver.time_reversal(
+                        component, context.component_domain, **kwargs
+                    )
                 return solver.time_reversal(
                     component,
                     context.component_domain,
@@ -302,6 +318,19 @@ class HybridBackend:
         if callable(getattr(solver, "adjoint", None)):
 
             def adjoint(component: jnp.ndarray, context: HybridContext) -> Any:
+                if context.detectors is not None:
+                    kwargs = dict(
+                        detectors=context.detectors,
+                        ts=context.ts,
+                        eval_points=context.eval_points,
+                    )
+                    if isinstance(solver, MSGBSolver):
+                        kwargs.update(data_wpt=context.wpt, front=context.front)
+                    kwargs.update(
+                        pairing=context.pairing,
+                        element_measures=context.element_measures,
+                    )
+                    return solver.adjoint(component, context.component_domain, **kwargs)
                 return solver.adjoint(
                     component,
                     context.component_domain,
@@ -670,6 +699,7 @@ class HybridSolver(eqx.Module):
         domain: Domain,
         *,
         downsample=None,
+        input_type=None,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None, Domain]:
         """
         Split data into high- and low-frequency components.
@@ -699,7 +729,7 @@ class HybridSolver(eqx.Module):
         return split_frequency_components(
             p0=data,
             sensors_mask=mask,
-            input_type=self.config.input_type,
+            input_type=self.config.input_type if input_type is None else input_type,
             output_type="spatial",
             wpt=wpt,
             box_corners=self.config.box_corners,
@@ -939,16 +969,80 @@ class HybridSolver(eqx.Module):
 
         return hf_result + lf_result
 
+    def _inverse_at_detectors(
+        self,
+        operation,
+        data,
+        domain,
+        detectors,
+        ts,
+        data_wpt,
+        eval_points,
+        front,
+        pairing=None,
+        element_measures=None,
+    ):
+        from beamax.solvers._detectors import chart_data, oriented_surface
+        from beamax.surfaces import DetectorSurface
+
+        surface = oriented_surface(domain, detectors, front)
+        data, acquisition = chart_data(data, surface, ts, data_wpt)
+        # Split measured pressure in its time/chart coordinates. Keep both
+        # quadrature rules on the measured samples and both images on one grid.
+        high, low, _, _ = self._split_frequencies(
+            data, None, data_wpt, acquisition, downsample=False, input_type="spatial"
+        )
+        if not jnp.iscomplexobj(data):
+            high, low = high.real, low.real
+        target = domain.N if eval_points is None else np.shape(eval_points)[:-1]
+        ctx = HybridContext(
+            domain,
+            domain,
+            None,
+            ts,
+            target,
+            detectors=detectors,
+            wpt=data_wpt,
+            acquisition=acquisition,
+            eval_points=eval_points,
+            front=front,
+            pairing=pairing,
+            element_measures=element_measures,
+        )
+        if not self.lf_backend.detector_api:
+            raise ValueError(
+                "The LF inverse backend must support the detector interface."
+            )
+        # A mask carries flat C-order channels. Preserve its ordering on injection.
+        if not isinstance(detectors, DetectorSurface):
+            high, low = high.reshape(len(ts), -1), low.reshape(len(ts), -1)
+        lf = jnp.asarray(self.lf_backend.require(operation)(low, ctx))
+        hf_backend = HybridBackend.from_beamax_solver(self.hf_solver)
+        if not hf_backend.detector_api:
+            raise ValueError(
+                "The HF inverse backend must support the detector interface."
+            )
+        hf = jnp.asarray(hf_backend.require(operation)(high, ctx))
+        if hf.shape != target or lf.shape != target:
+            raise ValueError(
+                f"Both hybrid inverse components must return shape {target}."
+            )
+        return hf + lf
+
     def time_reversal(
         self,
         data: jnp.ndarray,
         domain: Domain,
-        sensors: Sensor,
-        sources: Sensor,
-        ts: jnp.ndarray,
-        data_domain: Domain,
-        data_wpt: MSWPT,
-        img_wpt: MSWPT,
+        sensors=None,
+        sources=None,
+        ts=None,
+        data_domain=None,
+        data_wpt=None,
+        img_wpt=None,
+        *,
+        detectors=None,
+        eval_points=None,
+        front=None,
     ) -> jnp.ndarray:
         """
         Time reversal with hybrid approach.
@@ -981,6 +1075,38 @@ class HybridSolver(eqx.Module):
         -----
         Time extension/windowing not used for time reversal (applies only to forward).
         """
+        if detectors is not None:
+            if any(v is not None for v in (sources, sensors, data_domain)):
+                raise TypeError("Give detectors and ts for the acquisition.")
+            return self._inverse_at_detectors(
+                "time_reversal",
+                data,
+                domain,
+                detectors,
+                ts,
+                data_wpt,
+                eval_points,
+                front,
+            )
+        if any(
+            v is not None
+            for v in (
+                eval_points,
+                front,
+            )
+        ):
+            raise TypeError("These options require detectors.")
+        if (
+            sensors is None
+            or sources is None
+            or ts is None
+            or data_domain is None
+            or data_wpt is None
+            or img_wpt is None
+        ):
+            raise TypeError(
+                "Give the inverse acquisition grid, times, detectors and transforms."
+            )
         self._validate_configuration(domain)
 
         mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors
@@ -1026,12 +1152,18 @@ class HybridSolver(eqx.Module):
         self,
         data: jnp.ndarray,
         domain: Domain,
-        sensors: Sensor,
-        sources: Sensor,
-        ts: jnp.ndarray,
-        data_domain: Domain,
-        data_wpt: MSWPT,
-        img_wpt: MSWPT,
+        sensors=None,
+        sources=None,
+        ts=None,
+        data_domain=None,
+        data_wpt=None,
+        img_wpt=None,
+        *,
+        detectors=None,
+        eval_points=None,
+        front=None,
+        pairing=None,
+        element_measures=None,
     ) -> jnp.ndarray:
         """
         Adjoint solve with hybrid approach.
@@ -1062,6 +1194,34 @@ class HybridSolver(eqx.Module):
         jnp.ndarray
             Adjoint reconstruction
         """
+        if detectors is not None:
+            if any(v is not None for v in (sources, sensors, data_domain)):
+                raise TypeError("Give detectors and ts for the acquisition.")
+            return self._inverse_at_detectors(
+                "adjoint",
+                data,
+                domain,
+                detectors,
+                ts,
+                data_wpt,
+                eval_points,
+                front,
+                pairing,
+                element_measures,
+            )
+        if any(v is not None for v in (eval_points, front, pairing, element_measures)):
+            raise TypeError("These options require detectors.")
+        if (
+            sensors is None
+            or sources is None
+            or ts is None
+            or data_domain is None
+            or data_wpt is None
+            or img_wpt is None
+        ):
+            raise TypeError(
+                "Give the inverse acquisition grid, times, detectors and transforms."
+            )
         self._validate_configuration(domain)
 
         mask = sensors.binary_mask if isinstance(sensors, Sensor) else sensors

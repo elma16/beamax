@@ -412,3 +412,38 @@ def test_hybrid_keeps_the_recorded_channels_and_times(experiment):
         high.real, domain, detectors=chart, ts=ts, wpt=wpt
     ) + kw.forward(low.real, domain, detectors=chart, ts=ts)
     np.testing.assert_allclose(actual, expected, rtol=3e-5, atol=3e-6)
+
+
+@pytest.mark.parametrize("op", ["time_reversal", "adjoint"])
+def test_hybrid_inverse_matches_individual_bands(experiment, op):
+    from beamax.solvers import HybridSolver, HybridBackend, KWaveSolver
+
+    hf, domain, ts, _, _ = experiment
+    kw = KWaveSolver(backend="python", pml_size=0, smooth_p0=False)
+    hybrid = HybridSolver(
+        hf_solver=hf,
+        lf_backend=HybridBackend.from_beamax_solver(kw),
+        cutoff_freq=4.0,
+        downsample=True,
+    )
+    chart = DetectorSurface.plane(
+        2, value=0.5, origin=(0.25,), spacing=(0.125,), shape=(4,)
+    )
+    dd = Domain((16, 4), (0.0625, 0.125), (False, False))
+    wpt = MSWPT(DyadicDecomposition(1, dd.N, (2,), (4, 1)), 2, "rectangular_mirror")
+    data = jnp.asarray(np.random.default_rng(53).normal(size=dd.N))
+    opt = dict(detectors=chart, ts=ts)
+    if op == "adjoint":
+        opt["pairing"] = "surface_area"
+    points = domain.grid[2:5, 4:6]
+    actual = getattr(hybrid, op)(data, domain, data_wpt=wpt, eval_points=points, **opt)
+    high, low, _, _ = hybrid._split_frequencies(data, None, wpt, dd, downsample=False)
+    ref = getattr(hf, op)(high.real, domain, data_wpt=wpt, **opt) + getattr(kw, op)(
+        low.real, domain, **opt
+    )
+    np.testing.assert_allclose(actual, ref[2:5, 4:6], rtol=3e-5, atol=3e-6)
+    opt["detectors"] = DetectorSurface.plane(
+        2, value=0.52, origin=(0.25,), spacing=(0.125,), shape=(4,)
+    )
+    with pytest.raises(ValueError, match="off-grid"):
+        getattr(hybrid, op)(data, domain, data_wpt=wpt, **opt)
