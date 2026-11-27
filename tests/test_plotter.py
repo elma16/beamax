@@ -29,13 +29,15 @@ if loaded:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_plotter_public_surface_is_minimal():
+def test_plotter_public_exports():
     pytest.importorskip("matplotlib")
     from beamax import plotter
 
     assert plotter.__all__ == [
+        "plot_forward_records",
         "plot_mswpt_coeffs",
         "plot_mswpt_coeffs_3d",
+        "plot_packet_box_scanner",
         "use_beamax_style",
     ]
 
@@ -281,5 +283,81 @@ def test_plot_mswpt_coeffs_3d_rectangular_projection(array_order):
         np.testing.assert_allclose(image.get_array(), np.maximum(expected_image, 0.02))
         np.testing.assert_allclose(image.get_extent(), expected_extent)
         np.testing.assert_allclose(_red_highlight_bounds(ax), expected_highlight)
+    finally:
+        plt.close(fig)
+
+
+def test_forward_thesis_residuals_share_scale_and_receiver():
+    plt = pytest.importorskip("matplotlib.pyplot")
+    from beamax.plotter import plot_forward_records
+
+    kw = np.arange(60.0).reshape(5, 12)
+    ms, hybrid = kw.copy(), kw.copy()
+    ms[:, 0] += 30  # Excluded edge.
+    ms[:, 5] += 3
+    hybrid[:, 7] -= 5  # The second residual chooses the shared profile.
+    ts = np.arange(5) * 0.01
+    fig = plot_forward_records(kw, ms, hybrid, ts)
+    try:
+        panels = [ax for ax in fig.axes if ax.images]
+        assert len(panels) == 3
+        # The tight-cropped Chapter 4 plate and its panel borders, in the
+        # original 300 dpi export. A default tight_layout moves these axes.
+        width, height = fig.get_size_inches() * 300
+        np.testing.assert_allclose((width, height), (1560, 1222))
+        for ax, left in zip(panels, (214, 616, 1018), strict=True):
+            bounds = ax.get_position()
+            np.testing.assert_allclose(
+                (bounds.x0 * width, (1 - bounds.y1) * height),
+                (left, 73),
+                atol=1,
+            )
+        assert panels[1].images[0].norm is panels[2].images[0].norm
+        assert panels[0].images[0].get_clim() == (
+            min(a.min() for a in (kw, ms, hybrid)),
+            max(a.max() for a in (kw, ms, hybrid)),
+        )
+        for ax, field in zip(panels, (kw, kw - ms, kw - hybrid), strict=True):
+            np.testing.assert_array_equal(ax.images[0].get_array(), field)
+            np.testing.assert_allclose(ax.lines[0].get_xdata(), 7 / 11)
+            np.testing.assert_allclose(ax.images[0].get_extent(), (0, 1, ts[-1], ts[0]))
+        assert panels[2].images[0].get_clim() == (-30, 30)
+        for line, field in zip(fig.axes[-1].lines, (kw, ms, hybrid), strict=True):
+            np.testing.assert_array_equal(line.get_ydata(), field[:, 7])
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    "operations", [("time_reversal",), ("adjoint",), ("time_reversal", "adjoint")]
+)
+def test_box_scanner_excerpt_preserves_thesis_calibration(operations):
+    plt = pytest.importorskip("matplotlib.pyplot")
+    from beamax.plotter import plot_packet_box_scanner
+
+    p0 = np.random.default_rng(5).normal(size=(128, 128))
+    mask = np.zeros_like(p0, dtype=bool)
+    mask[0] = True
+    fields = {op: (p0 / 5, p0 / 7) for op in operations}
+    fig = plot_packet_box_scanner(p0, mask, (0.0128, 0.0128), **fields)
+    try:
+        panels = [ax for ax in fig.axes if ax.images]
+        expected = [p0]
+        for op in operations:
+            for field in fields[op]:
+                expected.append(field * (2296.5277637882564 if op == "adjoint" else 1))
+        for i, (ax, field) in enumerate(zip(panels, expected, strict=True)):
+            im = ax.images[0]
+            np.testing.assert_allclose(im.get_array(), field)
+            assert im.norm is panels[0].images[0].norm
+            assert im.get_clim() == (-1.0806082602212956, 1.1509535463142675)
+            np.testing.assert_allclose(ax.lines[0].get_xdata(), 87 * 0.0128 / 127)
+            if i:
+                assert ax.collections[0].get_offsets().shape == (128, 2)
+        for i, ax in enumerate(fig.axes[-len(operations) :]):
+            for line, field in zip(
+                ax.lines, [p0, *expected[2 * i + 1 : 2 * i + 3]], strict=True
+            ):
+                np.testing.assert_allclose(line.get_ydata(), field[:, 87])
     finally:
         plt.close(fig)

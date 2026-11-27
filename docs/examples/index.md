@@ -1,16 +1,18 @@
 # Examples
 
-Compare MSGB and k-Wave on a 48 × 48 grid in three standalone Colab notebooks.
+The Chapter 4 and Chapter 5 examples use the thesis’s 128 × 128 mixed two-packet source.
 
 | Example | What you will see | Notebook |
 | --- | --- | --- |
-| [Forward propagation](forward.md) | The pressure trace at one receiver and the relative difference across all 48 receivers. | [Open in Colab](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/forward/2d_forward_comparison.ipynb) |
-| [Time reversal](reconstruction.md#time-reversal) | Two initial pressure sources reconstructed by propagating their recordings backwards. | [Open in Colab](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal.ipynb) |
-| [Adjoint](reconstruction.md#adjoint) | The image each solver produces when its adjoint acts on the same detector recordings. | [Open in Colab](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_adjoint.ipynb) |
+| [Forward propagation](forward.md) | The k-Wave record, its differences from MSGB and Hybrid, and all three traces at the marked receiver. | [Open in Colab](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/forward/2d_forward_comparison.ipynb) |
+| [One-face time reversal and adjoint](reconstruction.md) | The five columns of the first box-scanner row and both marked profiles. | [Open in Colab](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal_and_adjoint.ipynb) |
+
+The [time-reversal](reconstruction.md#time-reversal) and [adjoint](reconstruction.md#adjoint)
+notebooks run the corresponding panels independently.
 
 Each notebook prints the elapsed time for the first solver call and an immediate
 repeat. Times include any JAX compilation during the call and the transfer of the
-result to the host. MSGB uses the selected JAX device with single-precision FFTs.
+result to the host. MSGB uses the selected JAX device. The examples enable double precision on CPU and GPU and single precision on TPU for its FFTs.
 The Python k-Wave backend runs on CPU. Each example displays its plot in Colab and
 saves a PNG under `plots/`.
 
@@ -19,8 +21,7 @@ To run the scripts locally, install the example dependencies from the checkout.
 ```sh
 python -m pip install -e ".[kwave,viz-mpl]"
 python examples/forward/2d_forward_comparison.py
-python examples/reconstruction/2d_time_reversal.py
-python examples/reconstruction/2d_adjoint.py
+python examples/reconstruction/2d_time_reversal_and_adjoint.py
 ```
 
 The [wave-packet tutorial](wave-packets.md) introduces the transform using the

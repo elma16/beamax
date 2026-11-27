@@ -10,11 +10,17 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 import numpy as np
 
+from beamax._comparison_plots import (
+    plot_packet_box_scanner,
+    plot_forward_records,
+)
 from beamax.decomposition import DyadicDecomposition
 
 __all__ = [
+    "plot_forward_records",
     "plot_mswpt_coeffs",
     "plot_mswpt_coeffs_3d",
+    "plot_packet_box_scanner",
     "use_beamax_style",
 ]
 

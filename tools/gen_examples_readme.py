@@ -87,11 +87,10 @@ python tools/run_examples.py --directory examples --include-optional --silent-fi
     )
     intro = """# Examples
 
-Compare MSGB and k-Wave in the [forward](forward/2d_forward_comparison.ipynb),
-[time-reversal](reconstruction/2d_time_reversal.ipynb), and
-[adjoint](reconstruction/2d_adjoint.ipynb) notebooks. Each prints first-call
-and repeat runtimes. Run the scripts from the repository root or use the
-Colab links below.
+Compare k-Wave, MSGB and Hybrid in the [forward notebook](forward/2d_forward_comparison.ipynb).
+Run [time reversal and adjoint](reconstruction/2d_time_reversal_and_adjoint.ipynb)
+on a single box-scanner acquisition, or run either operation separately.
+Each notebook prints first-call and repeat runtimes.
 
 ## Gallery
 """

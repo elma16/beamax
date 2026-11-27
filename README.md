@@ -49,10 +49,11 @@ MSGB reconstruction examples. [Apple silicon setup and benchmark](docs/guides/kw
 - [Decompose an initial pressure field](examples/wave-packets/2d_packet_selection.py) and see
   how much accuracy you retain with 16 or 64 wave-packet coefficients. This
   uses the base installation.
-- [Simulate a 2D measurement](examples/forward/2d_forward_comparison.ipynb)
-  with MSGB and k-Wave. Compare the pressure at a line of receivers.
-- Reconstruct the same two sources with [time reversal](examples/reconstruction/2d_time_reversal.ipynb)
-  or [the adjoint](examples/reconstruction/2d_adjoint.ipynb). Each notebook times MSGB and k-Wave.
+- Compare k-Wave, MSGB and Hybrid on the same periodic two-packet source in the
+  [forward notebook](examples/forward/2d_forward_comparison.ipynb).
+- Reconstruct one face of the homogeneous box scanner with k-Wave and MSGB in
+  the [time reversal and adjoint notebook](examples/reconstruction/2d_time_reversal_and_adjoint.ipynb).
+  Both notebooks print first-call and repeat runtimes.
 
 See the [example gallery](docs/examples/index.md) for setup, Colab notebooks
 and examples of ray bending, autodiff and absorption.

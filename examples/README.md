@@ -1,10 +1,9 @@
 # Examples
 
-Compare MSGB and k-Wave in the [forward](forward/2d_forward_comparison.ipynb),
-[time-reversal](reconstruction/2d_time_reversal.ipynb), and
-[adjoint](reconstruction/2d_adjoint.ipynb) notebooks. Each prints first-call
-and repeat runtimes. Run the scripts from the repository root or use the
-Colab links below.
+Compare k-Wave, MSGB and Hybrid in the [forward notebook](forward/2d_forward_comparison.ipynb).
+Run [time reversal and adjoint](reconstruction/2d_time_reversal_and_adjoint.ipynb)
+on a single box-scanner acquisition, or run either operation separately.
+Each notebook prints first-call and repeat runtimes.
 
 ## Gallery
 
@@ -14,13 +13,13 @@ Colab links below.
 
 ### Forward propagation
 
-- [`2d_forward_comparison.py`](forward/2d_forward_comparison.py) — Compare MSGB and k-Wave pressure recordings from a 2D wave packet. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/forward/2d_forward_comparison.ipynb)
+- [`2d_forward_comparison.py`](forward/2d_forward_comparison.py) — Compare k-Wave, MSGB and Hybrid records for the thesis mixed two-packet source. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/forward/2d_forward_comparison.ipynb)
 
 ### Reconstruction
 
-- [`2d_adjoint.py`](reconstruction/2d_adjoint.py) — Compare MSGB and k-Wave adjoint images from one detector line. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_adjoint.ipynb)
-- [`2d_time_reversal.py`](reconstruction/2d_time_reversal.py) — Compare MSGB and k-Wave time reversal images from one detector line. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal.ipynb)
-- [`2d_time_reversal_and_adjoint.py`](reconstruction/2d_time_reversal_and_adjoint.py) — Compare 2D MSGB and k-Wave time-reversal and adjoint reconstructions. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal_and_adjoint.ipynb)
+- [`2d_adjoint.py`](reconstruction/2d_adjoint.py) — Reproduce the adjoint panels for the first face of the thesis box scanner. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_adjoint.ipynb)
+- [`2d_time_reversal.py`](reconstruction/2d_time_reversal.py) — Reproduce the time-reversal panels for the first face of the thesis box scanner. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal.ipynb)
+- [`2d_time_reversal_and_adjoint.py`](reconstruction/2d_time_reversal_and_adjoint.py) — Compare time reversal and adjoint on the first face of the thesis box scanner. _(requires `beamax[kwave,viz-mpl]`; excluded from default smoke)_ [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal_and_adjoint.ipynb)
 
 ### Rays and autodiff
 

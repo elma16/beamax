@@ -1,17 +1,37 @@
 # Reconstruction
 
-Both short examples start from the same two pressure sources and record 192 time
-samples at 48 receivers on the left edge of the image. Each applies MSGB and
-k-Wave to the original recordings. The plots scale each panel by its own peak
-magnitude so you can compare source locations, shapes and polarity.
+## One-face time reversal and adjoint
+
+Run the Chapter 5 homogeneous box scanner with its first detector face. k-Wave
+records the mixed two-packet source on 128 boundary nodes of the open 128 × 128
+grid with a 20-cell external absorbing layer. Both operations use that acquisition.
+MSGB uses the thesis 256 × 128 detector-data transform and closed-form
+homogeneous propagation. The notebook prints first-call and repeat runtimes for
+the acquisition and each of the four reconstructions.
+
+The five panels show the initial pressure, k-Wave and MSGB time reversal, and
+k-Wave and MSGB adjoints. Red triangles mark the detectors. The two profiles
+use column 87 (zero-based), the dashed line in the thesis. The shared colour
+and profile limits come from the four-face plate. Its display factor of
+2,296.52776, fitted to the four-face k-Wave adjoint, applies to both displayed
+adjoints. The arrays returned by the solvers keep their physical amplitudes.
+
+![One detector face with the original pressure, four reconstructions and separate TR and adjoint profiles](../assets/examples/2d_time_reversal_and_adjoint.png)
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal_and_adjoint.ipynb)
+
+```python
+--8<-- "examples/reconstruction/2d_time_reversal_and_adjoint.py"
+```
 
 ## Time reversal
 
-Propagate the measured boundary pressure backwards to reconstruct the initial pressure.
+Run just the time-reversal pair to see how much of the initial pressure a single
+face recovers. The panels use the same image scale and profile as the combined figure.
 
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal.ipynb)
 
-![Initial pressure and both time reversal images](../assets/examples/2d_time_reversal.png)
+![One-face k-Wave and MSGB time reversal with the marked profile](../assets/examples/2d_time_reversal.png)
 
 ```python
 --8<-- "examples/reconstruction/2d_time_reversal.py"
@@ -19,36 +39,14 @@ Propagate the measured boundary pressure backwards to reconstruct the initial pr
 
 ## Adjoint
 
-Backproject the detector data using the Euclidean pairing for both solvers. MSGB approximates the PAT adjoint with Gaussian beams.
+Apply the two surface adjoints to the same pressure record and compare their
+relative gains along the marked line. The panels use the combined figure’s adjoint
+display factor.
 
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_adjoint.ipynb)
 
-![Initial pressure and both adjoint images](../assets/examples/2d_adjoint.png)
+![One-face k-Wave and MSGB adjoints with the marked profile](../assets/examples/2d_adjoint.png)
 
 ```python
 --8<-- "examples/reconstruction/2d_adjoint.py"
-```
-
-## 2D time reversal and adjoint
-
-A detector line on one side of a 64 × 64 grid records the signal from two
-Gaussian pressure sources of opposite sign. k-Wave generates the measurements.
-Time reversal propagates the recordings backwards. The PAT adjoint maps
-receiver data back to the image using the adjoint of the measurement model.
-The example applies both operations with each solver. Requires
-`beamax[kwave,viz-mpl]`.
-
-![Initial pressure, single-sided detector data, four reconstructions and their centre-line profiles](../assets/examples/2d_time_reversal_and_adjoint.png)
-
-Compare the source locations and the widths and signs of the peaks in the
-line profiles. The script resamples the records in time for MSGB and fits one
-scalar per reconstructed image to the known phantom before plotting and
-reporting relative L2 error. Those errors measure agreement in image shape
-after scaling. Testing an adjoint identity requires a separate dot-product
-test with the chosen data and image inner products.
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/elma16/beamax/blob/v0.4.0/examples/reconstruction/2d_time_reversal_and_adjoint.ipynb)
-
-```python
---8<-- "examples/reconstruction/2d_time_reversal_and_adjoint.py"
 ```
