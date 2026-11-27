@@ -222,3 +222,64 @@ def test_solver_adjoint_preserves_pairings_and_window(experiment):
     )
     with pytest.raises(ValueError, match="pairing"):
         solver.adjoint(y, domain, detectors=mask, front=-1, **opts)
+
+
+@pytest.mark.parametrize(
+    "pairing,reference_pairing",
+    [("surface_area", "arc_length"), ("element_sum", "element_sum")],
+)
+def test_circular_adjoint_matches_specialization(
+    experiment, pairing, reference_pairing
+):
+    from beamax.surfaces import ring_adjoint
+
+    solver, domain, ts, _, _ = experiment
+    surface = DetectorSurface.circle((1.0, 0.875), 0.5, 4, name="instrument")
+    dd = Domain((16, 4), (0.0625, *surface.spacing), (False, True))
+    wpt = MSWPT(DyadicDecomposition(1, dd.N, (2,), (4, 1)), 2, "rectangular_mirror")
+    y = np.random.default_rng(3).normal(size=dd.N)
+    taper = np.hanning(16)
+    points = domain.grid[3:5, 6:9]
+    image, diag = solver.adjoint(
+        y,
+        domain,
+        detectors=surface,
+        ts=ts,
+        data_wpt=wpt,
+        eval_points=points,
+        window=taper,
+        pairing=pairing,
+        return_diagnostics=True,
+    )
+    ref, _ = ring_adjoint(
+        y * taper[:, None],
+        dd,
+        wpt,
+        domain,
+        64,
+        centre=(1.0, 0.875),
+        radius=0.5,
+        pairing=reference_pairing,
+        eval_points=points,
+        batch_size=32,
+    )
+    assert diag["adjoint_formula"] == "circular"
+    np.testing.assert_allclose(image, ref, atol=2e-6, rtol=2e-5)
+
+
+def test_specialization_requires_eligible_geometry_and_exterior(experiment):
+    from beamax.surfaces.ring import circular_boundary_speed
+
+    _, domain, _, _, _ = experiment
+    for chart in [
+        DetectorSurface.circle((1.0, 1.0), 0.5, 8, front="outside"),
+        DetectorSurface.ellipse((1.0, 1.0), 0.6, 0.5, 8, name="circle"),
+        DetectorSurface.arc((1.0, 1.0), 0.5, 0.0, 1.5, 8),
+    ]:
+        assert circular_boundary_speed(chart, domain, None) is None
+    variable = Domain(
+        domain.N, domain.dx, domain.periodic, c=lambda x: 1.0 + 0.2 * x[..., 0]
+    )
+    ring = DetectorSurface.circle((1.0, 1.0), 0.5, 8)
+    assert circular_boundary_speed(ring, variable, 1.0) is None
+    assert circular_boundary_speed(ring, variable, None) is None

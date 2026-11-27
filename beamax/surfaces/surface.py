@@ -73,6 +73,8 @@ class DetectorSurface:
     name: str = "surface"
     active_bounds: tuple[tuple[float, float] | None, ...] | None = None
 
+    circle_geometry: tuple[tuple[float, float], float] | None = None
+
     # ------------------------------------------------------------------ validation
     def __post_init__(self):
         d = self.ndim
@@ -485,7 +487,8 @@ class DetectorSurface:
             name or f"circle R={radius:g}",
             toward=centre,
         )
-        return s if front == "inside" else _flip(s)
+        s = s if front == "inside" else _flip(s)
+        return replace(s, circle_geometry=(tuple(map(float, centre)), float(radius)))
 
     @classmethod
     def arc(cls, centre, radius, theta0, theta1, n, name=None):

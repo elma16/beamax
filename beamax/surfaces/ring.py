@@ -45,6 +45,38 @@ def ring_dirichlet_from_source(F, dt, R, c, symbol="exact", guard=0.05):
     return np.fft.ifft2(multiplier * spectrum)[:nt].real
 
 
+def circular_boundary_speed(surface, domain, exterior_speed):
+    """Return the common speed for an inward complete circle with a known exterior."""
+    if (
+        surface.circle_geometry is None
+        or surface.front_sign != 1
+        or surface.origin != (0.0,)
+        or surface.periodic != (True,)
+        or surface.active_bounds is not None
+        or not np.isclose(
+            surface.spacing[0] * surface.num_sensors, 2 * np.pi, rtol=1e-12
+        )
+        or domain.lam != 0
+    ):
+        return None
+    if domain.alpha_coeff is not None and np.any(
+        np.asarray(domain.alpha_coeff_array) != 0
+    ):
+        return None
+    if exterior_speed is None:
+        if callable(domain.c) or np.ndim(domain.c) != 0:
+            return None
+        exterior_speed = float(domain.c)
+    if not np.isfinite(exterior_speed) or exterior_speed <= 0:
+        raise ValueError("exterior_speed must be positive and finite.")
+    speeds = np.asarray(jax.vmap(domain.c_fn)(surface.positions()))
+    return (
+        float(exterior_speed)
+        if np.allclose(speeds, exterior_speed, rtol=1e-5, atol=0)
+        else None
+    )
+
+
 def ring_adjoint(
     data,
     data_domain,
@@ -56,6 +88,7 @@ def ring_adjoint(
     radius,
     pairing,
     boundary_speed=None,
+    window=None,
     symbol="exact",
     guard=0.05,
     eval_points=None,
@@ -94,6 +127,13 @@ def ring_adjoint(
     ds = 2 * np.pi * radius / ns
     if pairing not in ("arc_length", "element_sum"):
         raise ValueError("pairing must be 'arc_length' or 'element_sum'.")
+    if window is not None:
+        window = np.asarray(window)
+        if not np.isrealobj(window) or not np.all(np.isfinite(window)):
+            raise ValueError("The adjoint window must be real and finite.")
+        if window.ndim == 1:
+            window = window[:, None]
+        data = data * np.broadcast_to(window, data.shape)
     dt = data_domain.dx[0]
     w = 2 * np.pi * np.fft.rfftfreq(2 * nt, dt)
     derivative = np.fft.irfft(

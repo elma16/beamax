@@ -1659,6 +1659,7 @@ class MSGBSolver(eqx.Module):
         pairing=None,
         element_measures=None,
         guard=None,
+        exterior_speed=None,
         return_diagnostics=False,
         window: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray | tuple[jnp.ndarray, dict]:
@@ -1729,24 +1730,55 @@ class MSGBSolver(eqx.Module):
                     surface.shape
                 )
                 operator_pairing = "element_sum"
-            image, diagnostic = surface_adjoint(
-                data,
-                acquisition,
-                data_wpt,
-                surface,
-                domain,
-                self.thr,
-                pairing=operator_pairing,
+            from beamax.surfaces.ring import circular_boundary_speed, ring_adjoint
+
+            speed = circular_boundary_speed(surface, domain, exterior_speed)
+            options: dict[str, Any] = dict(
                 guard=guard,
                 window=window,
                 eval_points=eval_points,
                 **self._chart_options(domain, ts),
             )
+            if (
+                speed is not None
+                and surface.circle_geometry is not None
+                and not jnp.iscomplexobj(data)
+            ):
+                centre, radius = surface.circle_geometry
+                image, diagnostic = ring_adjoint(
+                    data,
+                    acquisition,
+                    data_wpt,
+                    domain,
+                    self.thr,
+                    centre=centre,
+                    radius=radius,
+                    boundary_speed=speed,
+                    pairing="arc_length"
+                    if operator_pairing == "surface_area"
+                    else "element_sum",
+                    **options,
+                )
+                diagnostic["adjoint_formula"] = "circular"
+            else:
+                image, diagnostic = surface_adjoint(
+                    data,
+                    acquisition,
+                    data_wpt,
+                    surface,
+                    domain,
+                    self.thr,
+                    pairing=operator_pairing,
+                    **options,
+                )
+                diagnostic["adjoint_formula"] = "general"
             image = image * scale
-            diagnostic["adjoint_formula"] = "general"
             return (image, diagnostic) if return_diagnostics else image
         if (
-            any(v is not None for v in (front, eval_points, pairing, element_measures))
+            any(
+                v is not None
+                for v in (front, eval_points, pairing, element_measures, exterior_speed)
+            )
             or return_diagnostics
             or guard is not None
         ):
