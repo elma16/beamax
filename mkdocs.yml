@@ -9,6 +9,8 @@ strict: true
 
 theme:
   name: material
+  logo: assets/beamax-logo-tile.png
+  favicon: assets/beamax-logo-tile.png
   features:
     - navigation.tabs
     - navigation.sections

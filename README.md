@@ -1,5 +1,11 @@
 # beamax
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/beamax-logo-tile.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/beamax-logo.svg">
+  <img src="https://elma16.github.io/beamax/assets/beamax-logo-tile.png" width="112" height="112" alt="Beamax bee with a Gaussian waveform for its body">
+</picture>
+
 [![CI](https://github.com/elma16/beamax/actions/workflows/run-tests.yml/badge.svg)](https://github.com/elma16/beamax/actions/workflows/run-tests.yml)
 [![codecov](https://codecov.io/gh/elma16/beamax/branch/main/graph/badge.svg)](https://codecov.io/gh/elma16/beamax)
 
